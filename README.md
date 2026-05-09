@@ -2,7 +2,9 @@
 
 本项目用于本地编排账号注册、Outlook 邮件 OTP、GoPay 支付和工作流看板。
 
-部分模块仅限授权研究、内部实验和非商用用途。支付和浏览器自动化相关实现参考并感谢 [DanOps-1/Gpt-Agreement-Payment](https://github.com/DanOps-1/Gpt-Agreement-Payment)。
+> 使用本项目即表示接受 [NOTICE.md](NOTICE.md)。本项目仅限授权研究、内部实验、协议分析、CTF/安全研究和教学验证，严禁商业化运营、账号批量生产或转售、代注册、代充值、规避支付、欺诈、未授权自动化，或任何违反第三方服务条款及适用法律法规的活动。
+
+支付和浏览器自动化相关实现参考并感谢 [DanOps-1/Gpt-Agreement-Payment](https://github.com/DanOps-1/Gpt-Agreement-Payment)。
 
 根仓统一管理 compose、共享 proto 和各服务目录：`account-db`、`browser-reg`、`dashboard`、`gopay-payment`、`orchestrator`、`outlook-imap-service`。
 

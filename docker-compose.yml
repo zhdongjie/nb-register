@@ -102,7 +102,6 @@ services:
       - GOPAY_PIN=${GOPAY_PIN}
       - GOPAY_PROXY_URL=${GOPAY_PROXY_URL:-socks5://host.docker.internal:10813}
       - GOPAY_OTP_WEBHOOK_LISTEN=0.0.0.0:8081
-      - GOPAY_OTP_WEBHOOK_TOKEN=${GOPAY_OTP_WEBHOOK_TOKEN:-}
     volumes:
       - ./gopay-payment/gopay-flow/config.json:/app/gopay-flow/config.json:ro
     extra_hosts:

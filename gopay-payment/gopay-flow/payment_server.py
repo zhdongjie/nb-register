@@ -236,21 +236,6 @@ class OtpService(otp_pb2_grpc.OtpServiceServicer):
         )
 
 
-def _extract_auth_token(headers, query: dict[str, list[str]], payload: Any) -> str:
-    auth = str(headers.get("Authorization") or "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    for key in ("X-GoPay-Webhook-Token", "X-Webhook-Token"):
-        value = str(headers.get(key) or "").strip()
-        if value:
-            return value
-    if query.get("token"):
-        return str(query["token"][0]).strip()
-    if isinstance(payload, dict):
-        return str(payload.get("token") or "").strip()
-    return ""
-
-
 def _payload_source(payload: Any, headers) -> str:
     if isinstance(payload, dict):
         for key in ("source", "from", "sender", "app", "appName", "packageName", "title"):
@@ -281,7 +266,7 @@ def _single_value_query(query: dict[str, list[str]]) -> dict[str, str]:
     return {key: str(values[0]) for key, values in query.items() if values}
 
 
-def _make_otp_webhook_handler(otp_store: OtpStore, token: str):
+def _make_otp_webhook_handler(otp_store: OtpStore):
     class OtpWebhookHandler(BaseHTTPRequestHandler):
         server_version = "GoPayOtpWebhook/1.0"
         allowed_paths = {"/otp", "/webhook", "/webhook/otp", "/gopay/otp"}
@@ -295,7 +280,7 @@ def _make_otp_webhook_handler(otp_store: OtpStore, token: str):
                 self._json(200, {"ok": True})
                 return
             if parsed.path in self.allowed_paths:
-                self._handle_submit(parsed, _single_value_query(parse_qs(parsed.query)))
+                self._handle_submit(_single_value_query(parse_qs(parsed.query)))
                 return
             self._json(404, {"ok": False, "error": "not found"})
 
@@ -314,14 +299,9 @@ def _make_otp_webhook_handler(otp_store: OtpStore, token: str):
                 except json.JSONDecodeError:
                     payload = raw
 
-            self._handle_submit(parsed, payload)
+            self._handle_submit(payload)
 
-        def _handle_submit(self, parsed, payload: Any):
-            query = parse_qs(parsed.query)
-            if token and _extract_auth_token(self.headers, query, payload) != token:
-                self._json(401, {"ok": False, "error": "unauthorized"})
-                return
-
+        def _handle_submit(self, payload: Any):
             code = _extract_otp_from_payload(payload)
             if not code:
                 source = _payload_source(payload, self.headers)
@@ -351,13 +331,13 @@ def _make_otp_webhook_handler(otp_store: OtpStore, token: str):
 
 
 class OtpWebhookServer:
-    def __init__(self, listen: str, otp_store: OtpStore, token: str):
+    def __init__(self, listen: str, otp_store: OtpStore):
         parsed = _parse_http_listen(listen)
         if parsed is None:
             self._server = None
             self._thread = None
             return
-        handler = _make_otp_webhook_handler(otp_store, token)
+        handler = _make_otp_webhook_handler(otp_store)
         self._server = ThreadingHTTPServer(parsed, handler)
         self._thread = threading.Thread(target=self._server.serve_forever, name="payment-otp-webhook", daemon=True)
 
@@ -496,11 +476,11 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
         return payment_pb2.CancelGoPayResponse(success=True)
 
 
-def serve(config_path: str, listen: str, flow_ttl_seconds: int, otp_webhook_listen: str, otp_webhook_token: str):
+def serve(config_path: str, listen: str, flow_ttl_seconds: int, otp_webhook_listen: str):
     cfg = _load_cfg(config_path)
     otp_store = OtpStore()
     service = PaymentService(cfg, flow_ttl_seconds=flow_ttl_seconds)
-    webhook_server = OtpWebhookServer(otp_webhook_listen, otp_store, otp_webhook_token)
+    webhook_server = OtpWebhookServer(otp_webhook_listen, otp_store)
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=4),
         options=[
@@ -531,7 +511,6 @@ def main():
     parser.add_argument("--listen", default=":50051")
     parser.add_argument("--flow-ttl", type=int, default=60)
     parser.add_argument("--otp-webhook-listen", default=os.getenv("GOPAY_OTP_WEBHOOK_LISTEN", ":8081"))
-    parser.add_argument("--otp-webhook-token", default=os.getenv("GOPAY_OTP_WEBHOOK_TOKEN", ""))
     args = parser.parse_args()
 
     serve(
@@ -539,7 +518,6 @@ def main():
         listen=args.listen,
         flow_ttl_seconds=args.flow_ttl,
         otp_webhook_listen=args.otp_webhook_listen,
-        otp_webhook_token=args.otp_webhook_token,
     )
 
 

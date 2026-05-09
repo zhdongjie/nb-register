@@ -24,7 +24,6 @@ GOPAY_COUNTRY_CODE=62
 GOPAY_PHONE_NUMBER=
 GOPAY_PIN=
 GOPAY_PROXY_URL=socks5://host.docker.internal:10813
-GOPAY_OTP_WEBHOOK_TOKEN=
 ```
 
 启动：
@@ -49,7 +48,7 @@ curl -fsS http://127.0.0.1:8080/api/health
 
 `compose.example.env` 已按使用频率分层：
 
-- `User settings`：首次运行必须确认，包含 Outlook 主邮箱、注册代理、GoPay 手机号/PIN/代理、OTP webhook token。
+- `User settings`：首次运行必须确认，包含 Outlook 主邮箱、注册代理、GoPay 手机号/PIN/代理。
 - `Optional host ports`：默认即可，只有本机端口冲突时再改。
 - `Stable defaults`：内部服务地址、数据库、Temporal、OTP 等待时间等，正常不要改。
 
@@ -95,11 +94,7 @@ curl -X POST http://127.0.0.1:8081/webhook/otp \
   -d '{"otp":"123456","source":"phone"}'
 ```
 
-也支持纯文本 payload。配置了 `GOPAY_OTP_WEBHOOK_TOKEN` 时，请求需要带：
-
-```bash
--H "Authorization: Bearer $GOPAY_OTP_WEBHOOK_TOKEN"
-```
+也支持纯文本 payload。
 
 GoPay 支付参数来自容器环境变量，不从 gRPC 请求传入：
 

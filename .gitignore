@@ -1,0 +1,102 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*_bin
+*-linux
+*.gz
+warp-pool/warp-pool
+warp-client/warp-client
+account-db/account-db
+account-db/accountdb_bin
+email-service/emailservice_bin
+orchestrator/orchestrator_bin
+outlook-imap-service/outlook-imap-service
+cloudflare-mail-dns/cloudflare-mail-dns
+cloudflare-mail-dns/pb/
+deploy.sh
+deploy-frps.sh
+deploy-browser-reg.sh
+
+# Sensitive / runtime
+vps.txt
+token.txt
+tokens/
+*.token
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.pcap
+*.pcapng
+*.har
+config.json
+config.local.json
+profile.json
+daemon.json
+state.json
+*.log
+.env
+.env.*
+!.env.example
+compose.env
+**/.env
+**/.env.*
+!**/.env.example
+frpc.toml
+*.local.toml
+test_*.go
+wa_otp.txt
+whatsapp-relay/data/
+whatsapp-relay/node_modules/
+gopay-payment/captures/
+gopay-payment/output/
+captures/
+
+# Test
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Old implementation
+old/
+
+# Browser reg runtime
+browser-reg/__pycache__/
+browser-reg/*.pyc
+browser-reg/.venv/
+browser-reg/register_pb2.py
+browser-reg/register_pb2_grpc.py
+/tmp/screenshots/
+
+# GoPay/DanOps runtime
+gopay-payment/.venv/
+gopay-payment/**/__pycache__/
+gopay-payment/**/*.pyc
+
+# Scratch
+scratch/
+.playwright-cli/
+.env
+
+# Service repositories are managed independently. The root repository only
+# keeps compose/docs/shared proto files and must not commit nested repos.
+account-db/
+browser-reg/
+dashboard/
+email-service/
+gopay-payment/
+orchestrator/
+outlook-imap-service/
+whatsapp-relay/

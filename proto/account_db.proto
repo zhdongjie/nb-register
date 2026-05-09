@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package accountdb;
+
+option go_package = "./;pb";
+
+message Account {
+  string account_id = 1;
+  string email = 2;
+  string password = 3;
+  reserved 4;
+  string status = 5;
+  string error_message = 6;
+  string session_token = 7;
+  string charge_ref = 8;
+  string first_name = 9;
+  string last_name = 10;
+  string dob = 11; // YYYY-MM-DD
+  int64 created_at = 12;
+  int64 updated_at = 13;
+  string access_token = 14;
+}
+
+message CreateAccountRequest {
+  Account account = 1;
+}
+
+message CreateAccountResponse {
+  Account account = 1;
+}
+
+message GetAccountRequest {
+  string account_id = 1;
+}
+
+message GetAccountResponse {
+  Account account = 1;
+}
+
+message UpdateAccountRequest {
+  Account account = 1;
+}
+
+message UpdateAccountResponse {
+  Account account = 1;
+}
+
+message DeleteAccountRequest {
+  string account_id = 1;
+}
+
+message DeleteAccountResponse {
+  bool ack = 1;
+}
+
+message ListAccountsRequest {
+  string status = 1;
+  int32 limit = 2;
+}
+
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+}
+
+service AccountDatabaseService {
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+}

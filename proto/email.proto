@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package email;
+
+option go_package = "./;pb";
+
+message GetEmailRequest {
+  string domain = 1;
+  string prefix = 2; // e.g., "alexandermiller"
+}
+
+message GetEmailResponse {
+  string email_address = 1;
+}
+
+message WaitForEmailRequest {
+  string email_address = 1;
+  string subject_keyword = 2; // e.g., "OTP" or "验证码"
+  int32 timeout_seconds = 3;
+  int64 issued_after_unix = 4;
+}
+
+message WaitForEmailResponse {
+  bool found = 1;
+  string content_extracted = 2; // the OTP
+}
+
+service EmailService {
+  rpc GetEmail(GetEmailRequest) returns (GetEmailResponse);
+  rpc WaitForEmail(WaitForEmailRequest) returns (WaitForEmailResponse);
+}

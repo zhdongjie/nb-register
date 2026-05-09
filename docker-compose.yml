@@ -1,0 +1,144 @@
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:15-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-nb_register}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nb_register}
+      - POSTGRES_DB=${POSTGRES_DB:-nb_register}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: always
+
+  temporal:
+    image: docker.m.daocloud.io/temporalio/auto-setup:1.29.2
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-nb_register}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-nb_register}
+      - POSTGRES_SEEDS=postgres
+      - DBNAME=${TEMPORAL_DB:-temporal}
+      - VISIBILITY_DBNAME=${TEMPORAL_VISIBILITY_DB:-temporal_visibility}
+    depends_on:
+      postgres:
+        condition: service_started
+    restart: always
+
+  outlook-imap-service:
+    build:
+      context: ./outlook-imap-service
+      dockerfile: Dockerfile
+    ports:
+      - "${OUTLOOK_GRPC_PORT:-50053}:50051" # gRPC
+    environment:
+      - LISTEN_ADDR=:50051
+      - TOKEN_DIR=${TOKEN_DIR:-tokens}
+    volumes:
+      - ./outlook-imap-service/tokens:/app/tokens
+    restart: always
+
+  account-db:
+    build:
+      context: ./account-db
+      dockerfile: Dockerfile
+    ports:
+      - "${ACCOUNT_DB_GRPC_PORT:-50052}:50051"
+    environment:
+      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - LISTEN_ADDR=:50051
+      - OUTLOOK_EMAIL=${OUTLOOK_EMAIL}
+      - OUTLOOK_ALIAS_RANDOM_LENGTH=${OUTLOOK_ALIAS_RANDOM_LENGTH:-6}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_started
+    restart: always
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "${ORCHESTRATOR_GRPC_PORT:-50055}:50051" # API
+    environment:
+      - LISTEN_ADDR=:50051
+      - BROWSER_ADDR=browser-reg:50051
+      - PAYMENT_ADDR=${PAYMENT_ADDR:-gopay-payment:50051}
+      - ACCOUNT_DB_ADDR=account-db:50051
+      - EMAIL_ADDR=outlook-imap-service:50051
+      - OTP_ADDR=${OTP_ADDR:-gopay-payment:50051}
+      - GOPAY_OTP_SERVICE_ADDR=${GOPAY_OTP_SERVICE_ADDR:-gopay-payment:50051}
+      - GOPAY_OTP_TIMEOUT_SECONDS=${GOPAY_OTP_TIMEOUT_SECONDS:-60}
+      - TEMPORAL_DEV_SERVER=false
+      - TEMPORAL_ADDR=temporal:7233
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-nb-register-orchestrator}
+      - ORCHESTRATOR_PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - account-db
+      - gopay-payment
+      - outlook-imap-service
+      - postgres
+      - temporal
+    restart: always
+
+  gopay-payment:
+    build:
+      context: ./gopay-payment
+      dockerfile: Dockerfile
+    ports:
+      - "${GOPAY_GRPC_PORT:-50054}:50051"
+      - "0.0.0.0:${GOPAY_WEBHOOK_PORT:-8081}:8081"
+    environment:
+      - GOPAY_COUNTRY_CODE=${GOPAY_COUNTRY_CODE:-62}
+      - GOPAY_PHONE_NUMBER=${GOPAY_PHONE_NUMBER}
+      - GOPAY_PIN=${GOPAY_PIN}
+      - GOPAY_PROXY_URL=${GOPAY_PROXY_URL:-socks5://host.docker.internal:10813}
+      - GOPAY_OTP_WEBHOOK_LISTEN=0.0.0.0:8081
+      - GOPAY_OTP_WEBHOOK_TOKEN=${GOPAY_OTP_WEBHOOK_TOKEN:-}
+    volumes:
+      - ./gopay-payment/gopay-flow/config.json:/app/gopay-flow/config.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    environment:
+      - LISTEN_ADDR=:8080
+      - ACCOUNT_DB_ADDR=account-db:50051
+      - ORCHESTRATOR_ADDR=orchestrator:50051
+      - ORCHESTRATOR_PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+    depends_on:
+      - account-db
+      - orchestrator
+      - postgres
+    restart: always
+
+  browser-reg:
+    build:
+      context: ./browser-reg
+      dockerfile: Dockerfile
+    ports:
+      - "${BROWSER_REG_GRPC_PORT:-50050}:50051"
+    environment:
+      - GRPC_PORT=50051
+      - PROXY_URL=${REGISTER_PROXY_URL:-socks5://host.docker.internal:10813}
+      - EMAIL_ADDR=outlook-imap-service:50051
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+volumes:
+  pgdata:

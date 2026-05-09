@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package orchestrator;
+
+option go_package = "./;pb";
+
+message RequestAccountRequest {
+  // Optional filters or tags
+}
+
+message RequestAccountResponse {
+  string job_id = 1;
+  string session_token = 2;
+  bool plus_trial_eligible = 3;
+  string error_message = 4;
+  string checkout_url = 5;
+  string access_token = 6;
+}
+
+message RegisterAccountRequest {
+  string email = 1;
+  string password = 2;
+  reserved 3, 4, 5;
+  reserved "first_name", "last_name", "dob";
+  string account_id = 6;
+}
+
+message RegisterAccountResponse {
+  string job_id = 1;
+  string session_token = 2;
+  bool plus_trial_eligible = 3;
+  string error_message = 4;
+  string checkout_url = 5;
+  string access_token = 6;
+}
+
+message ActivateAccountRequest {
+  // Existing registration job_id used to resolve account_id.
+  // The response returns a new activation job_id.
+  string job_id = 1;
+  reserved 2, 3, 4, 5, 6, 7, 8;
+  string account_id = 9;
+}
+
+message ActivateAccountResponse {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  string charge_ref = 4;
+  string snap_token = 5;
+}
+
+message RegisterAndActivateAccountRequest {
+  reserved 1, 2, 3, 4, 5, 8, 9, 10;
+  string email = 6;
+  string password = 7;
+  string account_id = 11;
+}
+
+message RegisterAndActivateAccountResponse {
+  string job_id = 1;
+  string session_token = 2;
+  bool plus_trial_eligible = 3;
+  string checkout_url = 4;
+  bool activation_success = 5;
+  string error_message = 6;
+  string charge_ref = 7;
+  string snap_token = 8;
+  string access_token = 9;
+}
+
+message JobStep {
+  string step_name = 1;
+  string status = 2;
+  bool recoverable = 3;
+  bool retryable = 4;
+  string error_message = 5;
+  string result_json = 6;
+  int64 started_at = 7;
+  int64 completed_at = 8;
+}
+
+message Job {
+  string job_id = 1;
+  string account_id = 2;
+  string action = 3;
+  string status = 4;
+  bool recoverable = 5;
+  bool retryable = 6;
+  string last_step = 7;
+  string error_message = 8;
+  string result_json = 9;
+  int64 created_at = 10;
+  int64 updated_at = 11;
+  repeated JobStep steps = 12;
+}
+
+message GetJobRequest {
+  string job_id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+  string error_message = 2;
+}
+
+service OrchestratorService {
+  rpc RegisterAccount(RegisterAccountRequest) returns (RegisterAccountResponse);
+  rpc ActivateAccount(ActivateAccountRequest) returns (ActivateAccountResponse);
+  rpc RegisterAndActivateAccount(RegisterAndActivateAccountRequest) returns (RegisterAndActivateAccountResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+
+  // Deprecated: use RegisterAccount.
+  rpc RequestAccount(RequestAccountRequest) returns (RequestAccountResponse);
+}

@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package browser;
+
+option go_package = "./;pb";
+
+message RegisterRequest {
+  string job_id = 1;
+  string assigned_email = 2;
+  reserved 3;
+  string password = 4;
+  string first_name = 5;
+  string last_name = 6;
+  string birthday = 7;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string error_message = 2;
+  string session_token = 3;
+  string access_token = 4;
+  string device_id = 5;
+  bool plus_trial_eligible = 6;
+  string checkout_url = 7;
+}
+
+message StartRegisterResponse {
+  bool success = 1;
+  string error_message = 2;
+  string flow_id = 3;
+  bool otp_required = 4;
+  RegisterResponse result = 5;
+  int64 otp_issued_after_unix = 6;
+}
+
+message CompleteRegisterRequest {
+  string flow_id = 1;
+  string otp = 2;
+}
+
+message CancelRegisterRequest {
+  string flow_id = 1;
+}
+
+message CancelRegisterResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+service BrowserRegistration {
+  rpc StartRegister(RegisterRequest) returns (StartRegisterResponse);
+  rpc CompleteRegister(CompleteRegisterRequest) returns (RegisterResponse);
+  rpc CancelRegister(CancelRegisterRequest) returns (CancelRegisterResponse);
+}

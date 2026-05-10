@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package orchestrator;
 
+import "email.proto";
+
 option go_package = "./;pb";
 
 message RequestAccountRequest {
@@ -168,6 +170,33 @@ message SubmitRegistrationOtpResponse {
   string error_message = 3;
 }
 
+message FetchMailboxInboxesRequest {
+  int32 limit_per_mailbox = 1;
+  int32 max_mailboxes = 2;
+  string email_address = 3;
+}
+
+message MailboxBanDetection {
+  string account_id = 1;
+  string email_address = 2;
+  string mailbox_email = 3;
+  string from_address = 4;
+  string subject = 5;
+  int64 received_at_unix = 6;
+  bool account_updated = 7;
+  string error_message = 8;
+}
+
+message FetchMailboxInboxesResponse {
+  repeated email.FetchMailboxInboxResult results = 1;
+  int32 mailbox_count = 2;
+  int32 fetched_count = 3;
+  int32 failed_count = 4;
+  int32 message_count = 5;
+  repeated MailboxBanDetection bans = 6;
+  int32 ban_count = 7;
+}
+
 service OrchestratorService {
   rpc RegisterAccount(RegisterAccountRequest) returns (RegisterAccountResponse);
   rpc ActivateAccount(ActivateAccountRequest) returns (ActivateAccountResponse);
@@ -176,6 +205,7 @@ service OrchestratorService {
   rpc RegisterAndActivateAccount(RegisterAndActivateAccountRequest) returns (RegisterAndActivateAccountResponse);
   rpc RegisterMailbox(RegisterMailboxRequest) returns (RegisterMailboxResponse);
   rpc RunMailboxOAuth(StartMailboxOAuthRequest) returns (StartMailboxOAuthResponse);
+  rpc FetchMailboxInboxes(FetchMailboxInboxesRequest) returns (FetchMailboxInboxesResponse);
   rpc SubmitRegistrationOtp(SubmitRegistrationOtpRequest) returns (SubmitRegistrationOtpResponse);
   rpc GetJob(GetJobRequest) returns (GetJobResponse);
 

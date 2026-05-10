@@ -6,6 +6,8 @@ Usage:
     python -m browser_reg.outlook_flow --proxy socks5://127.0.0.1:10814
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import logging
@@ -24,6 +26,11 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _is_target_closed(exc: Exception) -> bool:
+    """Check if an exception is a Playwright TargetClosedError by class name."""
+    return type(exc).__name__ == "TargetClosedError"
 
 BOT_PROTECTION_WAIT = 11  # seconds
 
@@ -217,6 +224,9 @@ def _complete_microsoft_oauth_page(
         if current_url != last_url:
             last_url = current_url
             logger.info("[oauth] page url changed: %s", current_url.split("?", 1)[0])
+        parsed_url = urlparse(current_url)
+        if parsed_url.netloc.lower() == "account.live.com" and parsed_url.path.lower().startswith("/abuse"):
+            return "", "NEEDS_MANUAL_VERIFICATION: Microsoft account redirected to account.live.com/Abuse"
 
         code, error = _oauth_code_from_url(current_url)
         if code:
@@ -444,8 +454,9 @@ def _handle_captcha(page, max_retries=3) -> bool:
                             box = loc.first.bounding_box(timeout=500)
                             if box and box['width'] > 0 and box['height'] > 0:
                                 return loc.first
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        if _is_target_closed(exc):
+                            raise
             page.wait_for_timeout(300)
         return None
 
@@ -453,83 +464,103 @@ def _handle_captcha(page, max_retries=3) -> bool:
     press_sel = ['[aria-label="再次按下"]', '[aria-label*="按住"]',
                  '[aria-label*="Press and hold"]', '[aria-label*="Press"]']
 
-    for attempt in range(max_retries + 1):
-        page.wait_for_timeout(random.randint(200, 500))
+    try:
+        for attempt in range(max_retries + 1):
+            page.wait_for_timeout(random.randint(200, 500))
 
-        # Step 1: Click accessible challenge button
-        logger.info("[captcha] Looking for accessible challenge (attempt %d/%d)...", attempt + 1, max_retries)
-        acc_btn = _find_in_any_frame(accessible_sel, timeout=10000)
-        if acc_btn:
-            try:
-                _click_with_bezier(page, acc_btn, hold_ms=0)
-                logger.info("[captcha] Clicked accessible challenge")
-            except Exception as e:
-                logger.warning("[captcha] Click accessible failed: %s", e)
-        else:
-            logger.warning("[captcha] No accessible challenge button found")
+            # Step 1: Click accessible challenge button
+            logger.info("[captcha] Looking for accessible challenge (attempt %d/%d)...", attempt + 1, max_retries)
+            acc_btn = _find_in_any_frame(accessible_sel, timeout=10000)
+            if acc_btn:
+                try:
+                    _click_with_bezier(page, acc_btn, hold_ms=0)
+                    logger.info("[captcha] Clicked accessible challenge")
+                except Exception as e:
+                    if _is_target_closed(e):
+                        raise
+                    logger.warning("[captcha] Click accessible failed: %s", e)
+            else:
+                logger.warning("[captcha] No accessible challenge button found")
 
-        # Step 2: Click the action button
-        page.wait_for_timeout(random.randint(300, 600))
-        logger.info("[captcha] Looking for action button...")
-        press_btn = _find_in_any_frame(press_sel, timeout=10000)
-        if not press_btn:
-            logger.error("[captcha] No action button found")
-            return False
-
-        try:
-            _click_with_bezier(page, press_btn, hold_ms=0)
-            logger.info("[captcha] Action button clicked")
-        except Exception as e:
-            logger.error("[captcha] Action button click failed: %s", e)
-            return False
-
-        # Step 3: Wait for draw canvas to detach
-        try:
-            logger.info("[captcha] Waiting for challenge to resolve (.draw detach)...")
-            page.locator('.draw').wait_for(state="detached", timeout=15000)
-            logger.info("[captcha] Challenge resolved")
-        except Exception:
-            if page.get_by_text('取消').count() > 0:
-                logger.info("[captcha] passed (cancel button)")
-                return True
-            logger.info("[captcha] .draw detach timeout, continuing to next attempt")
-            continue
-
-        # Step 4: Check result
-        try:
-            logger.info("[captcha] Checking result, waiting for loading indicator...")
-            page.locator('[role="status"][aria-label="正在加载..."]').wait_for(timeout=5000)
-            page.wait_for_timeout(8000)
-
-            if page.get_by_text('一些异常活动').count() > 0 or page.get_by_text('此站点正在维护').count() > 0:
-                logger.error("[captcha] Rate limited")
-                return False
-
-            # Check if challenge button reappeared (need retry)
-            logger.info("[captcha] Checking if challenge reappeared...")
-            retry_btn = _find_in_any_frame(accessible_sel, timeout=3000)
-            if retry_btn:
-                logger.info("[captcha] Need retry, attempt %d/%d", attempt + 1, max_retries)
+            # Step 2: Click the action button
+            page.wait_for_timeout(random.randint(300, 600))
+            logger.info("[captcha] Looking for action button...")
+            press_btn = _find_in_any_frame(press_sel, timeout=10000)
+            if not press_btn:
+                logger.warning("[captcha] No action button found, retrying...")
                 continue
 
-            logger.info("[captcha] passed on attempt %d", attempt + 1)
-            return True
+            try:
+                _click_with_bezier(page, press_btn, hold_ms=0)
+                logger.info("[captcha] Action button clicked")
+            except Exception as e:
+                if _is_target_closed(e):
+                    raise
+                logger.error("[captcha] Action button click failed: %s", e)
+                return False
 
-        except Exception:
-            if page.get_by_text('取消').count() > 0:
-                logger.info("[captcha] passed (cancel button)")
-                return True
-            # Check for "请再试一次" in any frame
-            logger.info("[captcha] Checking for retry text in frames...")
-            for frame in page.frames:
+            # Step 3: Wait for draw canvas to detach
+            try:
+                logger.info("[captcha] Waiting for challenge to resolve (.draw detach)...")
+                page.locator('.draw').wait_for(state="detached", timeout=15000)
+                logger.info("[captcha] Challenge resolved")
+            except Exception as e:
+                if _is_target_closed(e):
+                    raise
                 try:
-                    if frame.get_by_text("请再试一次").count() > 0:
-                        logger.info("[captcha] Retry requested")
-                        break
+                    if page.get_by_text('取消').count() > 0:
+                        logger.info("[captcha] passed (cancel button)")
+                        return True
                 except Exception:
                     pass
-            logger.info("[captcha] End of attempt %d, continuing...", attempt + 1)
-            continue
+                logger.info("[captcha] .draw detach timeout, continuing to next attempt")
+                continue
+
+            # Step 4: Check result
+            try:
+                logger.info("[captcha] Checking result, waiting for loading indicator...")
+                page.locator('[role="status"][aria-label="正在加载..."]').wait_for(timeout=5000)
+                page.wait_for_timeout(8000)
+
+                if page.get_by_text('一些异常活动').count() > 0 or page.get_by_text('此站点正在维护').count() > 0:
+                    logger.error("[captcha] Rate limited")
+                    return False
+
+                # Check if challenge button reappeared (need retry)
+                logger.info("[captcha] Checking if challenge reappeared...")
+                retry_btn = _find_in_any_frame(accessible_sel, timeout=3000)
+                if retry_btn:
+                    logger.info("[captcha] Need retry, attempt %d/%d", attempt + 1, max_retries)
+                    continue
+
+                logger.info("[captcha] passed on attempt %d", attempt + 1)
+                return True
+
+            except Exception as e:
+                if _is_target_closed(e):
+                    raise
+                try:
+                    if page.get_by_text('取消').count() > 0:
+                        logger.info("[captcha] passed (cancel button)")
+                        return True
+                except Exception:
+                    pass
+                # Check for "请再试一次" in any frame
+                logger.info("[captcha] Checking for retry text in frames...")
+                for frame in page.frames:
+                    try:
+                        if frame.get_by_text("请再试一次").count() > 0:
+                            logger.info("[captcha] Retry requested")
+                            break
+                    except Exception:
+                        pass
+                logger.info("[captcha] End of attempt %d, continuing...", attempt + 1)
+                continue
+    except Exception as e:
+        if _is_target_closed(e):
+            logger.error("[captcha] Browser page/context closed unexpectedly during CAPTCHA")
+            return False
+        raise
 
     logger.error("[captcha] all attempts exhausted")
     return False
@@ -544,6 +575,7 @@ def outlook_register(
     email_suffix: str = "@outlook.com",
     max_captcha_retries: int = 3,
     should_cancel_fn: Optional[Callable[[], bool]] = None,
+    debug: bool = False,
 ) -> dict:
     from camoufox.sync_api import Camoufox
     from browserforge.fingerprints import Screen
@@ -576,12 +608,22 @@ def outlook_register(
     )
     os.makedirs(ss_dir, exist_ok=True)
 
+    def _debug_pause(msg: str = ""):
+        """In debug mode, pause and keep the browser open for inspection."""
+        if not debug:
+            return
+        logger.info("[debug] %s", msg or "Pausing for inspection. Press Enter to continue...")
+        try:
+            input("[DEBUG] Press Enter to close browser and exit...")
+        except EOFError:
+            pass
+
     try:
         import platform as _plat
-        headless = "virtual" if _plat.system() == "Linux" else False
+        headless = "virtual" if _plat.system() == "Linux" else (False if debug else False)
 
         with Camoufox(
-            headless=headless, humanize=True, persistent_context=True,
+            headless=False if debug else headless, humanize=True, persistent_context=True,
             user_data_dir=tmp_profile, screen=Screen(max_width=1920, max_height=1080),
             proxy=cf_proxy, geoip=True, locale="zh-CN",
         ) as ctx:
@@ -591,7 +633,7 @@ def outlook_register(
             logger.info("[outlook] Opening signup...")
             try:
                 page.goto("https://outlook.live.com/mail/0/?prompt=create_account",
-                          timeout=20000, wait_until="domcontentloaded")
+                          timeout=60000, wait_until="domcontentloaded")
                 page.get_by_text('同意并继续').wait_for(timeout=30000)
                 start_time = time.time()
                 page.wait_for_timeout(int(0.1 * wait_ms))
@@ -601,6 +643,7 @@ def outlook_register(
                 page.screenshot(path=os.path.join(ss_dir, "outlook_no_consent.png"))
                 result["error"] = f"IP quality issue, cannot enter signup: {e}"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             # [2] Fill email
@@ -619,6 +662,7 @@ def outlook_register(
                 page.screenshot(path=os.path.join(ss_dir, "outlook_email_error.png"))
                 result["error"] = f"Email fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             # [3] Fill password
@@ -633,6 +677,7 @@ def outlook_register(
                 page.screenshot(path=os.path.join(ss_dir, "outlook_pwd_error.png"))
                 result["error"] = f"Password fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             # [4] Fill birthday + name (same page)
@@ -718,6 +763,7 @@ def outlook_register(
                 page.screenshot(path=os.path.join(ss_dir, "outlook_form_error.png"))
                 result["error"] = f"Form fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             # [5] Check for rate limit before captcha
@@ -726,31 +772,68 @@ def outlook_register(
                 page.screenshot(path=os.path.join(ss_dir, "outlook_rate_limit.png"))
                 result["error"] = "Rate limited (IP flagged)"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             if page.locator('iframe#enforcementFrame').count() > 0:
                 page.screenshot(path=os.path.join(ss_dir, "outlook_funcaptcha.png"))
                 result["error"] = "FunCaptcha type detected (not press-and-hold)"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
+
+            # [5.5] Check if registration passed without CAPTCHA (no risk control)
+            current_url = page.url
+            has_captcha_frame = any(
+                'arkoselabs.com' in fr.url or 'funcaptcha' in fr.url
+                or 'perimeterx' in fr.url or 'human.com' in fr.url
+                for fr in page.frames if fr.url
+            )
+            has_captcha_elements = page.locator(
+                '[aria-label="可访问性挑战"], [aria-label="Accessible challenge"]'
+            ).count() > 0
+
+            if not has_captcha_frame and not has_captcha_elements:
+                # No CAPTCHA elements found - check if we're already on the success page
+                if 'outlook.live.com/mail' in current_url or 'outlook.office.com' in current_url:
+                    logger.info("[outlook] No CAPTCHA detected, already on mailbox page - registration successful!")
+                    result["success"] = True
+                    result["email"] = full_email
+                    logger.info("[outlook] ✅ Registration successful (no CAPTCHA): %s", full_email)
+                    return result
+                # Wait briefly and re-check (page might be transitioning)
+                page.wait_for_timeout(3000)
+                current_url = page.url
+                if 'outlook.live.com/mail' in current_url or 'outlook.office.com' in current_url:
+                    logger.info("[outlook] No CAPTCHA detected after wait - registration successful!")
+                    result["success"] = True
+                    result["email"] = full_email
+                    logger.info("[outlook] ✅ Registration successful (no CAPTCHA): %s", full_email)
+                    return result
 
             # [6] Handle CAPTCHA
             logger.info("[outlook] Handling CAPTCHA...")
             captcha_ok = _handle_captcha(page, max_retries=max_captcha_retries)
             if not captcha_ok:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_captcha_fail.png"))
+                try:
+                    page.screenshot(path=os.path.join(ss_dir, "outlook_captcha_fail.png"))
+                except Exception:
+                    pass
                 result["error"] = "CAPTCHA failed"
                 logger.error("[outlook] %s", result["error"])
+                _debug_pause(result["error"])
                 return result
 
             # [7] Success!
             result["success"] = True
             result["email"] = full_email
             logger.info("[outlook] ✅ Registration successful: %s", full_email)
+            _debug_pause("Registration successful! Browser kept open for inspection.")
 
     except Exception as e:
         result["error"] = str(e)
         logger.exception("[outlook] Registration failed")
+        _debug_pause(f"Registration failed: {e}")
     finally:
         try:
             shutil.rmtree(tmp_profile, ignore_errors=True)
@@ -773,10 +856,11 @@ def main():
     parser.add_argument("--suffix", default=os.environ.get("OUTLOOK_REGISTER_EMAIL_SUFFIX", "@outlook.com"), help="Email suffix")
     parser.add_argument("--max-retries", type=int, default=int(os.environ.get("OUTLOOK_REGISTER_MAX_CAPTCHA_RETRIES", "3")), help="Max CAPTCHA retries")
     parser.add_argument("--results-dir", default=os.environ.get("OUTLOOK_REGISTER_RESULTS_DIR", ""), help="Directory to output results")
+    parser.add_argument("--debug", action="store_true", default=False, help="Keep browser open on failure for debugging")
     args = parser.parse_args()
 
     result = outlook_register(proxy=args.proxy, email_suffix=args.suffix,
-                              max_captcha_retries=args.max_retries)
+                              max_captcha_retries=args.max_retries, debug=args.debug)
 
     if args.results_dir:
         os.makedirs(args.results_dir, exist_ok=True)

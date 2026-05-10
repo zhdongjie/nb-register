@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,7 +20,9 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"dashboard/pb"
 )
@@ -75,6 +78,7 @@ type upsertMailboxRequest struct {
 	RefreshToken string `json:"refresh_token"`
 	AccessToken  string `json:"access_token"`
 	Status       string `json:"status"`
+	AuthStatus   string `json:"auth_status"`
 	LastError    string `json:"last_error"`
 }
 
@@ -82,6 +86,12 @@ type mailboxOAuthRequest struct {
 	EmailAddress string `json:"email_address"`
 	OnlyMissing  bool   `json:"only_missing"`
 	Limit        int32  `json:"limit"`
+}
+
+type mailboxInboxRequest struct {
+	LimitPerMailbox int32  `json:"limit_per_mailbox"`
+	MaxMailboxes    int32  `json:"max_mailboxes"`
+	EmailAddress    string `json:"email_address"`
 }
 
 type submitJobOTPRequest struct {
@@ -137,6 +147,8 @@ func main() {
 	mux.HandleFunc("/api/accounts/", s.handleAccount)
 	mux.HandleFunc("/api/mailboxes/register", s.handleMailboxRegister)
 	mux.HandleFunc("/api/mailboxes/oauth", s.handleMailboxOAuth)
+	mux.HandleFunc("/api/mailboxes/inbox", s.handleMailboxInbox)
+	mux.HandleFunc("/api/mailboxes/", s.handleMailbox)
 	mux.HandleFunc("/api/mailboxes", s.handleMailboxes)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/", s.handleJob)
@@ -235,6 +247,7 @@ func (s *server) handleMailboxes(w http.ResponseWriter, r *http.Request) {
 			RefreshToken: req.RefreshToken,
 			AccessToken:  req.AccessToken,
 			Status:       req.Status,
+			AuthStatus:   req.AuthStatus,
 			LastError:    req.LastError,
 			IsPrimary:    true,
 			PrimaryEmail: req.Email,
@@ -244,6 +257,26 @@ func (s *server) handleMailboxes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, resp.GetMailbox())
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) handleMailbox(w http.ResponseWriter, r *http.Request) {
+	emailPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/mailboxes/"), "/")
+	email, err := url.PathUnescape(emailPath)
+	if err != nil || strings.TrimSpace(email) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("email_address is required"))
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		resp, err := s.emailClient.DeleteMailbox(r.Context(), &pb.DeleteMailboxRequest{EmailAddress: strings.TrimSpace(email)})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -329,6 +362,53 @@ func (s *server) handleMailboxOAuth(w http.ResponseWriter, r *http.Request) {
 		"error_message": resp.GetErrorMessage(),
 		"backend":       "outlook-register-service",
 	})
+}
+
+func (s *server) handleMailboxInbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req mailboxInboxRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.LimitPerMailbox <= 0 {
+		req.LimitPerMailbox = 10
+	}
+	if req.LimitPerMailbox > 100 {
+		req.LimitPerMailbox = 100
+	}
+	if req.MaxMailboxes <= 0 {
+		req.MaxMailboxes = 100
+	}
+	if req.MaxMailboxes > 500 {
+		req.MaxMailboxes = 500
+	}
+
+	timeout := envInt("MAILBOX_INBOX_TIMEOUT_SECONDS", 180)
+	if timeout < 30 {
+		timeout = 30
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	resp, err := s.orchestratorClient.FetchMailboxInboxes(ctx, &pb.FetchMailboxInboxesRequest{
+		LimitPerMailbox: req.LimitPerMailbox,
+		MaxMailboxes:    req.MaxMailboxes,
+		EmailAddress:    strings.TrimSpace(req.EmailAddress),
+	})
+	if err != nil {
+		if status.Code(err) == codes.DeadlineExceeded {
+			writeError(w, http.StatusGatewayTimeout, err)
+			return
+		}
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {

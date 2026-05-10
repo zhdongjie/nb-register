@@ -49,6 +49,12 @@ const (
 	emailStatusUserAlreadyExists = "USER_ALREADY_EXISTS"
 	emailStatusRegistrationFail  = "REGISTRATION_FAILED"
 	emailStatusAuthFailed        = "AUTH_FAILED"
+	emailStatusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
+
+	emailAuthStatusAuthorized        = "AUTHORIZED"
+	emailAuthStatusOAuthPending      = "OAUTH_PENDING"
+	emailAuthStatusAuthFailed        = "AUTH_FAILED"
+	emailAuthStatusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
 
 	stepRegisterAccount = "register_account"
 	stepGoPayPayment    = "gopay_payment"

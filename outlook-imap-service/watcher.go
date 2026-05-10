@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -35,6 +36,7 @@ type MailWatcher struct {
 	graphURL     string
 	messageLimit int
 	pollInterval int
+	inboxOverlap int
 	httpClient   *http.Client
 
 	mu            sync.Mutex
@@ -77,6 +79,10 @@ func NewMailWatcher(store *MailboxStore) *MailWatcher {
 	if pollInterval < 1 {
 		pollInterval = 1
 	}
+	inboxOverlap := envInt("OUTLOOK_INBOX_OVERLAP_SECONDS", defaultInboxOverlapSeconds)
+	if inboxOverlap < 0 {
+		inboxOverlap = 0
+	}
 	timeout := envInt("OUTLOOK_HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSeconds)
 	if timeout <= 0 {
 		timeout = defaultHTTPTimeoutSeconds
@@ -86,6 +92,7 @@ func NewMailWatcher(store *MailboxStore) *MailWatcher {
 		graphURL:      envStr("OUTLOOK_GRAPH_MESSAGES_URL", defaultGraphMessagesURL),
 		messageLimit:  messageLimit,
 		pollInterval:  pollInterval,
+		inboxOverlap:  inboxOverlap,
 		httpClient:    &http.Client{Timeout: time.Duration(timeout) * time.Second},
 		cachedOTPs:    map[string]cachedOTP{},
 		seenMessages:  map[string]float64{},
@@ -123,29 +130,46 @@ func (w *MailWatcher) PollForEmail(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	return w.pollMailbox(ctx, mailbox)
+	_, err = w.fetchMailboxMessages(ctx, mailbox, w.messageLimit, 0)
+	return err
 }
 
-func (w *MailWatcher) pollMailbox(ctx context.Context, mailbox *pb.EmailMailbox) error {
+func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMailbox, limit int32) ([]*pb.EmailInboxMessage, error) {
+	watermark, err := w.store.InboxWatermark(ctx, mailbox.GetEmailAddress())
+	if err != nil {
+		return nil, err
+	}
+	messages, err := w.fetchMailboxMessages(ctx, mailbox, messageLimitValue(limit, w.messageLimit), inboxReceivedAfter(watermark, w.inboxOverlap))
+	if err != nil {
+		return nil, err
+	}
+	unseen, err := w.store.RecordInboxMessages(ctx, mailbox.GetEmailAddress(), messages)
+	if err != nil {
+		return nil, err
+	}
+	return inboxMessages(mailbox.GetEmailAddress(), unseen), nil
+}
+
+func (w *MailWatcher) fetchMailboxMessages(ctx context.Context, mailbox *pb.EmailMailbox, limit int, receivedAfterNs int64) ([]graphMessage, error) {
 	manager := w.oauthManagerForMailbox(mailbox)
 	accessToken, err := manager.GetAccessToken(ctx)
 	if err != nil {
 		w.store.MarkAuthFailed(ctx, mailbox.GetEmailAddress(), err)
-		return err
+		return nil, err
 	}
 	if err := w.persistTokens(ctx, mailbox, manager); err != nil {
 		w.store.MarkAuthFailed(ctx, mailbox.GetEmailAddress(), err)
-		return err
+		return nil, err
 	}
-	messages, err := w.fetchRecentMessages(ctx, accessToken)
+	messages, err := w.fetchRecentMessages(ctx, accessToken, limit, receivedAfterNs)
 	if err != nil {
 		var graphErr *GraphFetchError
 		if !errors.As(err, &graphErr) {
 			w.store.MarkAuthFailed(ctx, mailbox.GetEmailAddress(), err)
-			return err
+			return nil, err
 		}
 		if !graphErr.IsAuth() {
-			return err
+			return nil, err
 		}
 		logInfo("Graph auth error for %s; refreshing token and retrying", redactEmail(mailbox.GetEmailAddress()))
 		accessToken, err = manager.RefreshAccessToken(ctx)
@@ -153,15 +177,15 @@ func (w *MailWatcher) pollMailbox(ctx context.Context, mailbox *pb.EmailMailbox)
 			err = w.persistTokens(ctx, mailbox, manager)
 		}
 		if err == nil {
-			messages, err = w.fetchRecentMessages(ctx, accessToken)
+			messages, err = w.fetchRecentMessages(ctx, accessToken, limit, receivedAfterNs)
 		}
 		if err != nil {
 			w.store.MarkAuthFailed(ctx, mailbox.GetEmailAddress(), err)
-			return err
+			return nil, err
 		}
 	}
-	w.processMessages(mailbox.GetEmailAddress(), messages)
-	return nil
+	w.processMessages(ctx, mailbox.GetEmailAddress(), messages)
+	return messages, nil
 }
 
 func (w *MailWatcher) oauthManagerForMailbox(mailbox *pb.EmailMailbox) *OAuthManager {
@@ -185,10 +209,10 @@ func (w *MailWatcher) persistTokens(ctx context.Context, mailbox *pb.EmailMailbo
 	return nil
 }
 
-func (w *MailWatcher) fetchRecentMessages(ctx context.Context, accessToken string) ([]graphMessage, error) {
+func (w *MailWatcher) fetchRecentMessages(ctx context.Context, accessToken string, limit int, receivedAfterNs int64) ([]graphMessage, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		messages, err := w.fetchOnce(ctx, accessToken)
+		messages, err := w.fetchOnce(ctx, accessToken, limit, receivedAfterNs)
 		if err == nil {
 			return messages, nil
 		}
@@ -212,15 +236,18 @@ func (w *MailWatcher) fetchRecentMessages(ctx context.Context, accessToken strin
 	return nil, lastErr
 }
 
-func (w *MailWatcher) fetchOnce(ctx context.Context, accessToken string) ([]graphMessage, error) {
+func (w *MailWatcher) fetchOnce(ctx context.Context, accessToken string, limit int, receivedAfterNs int64) ([]graphMessage, error) {
 	u, err := url.Parse(w.graphURL)
 	if err != nil {
 		return nil, err
 	}
 	query := u.Query()
-	query.Set("$top", strconv.Itoa(w.messageLimit))
+	query.Set("$top", strconv.Itoa(messageLimitValue(int32(limit), w.messageLimit)))
 	query.Set("$orderby", "receivedDateTime desc")
-	query.Set("$select", "id,subject,bodyPreview,body,toRecipients,ccRecipients,bccRecipients,internetMessageHeaders,receivedDateTime")
+	query.Set("$select", "id,subject,from,bodyPreview,body,toRecipients,ccRecipients,bccRecipients,internetMessageHeaders,receivedDateTime")
+	if receivedAfterNs > 0 {
+		query.Set("$filter", "receivedDateTime gt "+time.Unix(0, receivedAfterNs).UTC().Format(time.RFC3339Nano))
+	}
 	u.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -255,7 +282,7 @@ func (w *MailWatcher) fetchOnce(ctx context.Context, accessToken string) ([]grap
 	return decoded.Value, nil
 }
 
-func (w *MailWatcher) processMessages(sourceEmail string, messages []graphMessage) {
+func (w *MailWatcher) processMessages(ctx context.Context, sourceEmail string, messages []graphMessage) {
 	for _, msg := range messages {
 		msgKey := sourceEmail + ":" + messageKey(msg)
 		w.mu.Lock()
@@ -280,6 +307,13 @@ func (w *MailWatcher) processMessages(sourceEmail string, messages []graphMessag
 			receivedAt = float64(time.Now().Unix())
 		}
 		w.cacheOTP(msg.Subject, otp, recipients, receivedAt)
+		if w.store != nil {
+			for _, recipient := range recipients {
+				if err := w.store.UpsertLatestOTP(ctx, recipient, otp, msg.Subject, sourceEmail, int64(receivedAt)); err != nil {
+					logWarning("failed to persist latest otp for %s: %v", redactEmail(recipient), err)
+				}
+			}
+		}
 	}
 }
 
@@ -298,6 +332,83 @@ func (w *MailWatcher) cacheOTP(subject string, otp string, recipients []string, 
 		}
 	}
 	logInfo("cached OTP for %d recipient(s)", len(recipients))
+}
+
+func inboxMessages(mailboxEmail string, messages []graphMessage) []*pb.EmailInboxMessage {
+	out := make([]*pb.EmailInboxMessage, 0, len(messages))
+	for _, msg := range messages {
+		bodyPreview := strings.TrimSpace(msg.BodyPreview)
+		if bodyPreview == "" {
+			bodyPreview = compactMessageText(msg.Body.Content, 500)
+		}
+		receivedAt := int64(parseGraphTime(msg.ReceivedDateTime))
+		body := msg.BodyPreview + "\n" + msg.Body.Content
+		out = append(out, &pb.EmailInboxMessage{
+			Id:             msg.ID,
+			MailboxEmail:   normalizeEmail(mailboxEmail),
+			Subject:        strings.TrimSpace(msg.Subject),
+			FromAddress:    strings.TrimSpace(msg.From.EmailAddress.Address),
+			BodyPreview:    compactMessageText(bodyPreview, 500),
+			ReceivedAtUnix: receivedAt,
+			Recipients:     uniqueStrings(messageAddresses(msg)),
+			Otp:            extractOTP(body),
+		})
+	}
+	return out
+}
+
+func compactMessageText(value string, limit int) string {
+	text := htmlTagPattern.ReplaceAllString(html.UnescapeString(value), " ")
+	text = strings.Join(strings.Fields(strings.ReplaceAll(text, "\u00a0", " ")), " ")
+	if limit > 0 && len(text) > limit {
+		runes := []rune(text)
+		if len(runes) > limit {
+			return string(runes[:limit])
+		}
+	}
+	return text
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, value := range values {
+		trimmed := normalizeEmail(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func messageLimitValue(limit int32, fallback int) int {
+	n := int(limit)
+	if n <= 0 {
+		n = fallback
+	}
+	if n <= 0 {
+		n = defaultMessageLimit
+	}
+	if n > 100 {
+		n = 100
+	}
+	return n
+}
+
+func inboxReceivedAfter(watermarkNs int64, overlapSeconds int) int64 {
+	if watermarkNs <= 0 {
+		return 0
+	}
+	after := watermarkNs - int64(overlapSeconds)*int64(time.Second)
+	if after < 0 {
+		return 0
+	}
+	return after
 }
 
 func (w *MailWatcher) cleanupLocked() {
@@ -389,6 +500,7 @@ type graphMessagesResponse struct {
 type graphMessage struct {
 	ID                     string           `json:"id"`
 	Subject                string           `json:"subject"`
+	From                   graphRecipient   `json:"from"`
 	BodyPreview            string           `json:"bodyPreview"`
 	Body                   graphBody        `json:"body"`
 	ToRecipients           []graphRecipient `json:"toRecipients"`

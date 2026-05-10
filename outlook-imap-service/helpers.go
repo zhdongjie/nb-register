@@ -21,6 +21,7 @@ const (
 	defaultPollIntervalSeconds = 5
 	defaultMessageLimit        = 25
 	defaultHTTPTimeoutSeconds  = 20
+	defaultInboxOverlapSeconds = 120
 	defaultAliasTokenLength    = 6
 )
 
@@ -31,7 +32,13 @@ const (
 	statusOAuthPending      = "OAUTH_PENDING"
 	statusUserAlreadyExists = "USER_ALREADY_EXISTS"
 	statusAuthFailed        = "AUTH_FAILED"
+	statusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
 	statusBlocked           = "BLOCKED"
+
+	authStatusAuthorized        = "AUTHORIZED"
+	authStatusOAuthPending      = "OAUTH_PENDING"
+	authStatusAuthFailed        = "AUTH_FAILED"
+	authStatusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
 )
 
 var (
@@ -116,6 +123,17 @@ func parseGraphTime(value string) float64 {
 		return 0
 	}
 	return float64(parsed.UnixNano()) / float64(time.Second)
+}
+
+func parseGraphTimeUnixNano(value string) int64 {
+	if strings.TrimSpace(value) == "" {
+		return 0
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return 0
+	}
+	return parsed.UnixNano()
 }
 
 func randomHex(bytes int) (string, error) {

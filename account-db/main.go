@@ -102,6 +102,9 @@ func (s *accountDatabaseServer) ListAccounts(ctx context.Context, req *pb.ListAc
 	if statusFilter := strings.TrimSpace(req.GetStatus()); statusFilter != "" {
 		query = query.Where("status = ?", statusFilter)
 	}
+	if emailFilter := normalizeEmail(req.GetEmail()); emailFilter != "" {
+		query = query.Where("email = ?", emailFilter)
+	}
 
 	var accounts []db.Account
 	if err := query.Find(&accounts).Error; err != nil {

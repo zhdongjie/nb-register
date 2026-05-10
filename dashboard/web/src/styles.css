@@ -89,6 +89,12 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.dangerButton {
+  color: #98342f;
+  border-color: #edc6c0;
+  background: #fff5f3;
+}
+
 input, select {
   min-height: 34px;
   padding: 7px 9px;
@@ -360,12 +366,66 @@ table {
 
 .accountsPanel table { min-width: 920px; }
 .mailboxesPanel table { min-width: 920px; }
+.mailboxTable {
+  min-width: 1040px;
+  table-layout: fixed;
+}
+
+.mailboxTable th:nth-child(1),
+.mailboxTable td:nth-child(1) { width: 270px; }
+.mailboxTable th:nth-child(2),
+.mailboxTable td:nth-child(2) { width: 76px; }
+.mailboxTable th:nth-child(3),
+.mailboxTable td:nth-child(3) { width: 132px; }
+.mailboxTable th:nth-child(4),
+.mailboxTable td:nth-child(4) { width: 86px; }
+.mailboxTable th:nth-child(5),
+.mailboxTable td:nth-child(5) { width: 168px; }
+.mailboxTable th:nth-child(6),
+.mailboxTable td:nth-child(6) { width: 128px; }
+.mailboxTable th:nth-child(7),
+.mailboxTable td:nth-child(7) { width: 104px; }
+
+.mailboxErrorCell span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.banStrip {
+  margin-bottom: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.banStrip div {
+  min-height: 34px;
+  border: 1px solid #efc8c2;
+  background: #fff5f3;
+  border-radius: 8px;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #98342f;
+  font-size: 12px;
+}
+
+.banStrip strong,
+.banStrip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .mailboxStatusStrip {
   padding: 12px 14px;
   border-bottom: 1px solid #e0e5df;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 8px;
 }
 
@@ -458,6 +518,11 @@ tbody tr:hover, tr.selected { background: #eef6f1; }
 .cellStack small,
 .muted {
   color: #7b857e;
+}
+
+.latestOtp {
+  color: #176143;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .rowActions {
@@ -569,6 +634,202 @@ tbody tr:hover, tr.selected { background: #eef6f1; }
 .detailDrawer .details {
   grid-template-columns: 1fr;
   gap: 18px;
+}
+
+.mailboxSummary {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #dce3dc;
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 10px;
+}
+
+.mailboxSummaryHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mailboxSummaryHead div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.mailboxSummaryHead .summaryBadges {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mailboxSummaryHead span,
+.latestOtpPanel span,
+.latestOtpPanel em,
+.inboxMessageHeader span,
+.inboxMessageMeta,
+.recipientLine {
+  color: #647069;
+  font-size: 12px;
+}
+
+.mailboxSummaryHead strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.latestOtpPanel {
+  min-height: 46px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f3f7f2;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.latestOtpPanel strong {
+  color: #176143;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawerInbox {
+  min-height: 0;
+}
+
+.aliasSection {
+  min-height: 0;
+}
+
+.aliasList {
+  display: grid;
+  gap: 8px;
+}
+
+.aliasItem {
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid #dce3dc;
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 10px;
+}
+
+.aliasItem > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.aliasItem strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.aliasItem span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.detailActions {
+  margin-top: 12px;
+}
+
+.drawerInboxList {
+  display: grid;
+  gap: 8px;
+}
+
+.inboxMessage {
+  padding: 10px;
+  border: 1px solid #dce3dc;
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 7px;
+}
+
+.inboxMessageHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inboxMessageHeader strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.inboxMessageMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inboxMessageMeta span,
+.recipientLine,
+.inboxMessage p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inboxMessageMeta em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #eaf4ed;
+  color: #176143;
+  padding: 2px 7px;
+  font-style: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.inboxMessage p {
+  margin: 0;
+  color: #48534b;
+  font-size: 12px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.inboxError,
+.inboxEmpty {
+  border: 1px solid #dce3dc;
+  border-radius: 8px;
+  padding: 10px;
+  color: #647069;
+  background: #f6f8f5;
+  font-size: 13px;
+}
+
+.inboxError {
+  margin-bottom: 8px;
+  border-color: #efc8c2;
+  background: #fff5f3;
+  color: #98342f;
 }
 
 .details h3 {

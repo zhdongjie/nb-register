@@ -1,7 +1,6 @@
 package com.nbregister.whatsappforwarder.worker
 
 import android.content.Context
-import android.provider.Settings
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.nbregister.whatsappforwarder.data.QueueRepository
@@ -24,11 +23,6 @@ class QueueWorker(
 
         repository.pruneOldSent()
 
-        val deviceId = Settings.Secure.getString(
-            applicationContext.contentResolver,
-            Settings.Secure.ANDROID_ID,
-        ) ?: "unknown-device"
-
         var sawRetryableFailure = false
         var batchCount = 0
 
@@ -40,7 +34,7 @@ class QueueWorker(
 
             repository.markSending(items)
             for (item in items) {
-                val result = client.send(settings.webhookUrl, item, deviceId)
+                val result = client.send(settings.webhookUrl, item)
                 if (result.success) {
                     repository.markSent(item)
                 } else {

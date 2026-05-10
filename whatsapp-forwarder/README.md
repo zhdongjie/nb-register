@@ -7,15 +7,7 @@
 ```json
 {
   "otp": "123456",
-  "source": "whatsapp",
-  "deviceId": "android-id",
-  "packageName": "com.whatsapp",
-  "appName": "WhatsApp",
-  "title": "GoPay",
-  "text": "123456 is your GoPay OTP.",
-  "postedAt": 1710000000000,
-  "notificationKey": "...",
-  "eventId": "..."
+  "source": "whatsapp"
 }
 ```
 

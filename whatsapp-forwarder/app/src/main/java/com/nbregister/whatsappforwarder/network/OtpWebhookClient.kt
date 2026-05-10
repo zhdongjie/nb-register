@@ -22,19 +22,11 @@ class OtpWebhookClient {
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    fun send(url: String, item: OtpQueueItem, deviceId: String): SendResult {
+    fun send(url: String, item: OtpQueueItem): SendResult {
         return try {
             val payload = mapOf(
                 "otp" to item.otp,
                 "source" to "whatsapp",
-                "deviceId" to deviceId,
-                "packageName" to item.packageName,
-                "appName" to item.appName,
-                "title" to item.title,
-                "text" to item.text,
-                "postedAt" to item.postedAt,
-                "notificationKey" to item.notificationKey,
-                "eventId" to item.eventId,
             )
             val body = gson.toJson(payload).toRequestBody(JSON.toMediaType())
             val request = Request.Builder()

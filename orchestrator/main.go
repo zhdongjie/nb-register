@@ -28,6 +28,7 @@ const (
 	actionRegister            = "REGISTER"
 	actionActivate            = "ACTIVATE"
 	actionProbePlusTrial      = "PROBE_PLUS_TRIAL"
+	actionLoginSession        = "LOGIN_SESSION"
 	actionRegisterAndActivate = "REGISTER_AND_ACTIVATE"
 	actionRegisterMailbox     = "REGISTER_MAILBOX"
 	actionMailboxOAuth        = "MAILBOX_OAUTH"
@@ -39,6 +40,7 @@ const (
 	statusFailedRetryable   = "FAILED_RETRYABLE"
 	statusFailedFinal       = "FAILED_FINAL"
 
+	accountStatusRegistered         = "REGISTERED"
 	accountStatusEmailAlreadyExists = "EMAIL_ALREADY_EXISTS"
 
 	emailStatusAvailable         = "AVAILABLE"
@@ -51,6 +53,7 @@ const (
 	stepRegisterAccount = "register_account"
 	stepGoPayPayment    = "gopay_payment"
 	stepProbePlusTrial  = "probe_plus_trial"
+	stepLoginSession    = "login_session"
 	stepRegisterMailbox = "register_mailbox"
 	stepMailboxOAuth    = "mailbox_oauth"
 
@@ -382,6 +385,83 @@ func (s *orchestratorServer) register(ctx context.Context, jobID string, account
 	return result, data, nil
 }
 
+func (s *orchestratorServer) loginSession(ctx context.Context, jobID string, account *pb.Account) (result *pb.RegisterResponse, data map[string]any, err error) {
+	data = map[string]any{
+		"account_id": account.GetAccountId(),
+		"email":      account.GetEmail(),
+	}
+
+	startResp, err := s.browserClient.StartLogin(ctx, &pb.RegisterRequest{
+		JobId:         jobID,
+		AssignedEmail: account.GetEmail(),
+		Password:      account.GetPassword(),
+	})
+	data["browser_start"] = browserStartData(startResp)
+	if err != nil {
+		return nil, data, err
+	}
+	if startResp == nil {
+		return nil, data, fmt.Errorf("browser login start returned empty response")
+	}
+	if !startResp.GetSuccess() {
+		return nil, data, fmt.Errorf("browser login start failed: %s", startResp.GetErrorMessage())
+	}
+
+	flowID := startResp.GetFlowId()
+	completed := false
+	defer func() {
+		if flowID != "" && !completed {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cancelResp, cancelErr := s.browserClient.CancelLogin(cancelCtx, &pb.CancelRegisterRequest{FlowId: flowID})
+			data["cleanup"] = cleanupDataFromBrowser(cancelResp, cancelErr)
+		}
+	}()
+
+	if !startResp.GetOtpRequired() {
+		result = startResp.GetResult()
+		data["browser_complete"] = registerResultData(result)
+		if result == nil {
+			return nil, data, fmt.Errorf("browser login completed without result")
+		}
+		if !result.GetSuccess() {
+			return nil, data, fmt.Errorf("browser login failed: %s", result.GetErrorMessage())
+		}
+		completed = true
+		return result, data, nil
+	}
+
+	otpIssuedAfterUnix := startResp.GetOtpIssuedAfterUnix()
+	otpTimeout := s.registrationOtpTimeout()
+	otp, err := s.waitForRegistrationOtp(ctx, jobID, account.GetEmail(), otpTimeout, otpIssuedAfterUnix)
+	data["login_otp"] = map[string]any{
+		"email":              account.GetEmail(),
+		"timeout_seconds":    otpTimeout,
+		"issued_after_unix":  otpIssuedAfterUnix,
+		"found":              err == nil,
+		"source":             otp.Source,
+		"manual_allowed":     true,
+		"otp_value_recorded": false,
+	}
+	if err != nil {
+		return nil, data, err
+	}
+
+	result, err = s.browserClient.CompleteLogin(ctx, &pb.CompleteRegisterRequest{FlowId: flowID, Otp: otp.Code})
+	data["browser_complete"] = registerResultData(result)
+	if err != nil {
+		return nil, data, err
+	}
+	if result == nil {
+		return nil, data, fmt.Errorf("browser login complete returned empty response")
+	}
+	if !result.GetSuccess() {
+		return nil, data, fmt.Errorf("browser login complete failed: %s", result.GetErrorMessage())
+	}
+	completed = true
+	return result, data, nil
+}
+
 func (s *orchestratorServer) waitForRegistrationOtp(ctx context.Context, jobID, email string, timeoutSeconds int32, issuedAfterUnix int64) (registrationOTPResult, error) {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 120
@@ -707,6 +787,22 @@ func (s *orchestratorServer) ActivateAccount(ctx context.Context, req *pb.Activa
 	}, nil
 }
 
+func (s *orchestratorServer) LoginAccount(ctx context.Context, req *pb.LoginAccountRequest) (*pb.LoginAccountResponse, error) {
+	accountID := strings.TrimSpace(req.GetAccountId())
+	if accountID == "" {
+		return &pb.LoginAccountResponse{ErrorMessage: "account_id is required"}, nil
+	}
+	jobID := uuid.NewString()
+	_, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions("login-session-"+jobID), LoginSessionWorkflow, LoginSessionWorkflowInput{
+		JobID:     jobID,
+		AccountID: accountID,
+	})
+	if err != nil {
+		return &pb.LoginAccountResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	return &pb.LoginAccountResponse{JobId: jobID, Started: true}, nil
+}
+
 func (s *orchestratorServer) ProbePlusTrial(ctx context.Context, req *pb.ProbePlusTrialRequest) (*pb.ProbePlusTrialResponse, error) {
 	accountID := strings.TrimSpace(req.GetAccountId())
 	if accountID == "" {
@@ -856,7 +952,7 @@ func (s *orchestratorServer) resolveManualOTPJob(ctx context.Context, jobID, acc
 
 	var job db.Job
 	err := s.db.WithContext(ctx).
-		Where("account_id = ? AND action IN ? AND status = ?", accountID, []string{actionRegister, actionActivate, actionRegisterAndActivate}, statusRunning).
+		Where("account_id = ? AND action IN ? AND status = ?", accountID, []string{actionRegister, actionActivate, actionRegisterAndActivate, actionLoginSession}, statusRunning).
 		Order("updated_at DESC").
 		First(&job).Error
 	if err != nil {
@@ -891,7 +987,7 @@ func manualOTPParamsForJobSnapshot(job *db.Job) (string, string, string, error) 
 		return "", "", "", fmt.Errorf("job is required")
 	}
 	switch job.Action {
-	case actionRegister:
+	case actionRegister, actionLoginSession:
 		return registrationOTPParam, registrationOTPSubmittedAtParam, "registration", nil
 	case actionActivate:
 		return paymentOTPParam, paymentOTPSubmittedAtParam, "payment", nil

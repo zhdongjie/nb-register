@@ -142,6 +142,7 @@ func main() {
 	mux.HandleFunc("/api/jobs/", s.handleJob)
 	mux.HandleFunc("/api/workflows/register", s.handleRegister)
 	mux.HandleFunc("/api/workflows/activate", s.handleActivate)
+	mux.HandleFunc("/api/workflows/login", s.handleLogin)
 	mux.HandleFunc("/api/workflows/probe-plus-trial", s.handleProbePlusTrial)
 	mux.HandleFunc("/api/workflows/register-and-activate", s.handleRegisterAndActivate)
 	mux.HandleFunc("/", s.handleStatic)
@@ -331,9 +332,19 @@ func (s *server) handleMailboxOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
-	accountID := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
+	accountPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/accounts/"), "/")
+	parts := strings.Split(accountPath, "/")
+	accountID := parts[0]
 	if accountID == "" {
 		writeError(w, http.StatusBadRequest, errors.New("account_id is required"))
+		return
+	}
+	if len(parts) > 1 {
+		if len(parts) == 2 && parts[1] == "access-token" {
+			s.handleAccountAccessToken(w, r, accountID)
+			return
+		}
+		writeError(w, http.StatusNotFound, errors.New("account endpoint not found"))
 		return
 	}
 
@@ -377,6 +388,80 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *server) handleAccountAccessToken(w http.ResponseWriter, r *http.Request, accountID string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	accountResp, err := s.accountClient.GetAccount(ctx, &pb.GetAccountRequest{AccountId: accountID})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	account := accountResp.GetAccount()
+	if account == nil {
+		writeError(w, http.StatusNotFound, errors.New("account not found"))
+		return
+	}
+	sessionToken := strings.TrimSpace(account.GetSessionToken())
+	if sessionToken == "" {
+		writeError(w, http.StatusBadRequest, errors.New("session_token is required"))
+		return
+	}
+
+	accessToken, err := fetchChatGPTAccessToken(ctx, sessionToken)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	updated, err := s.accountClient.UpdateAccount(ctx, &pb.UpdateAccountRequest{Account: &pb.Account{
+		AccountId:   accountID,
+		AccessToken: accessToken,
+	}})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated.GetAccount())
+}
+
+func fetchChatGPTAccessToken(ctx context.Context, sessionToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+	req.Header.Set("Cookie", "__Secure-next-auth.session-token="+strings.TrimSpace(sessionToken))
+
+	resp, err := (&http.Client{Timeout: 25 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch auth session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("auth session returned status %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode auth session: %w", err)
+	}
+	accessToken := strings.TrimSpace(payload.AccessToken)
+	if accessToken == "" {
+		return "", errors.New("auth session did not return access token")
+	}
+	return accessToken, nil
 }
 
 func (s *server) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -540,6 +625,28 @@ func (s *server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req pb.LoginAccountRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	resp, err := s.orchestratorClient.LoginAccount(r.Context(), &req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	statusCode := http.StatusAccepted
+	if !resp.GetStarted() || resp.GetErrorMessage() != "" {
+		statusCode = http.StatusBadGateway
+	}
+	writeJSON(w, statusCode, resp)
 }
 
 func (s *server) handleProbePlusTrial(w http.ResponseWriter, r *http.Request) {

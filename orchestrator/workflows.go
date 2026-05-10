@@ -17,6 +17,7 @@ const (
 	registerAccountActivityName   = "RegisterAccountAtomicActivity"
 	goPayPaymentActivityName      = "GoPayPaymentAtomicActivity"
 	probePlusTrialActivityName    = "ProbePlusTrialAtomicActivity"
+	loginSessionActivityName      = "LoginSessionAtomicActivity"
 	registerMailboxActivityName   = "RegisterMailboxAtomicActivity"
 	mailboxOAuthActivityName      = "MailboxOAuthAtomicActivity"
 	persistRegisteredActivityName = "PersistRegisteredActivity"
@@ -169,6 +170,54 @@ func ProbePlusTrialWorkflow(ctx workflow.Context, input ProbePlusTrialWorkflowIn
 	result.Source = probe.Source
 	result.CheckoutURL = probe.CheckoutURL
 	result.ErrorMessage = probe.ErrorMessage
+	return result, nil
+}
+
+func LoginSessionWorkflow(ctx workflow.Context, input LoginSessionWorkflowInput) (LoginSessionWorkflowResult, error) {
+	result := LoginSessionWorkflowResult{JobID: input.JobID}
+	retryCtx := workflow.WithActivityOptions(ctx, retryableActivityOptions(30*time.Second, 5))
+	atomicCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(15*time.Minute))
+
+	var account AccountRef
+	if err := workflow.ExecuteActivity(retryCtx, resolveAccountActivityName, ResolveAccountInput{
+		AccountID: input.AccountID,
+	}).Get(ctx, &account); err != nil {
+		result.ErrorMessage = err.Error()
+		return result, nil
+	}
+
+	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
+		JobID:     input.JobID,
+		AccountID: account.AccountID,
+		Action:    actionLoginSession,
+	}).Get(ctx, nil); err != nil {
+		result.ErrorMessage = err.Error()
+		return result, nil
+	}
+
+	var login LoginSessionActivityOutput
+	if err := workflow.ExecuteActivity(atomicCtx, loginSessionActivityName, LoginSessionActivityInput{
+		JobID:     input.JobID,
+		AccountID: account.AccountID,
+	}).Get(ctx, &login); err != nil {
+		return failLoginSessionWorkflow(ctx, retryCtx, result, input.JobID, stepLoginSession, statusFailedRetryable, false, true, err, login.Data), nil
+	}
+
+	if err := workflow.ExecuteActivity(retryCtx, persistRegisteredActivityName, PersistRegisteredInput{
+		AccountID:    account.AccountID,
+		SessionToken: login.SessionToken,
+		AccessToken:  login.AccessToken,
+	}).Get(ctx, nil); err != nil {
+		return failLoginSessionWorkflow(ctx, retryCtx, result, input.JobID, "", statusFailedRecoverable, true, false, err, login.Data), nil
+	}
+
+	_ = workflow.ExecuteActivity(retryCtx, markJobSucceededActivityName, JobSuccessInput{
+		JobID:  input.JobID,
+		Result: login.Data,
+	}).Get(ctx, nil)
+
+	result.SessionToken = login.SessionToken
+	result.AccessToken = login.AccessToken
 	return result, nil
 }
 
@@ -349,6 +398,12 @@ func failActivateWorkflow(ctx workflow.Context, activityCtx workflow.Context, re
 }
 
 func failProbePlusTrialWorkflow(ctx workflow.Context, activityCtx workflow.Context, result ProbePlusTrialWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) ProbePlusTrialWorkflowResult {
+	result.ErrorMessage = err.Error()
+	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
+	return result
+}
+
+func failLoginSessionWorkflow(ctx workflow.Context, activityCtx workflow.Context, result LoginSessionWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) LoginSessionWorkflowResult {
 	result.ErrorMessage = err.Error()
 	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
 	return result

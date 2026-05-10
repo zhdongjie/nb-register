@@ -104,6 +104,7 @@ function App() {
   const [mailboxRegistering, setMailboxRegistering] = useState(false);
   const [mailboxOAuthing, setMailboxOAuthing] = useState('');
   const [runningAccountIds, setRunningAccountIds] = useState<Set<string>>(new Set());
+  const [refreshingAccessTokenIds, setRefreshingAccessTokenIds] = useState<Set<string>>(new Set());
   const [runningJobCount, setRunningJobCount] = useState(0);
 
   async function refresh() {
@@ -258,6 +259,28 @@ function App() {
     }
   }
 
+  async function refreshAccountAccessToken(account: Account) {
+    setRefreshingAccessTokenIds((prev) => new Set(prev).add(account.account_id));
+    try {
+      const updated = await api<Account>(`/api/accounts/${account.account_id}/access-token`, {
+        method: 'POST',
+        body: '{}'
+      });
+      setAccounts((prev) => prev.map((item) => item.account_id === updated.account_id ? updated : item));
+      if (selectedAccount?.account_id === updated.account_id) setSelectedAccount(updated);
+      setToast({ kind: 'ok', text: 'Access Token 已自动获取' });
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+      throw err;
+    } finally {
+      setRefreshingAccessTokenIds((prev) => {
+        const next = new Set(prev);
+        next.delete(account.account_id);
+        return next;
+      });
+    }
+  }
+
   useEffect(() => {
     refresh();
     const id = window.setInterval(refresh, 15000);
@@ -367,12 +390,15 @@ function App() {
                   selected={selectedAccount?.account_id}
                   showSecrets={showSecrets}
                   runningAccountIds={runningAccountIds}
+                  refreshingAccessTokenIds={refreshingAccessTokenIds}
                   busy={busy}
                   onSelect={selectAccount}
                   onRegister={(account) => runAccountWorkflow('注册账号', '/api/workflows/register', account)}
+                  onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
                   onActivate={(account) => runAccountWorkflow('激活账号', '/api/workflows/activate', account)}
                   onProbePlusTrial={(account) => runAccountWorkflow('资格探测', '/api/workflows/probe-plus-trial', account)}
                   onRegisterActivate={(account) => runAccountWorkflow('注册并激活', '/api/workflows/register-and-activate', account)}
+                  onRefreshAccessToken={refreshAccountAccessToken}
                   onDelete={deleteAccount}
                 />
               </div>
@@ -483,6 +509,9 @@ function App() {
             onSessionSave={(account, sessionToken) => updateAccountAuth(account, { session_token: sessionToken })}
             onAccessSave={(account, accessToken) => updateAccountAuth(account, { access_token: accessToken })}
             onProbePlusTrial={(account) => runAccountWorkflow('资格探测', '/api/workflows/probe-plus-trial', account)}
+            onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
+            onRefreshAccessToken={refreshAccountAccessToken}
+            refreshingAccessToken={refreshingAccessTokenIds.has(selectedAccount.account_id)}
           />
         )}
       </DetailDrawer>
@@ -567,7 +596,7 @@ function DetailDrawer({ open, title, onClose, children }: {
       <aside className="detailDrawer" role="dialog" aria-modal="true" aria-label={title}>
         <div className="drawerHeader">
           <div><Activity size={16} />{title}</div>
-          <button className="iconButton" title="关闭" onClick={onClose}>
+          <button className="iconButton" {...buttonHint('关闭')} onClick={onClose}>
             <X size={16} />
           </button>
         </div>
@@ -577,22 +606,37 @@ function DetailDrawer({ open, title, onClose, children }: {
   );
 }
 
-function AccountDetails({ account, showSecrets, busy, onSessionSave, onAccessSave, onProbePlusTrial }: {
+function AccountDetails({ account, showSecrets, busy, refreshingAccessToken, onSessionSave, onAccessSave, onProbePlusTrial, onLogin, onRefreshAccessToken }: {
   account: Account;
   showSecrets: boolean;
   busy: boolean;
+  refreshingAccessToken: boolean;
   onSessionSave: (account: Account, sessionToken: string) => Promise<void>;
   onAccessSave: (account: Account, accessToken: string) => Promise<void>;
   onProbePlusTrial: (account: Account) => void;
+  onLogin: (account: Account) => void;
+  onRefreshAccessToken: (account: Account) => Promise<void>;
 }) {
   return (
     <div className="details">
       <section>
         <div className="sectionTitle">
           <h3>账号</h3>
-          <button disabled={busy || !canProbePlusTrial(account)} onClick={() => onProbePlusTrial(account)}>
-            <Search size={14} /> 探测资格
-          </button>
+          <div className="sectionActions">
+            {canRefreshAccessToken(account) && (
+              <button {...buttonHint('使用当前 Session 自动获取 Access Token')} disabled={busy || refreshingAccessToken} onClick={() => void onRefreshAccessToken(account)}>
+                <KeyRound size={14} /> {refreshingAccessToken ? '获取中' : '自动获取 Access Token'}
+              </button>
+            )}
+            {canLoginSession(account) && (
+              <button {...buttonHint(loginActionHint(account))} disabled={busy} onClick={() => onLogin(account)}>
+                <KeyRound size={14} /> {loginActionLabel(account)}
+              </button>
+            )}
+            <button {...buttonHint('探测当前账号是否可用 Plus 试用')} disabled={busy || !canProbePlusTrial(account)} onClick={() => onProbePlusTrial(account)}>
+              <Search size={14} /> 探测资格
+            </button>
+          </div>
         </div>
         <KV label="ID" value={account.account_id} mono />
         <KV label="Status" value={account.status || '-'} />
@@ -690,17 +734,20 @@ function OtpSubmitter({ job, onSubmit }: {
   );
 }
 
-function AccountTable({ accounts, selected, showSecrets, runningAccountIds, busy, onSelect, onRegister, onActivate, onProbePlusTrial, onRegisterActivate, onDelete }: {
+function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onProbePlusTrial, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   accounts: Account[];
   selected?: string;
   showSecrets: boolean;
   runningAccountIds: Set<string>;
+  refreshingAccessTokenIds: Set<string>;
   busy: boolean;
   onSelect: (a: Account) => void;
   onRegister: (a: Account) => void;
+  onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
   onProbePlusTrial: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
+  onRefreshAccessToken: (a: Account) => Promise<void>;
   onDelete: (a: Account) => void;
 }) {
   return (
@@ -721,6 +768,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, busy
         <tbody>
           {accounts.map((account) => {
             const accountBusy = runningAccountIds.has(account.account_id);
+            const refreshingAccessToken = refreshingAccessTokenIds.has(account.account_id);
             return (
               <tr key={account.account_id} className={selected === account.account_id ? 'selected' : ''} onClick={() => onSelect(account)}>
                 <td>
@@ -741,11 +789,21 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, busy
                       <span className="busyLabel">进行中</span>
                     ) : (
                       <>
-                        {canRegister(account) && <button title="注册" disabled={busy} onClick={() => onRegister(account)}><Play size={14} /></button>}
-                        {canActivate(account) && <button title="激活" disabled={busy} onClick={() => onActivate(account)}><Zap size={14} /></button>}
-                        {canProbePlusTrial(account) && <button title="探测 Plus 试用资格" disabled={busy} onClick={() => onProbePlusTrial(account)}><Search size={14} /></button>}
-                        {canRegister(account) && <button title="注册并激活" disabled={busy} onClick={() => onRegisterActivate(account)}><ShieldCheck size={14} /></button>}
-                        <button className="dangerButton" title="删除账号" disabled={busy} onClick={() => onDelete(account)}><Trash2 size={14} /></button>
+                        {canRegister(account) && <button {...buttonHint('注册 OpenAI 账号')} disabled={busy} onClick={() => onRegister(account)}><Play size={14} /></button>}
+                        {canLoginSession(account) && <button {...buttonHint(loginActionHint(account))} disabled={busy} onClick={() => onLogin(account)}><KeyRound size={14} /></button>}
+                        {canRefreshAccessToken(account) && (
+                          <button
+                            {...buttonHint('使用当前 Session 自动获取 Access Token')}
+                            disabled={busy || refreshingAccessToken}
+                            onClick={() => void onRefreshAccessToken(account)}
+                          >
+                            <KeyRound size={14} />
+                          </button>
+                        )}
+                        {canActivate(account) && <button {...buttonHint('激活订阅支付流程')} disabled={busy} onClick={() => onActivate(account)}><Zap size={14} /></button>}
+                        {canProbePlusTrial(account) && <button {...buttonHint('探测 Plus 试用资格')} disabled={busy} onClick={() => onProbePlusTrial(account)}><Search size={14} /></button>}
+                        {canRegister(account) && <button {...buttonHint('注册并激活账号')} disabled={busy} onClick={() => onRegisterActivate(account)}><ShieldCheck size={14} /></button>}
+                        <button className="dangerButton" {...buttonHint('删除账号')} disabled={busy} onClick={() => onDelete(account)}><Trash2 size={14} /></button>
                       </>
                     )}
                   </div>
@@ -782,9 +840,9 @@ function JobTable({ jobs, selected, busy, onSelect, onRetry }: {
               <td>
                 <div className="rowActions" onClick={(event) => event.stopPropagation()}>
                   {canRetryJob(job) ? (
-                    <button title="按同参数重试" disabled={busy} onClick={() => onRetry(job)}>
-                      <RefreshCcw size={14} />
-                    </button>
+          <button {...buttonHint('按同参数重试')} disabled={busy} onClick={() => onRetry(job)}>
+            <RefreshCcw size={14} />
+          </button>
                   ) : (
                     <span className="muted">-</span>
                   )}
@@ -1054,10 +1112,10 @@ function TokenEditor({ label, field, account, showSecrets, onSave }: {
         onChange={(event) => setValue(event.target.value)}
         placeholder={`${label.toLowerCase()} token`}
       />
-      <button className="copyButton" title={`复制 ${label}`} disabled={!value.trim()} onClick={() => copyText(value)}>
+      <button className="copyButton" {...buttonHint(`复制 ${label}`)} disabled={!value.trim()} onClick={() => copyText(value)}>
         <Copy size={14} />
       </button>
-      <button onClick={save} disabled={saving || value.trim() === current}>
+      <button {...buttonHint(`保存 ${label}`)} onClick={save} disabled={saving || value.trim() === current}>
         <Save size={14} /> 保存
       </button>
     </div>
@@ -1068,8 +1126,8 @@ function KV({ label, value, mono }: { label: string; value: string; mono?: boole
   return (
     <div className="kv">
       <span>{label}</span>
-      <button className={mono ? 'mono valueButton' : 'valueButton'} onClick={() => copyText(value)}>{value || '-'}</button>
-      <button className="copyButton" title={`复制 ${label}`} disabled={!value} onClick={() => copyText(value)}>
+      <button className={mono ? 'mono valueButton' : 'valueButton'} {...buttonHint(`复制 ${label}`)} onClick={() => copyText(value)}>{value || '-'}</button>
+      <button className="copyButton" {...buttonHint(`复制 ${label}`)} disabled={!value} onClick={() => copyText(value)}>
         <Copy size={14} />
       </button>
     </div>
@@ -1112,6 +1170,30 @@ function canProbePlusTrial(account: Account) {
   return account.status !== 'ACTIVATED' && !!account.session_token;
 }
 
+function canRefreshAccessToken(account: Account) {
+  return !!account.session_token && !account.access_token;
+}
+
+function canLoginSession(account: Account) {
+  return !!account.email && !!account.password;
+}
+
+function loginActionLabel(account: Account) {
+  if (!account.session_token) return '登录获取 Session';
+  if (!account.access_token) return '登录刷新 Access Token';
+  return '登录刷新 Token';
+}
+
+function loginActionHint(account: Account) {
+  if (!account.session_token) return '通过账号密码登录并获取 Session Token';
+  if (!account.access_token) return '重新登录并刷新 Access Token';
+  return '重新登录并刷新 Session / Access Token';
+}
+
+function buttonHint(label: string) {
+  return { title: label, 'aria-label': label, 'data-tooltip': label };
+}
+
 function hasRegisteredSession(account: Account) {
   return account.status === 'REGISTERED' || account.status === 'ACTIVATED' || !!account.session_token || !!account.access_token;
 }
@@ -1121,10 +1203,11 @@ function canRetryJob(job: Job) {
 }
 
 function canSubmitOtp(job: Job) {
-  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'ACTIVATE' || job.action === 'REGISTER_AND_ACTIVATE');
+  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'REGISTER_AND_ACTIVATE');
 }
 
 function otpSubmitLabel(job: Job) {
+  if (job.action === 'LOGIN_SESSION') return '登录 OTP';
   if (job.action === 'ACTIVATE' || (job.action === 'REGISTER_AND_ACTIVATE' && job.last_step === 'gopay_payment')) {
     return '支付 OTP';
   }

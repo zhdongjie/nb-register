@@ -281,6 +281,65 @@ def browser_register(
     def sleep(seconds: float) -> None:
         _interruptible_sleep(float(seconds), check_cancel)
 
+    def _js_fill_input(element, value: str) -> None:
+        element.evaluate(
+            """(el, value) => {
+                el.focus();
+                const proto = el instanceof HTMLTextAreaElement
+                    ? HTMLTextAreaElement.prototype
+                    : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+                if (setter) {
+                    setter.call(el, value);
+                } else {
+                    el.value = value;
+                }
+                el.dispatchEvent(new Event("input", {bubbles: true}));
+                el.dispatchEvent(new Event("change", {bubbles: true}));
+            }""",
+            value,
+        )
+
+    def _fill_input_without_pointer(element, value: str) -> bool:
+        """Fill an input without a pointer click; labels can intercept OTP clicks."""
+        try:
+            element.focus()
+            sleep(0.1)
+            element.fill(value, timeout=5000)
+            return True
+        except Exception as e:
+            logger.info(f"[browser-reg] Direct input fill failed, trying JS fill: {sanitize_text(e)}")
+
+        try:
+            _js_fill_input(element, value)
+            return True
+        except Exception as e:
+            logger.info(f"[browser-reg] JS input fill failed, trying keyboard fill: {sanitize_text(e)}")
+
+        try:
+            element.focus()
+            sleep(0.1)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+            page.keyboard.type(value, delay=random.randint(20, 60))
+            return True
+        except Exception as e:
+            logger.warning(f"[browser-reg] Keyboard input fill failed: {sanitize_text(e)}")
+            return False
+
+    def _safe_click(element, label: str, timeout: int = 5000) -> bool:
+        try:
+            element.click(timeout=timeout)
+            return True
+        except Exception as e:
+            logger.info(f"[browser-reg] {label} click failed, trying JS click: {sanitize_text(e)}")
+        try:
+            element.evaluate("el => el.click()")
+            return True
+        except Exception as e:
+            logger.warning(f"[browser-reg] {label} JS click failed: {sanitize_text(e)}")
+            return False
+
     try:
         import platform as _platform
         _headless = "virtual" if _platform.system() == "Linux" else False
@@ -298,6 +357,60 @@ def browser_register(
         ) as ctx:
             check_cancel()
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            def _capture_session_state(label: str) -> bool:
+                try:
+                    session_info = page.evaluate('''async () => {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => controller.abort(), 8000);
+                        try {
+                            const r = await fetch("/api/auth/session", {
+                                credentials: "include",
+                                signal: controller.signal
+                            });
+                            return await r.json();
+                        } finally {
+                            clearTimeout(timer);
+                        }
+                    }''')
+                except Exception as e:
+                    logger.info(f"[browser-reg] Session fetch failed at {label}: {sanitize_text(e)}")
+                    return False
+
+                access_token = ""
+                if isinstance(session_info, dict):
+                    access_token = session_info.get("accessToken", "") or ""
+                if access_token:
+                    result["access_token"] = access_token
+
+                try:
+                    all_cookies = ctx.cookies()
+                except Exception as e:
+                    logger.info(f"[browser-reg] Cookie capture failed at {label}: {sanitize_text(e)}")
+                    all_cookies = []
+
+                chatgpt_cookies = [c for c in all_cookies if "chatgpt.com" in c.get("domain", "")]
+                for c in chatgpt_cookies:
+                    n = c["name"]
+                    if n == "__Secure-next-auth.session-token":
+                        result["session_token"] = c["value"]
+                    if n in ("oai-did", "oai-device-id"):
+                        result["device_id"] = c["value"]
+                    if n == "__Host-next-auth.csrf-token":
+                        val = c["value"]
+                        result["csrf_token"] = val.split("|")[0] if "|" in val else val
+                if chatgpt_cookies:
+                    result["cookie_header"] = "; ".join(
+                        f"{c['name']}={c['value']}" for c in chatgpt_cookies
+                    )
+
+                if result["access_token"]:
+                    logger.info(f"[browser-reg] access_token length: {len(result['access_token'])}")
+                logger.info(
+                    f"[browser-reg] session_token={'yes' if result['session_token'] else 'no'} "
+                    f"device_id={'yes' if result['device_id'] else 'no'}"
+                )
+                return bool(result["access_token"])
 
             # --- [1] Open ChatGPT homepage, click "Sign up" ---
             logger.info("[browser-reg] Opening chatgpt.com ...")
@@ -551,56 +664,53 @@ def browser_register(
                 on_status_change_fn("WAITING_FOR_OTP")
                 otp_code = None
 
-                # First attempt: wait 60s
-                try:
-                    otp_code = wait_for_otp_fn(timeout=60)
-                    if not otp_code:
-                        raise TimeoutError()
-                except TimeoutError:
-                    logger.info("[browser-reg] No OTP after 60s, clicking Resend ...")
-                    # Click "Resend email" button
-                    for sel in [
-                        'button:has-text("Resend")', 'a:has-text("Resend")',
-                        'button:has-text("resend")', 'a:has-text("resend")',
-                    ]:
-                        try:
-                            el = page.query_selector(sel)
-                            if el and el.is_visible():
-                                el.click(timeout=3000)
-                                logger.info(f"[browser-reg] Clicked resend: {sel}")
-                                break
-                        except Exception:
-                            continue
-                    sleep(2)
-
-                    # Second attempt: wait 60s after resend
-                    try:
-                        otp_code = wait_for_otp_fn(timeout=60)
-                        if not otp_code:
-                            raise TimeoutError()
-                    except TimeoutError:
-                        page.screenshot(path=f"{screenshot_dir}/otp2_timeout.png")
-                        raise RuntimeError("OTP not received after resend")
+                # The browser service must not own OTP timeout policy. The
+                # orchestrator waits for OTP and cancels this flow when a job
+                # expires or is cleaned up.
+                otp_code = wait_for_otp_fn()
+                if not otp_code:
+                    raise RuntimeError("OTP is empty")
                 logger.info("[browser-reg] Got OTP")
 
                 otp_filled = False
                 single = _find_otp_input()
+                single_maxlength = ""
                 if single:
-                    single.click()
-                    sleep(0.3)
-                    single.fill(otp_code)
-                    otp_filled = True
+                    try:
+                        single_maxlength = (single.get_attribute("maxlength") or "").strip()
+                    except Exception:
+                        single_maxlength = ""
+
+                if single and single_maxlength != "1":
+                    otp_filled = _fill_input_without_pointer(single, otp_code)
                 else:
-                    digits = (page.query_selector_all('input[maxlength="1"][inputmode="numeric"]')
-                              or page.query_selector_all('input[maxlength="1"]'))
+                    digits = []
+                    for sel in [
+                        'input[maxlength="1"][inputmode="numeric"]',
+                        'input[maxlength="1"]',
+                    ]:
+                        try:
+                            digits = [el for el in page.query_selector_all(sel) if el.is_visible()]
+                        except Exception:
+                            digits = []
+                        if len(digits) >= 6:
+                            break
+
                     if len(digits) >= 6:
                         for i, ch in enumerate(otp_code[:6]):
-                            digits[i].click()
+                            if not _fill_input_without_pointer(digits[i], ch):
+                                break
                             sleep(0.1)
-                            digits[i].fill(ch)
-                        otp_filled = True
+                        else:
+                            otp_filled = True
 
-                if not otp_filled:
+                if single and not otp_filled:
+                    logger.info("[browser-reg] Split OTP fill did not work, retrying as a single input")
+                    otp_filled = _fill_input_without_pointer(single, otp_code)
+
+                if otp_filled:
+                    logger.info("[browser-reg] OTP input filled")
+                else:
                     page.screenshot(path=f"{screenshot_dir}/otp2_fail.png")
                     raise RuntimeError("Second OTP input not found")
 
@@ -611,9 +721,9 @@ def browser_register(
                 ]:
                     b = page.query_selector(sel)
                     if b and b.is_visible():
-                        b.click()
-                        logger.info(f"[browser-reg] OTP continue: {sel}")
-                        break
+                        if _safe_click(b, "OTP continue"):
+                            logger.info(f"[browser-reg] OTP continue: {sel}")
+                            break
                 sleep(4)
 
             sleep(3)
@@ -763,20 +873,9 @@ def browser_register(
                     last_url = cur
 
                 if "chatgpt.com" in cur and "auth.openai.com" not in cur:
-                    try:
-                        info = page.evaluate('''async () => {
-                            try {
-                                const r = await fetch("/api/auth/session", {credentials: "include"});
-                                const d = await r.json();
-                                return d.accessToken ? d.accessToken.length : 0;
-                            } catch(e){ return -1; }
-                        }''')
-                        if info and info > 100:
-                            arrived = True
-                            logger.info(f"[browser-reg] Session accessToken length={info}")
-                            break
-                    except Exception:
-                        pass
+                    if _capture_session_state("arrival"):
+                        arrived = True
+                        break
 
                 if "auth.openai.com" in cur and i % 5 == 0:
                     try:
@@ -810,38 +909,17 @@ def browser_register(
                     raise RuntimeError("account already exists")
 
             if not arrived:
-                page.screenshot(path=f"{screenshot_dir}/no_chatgpt.png")
+                try:
+                    page.screenshot(path=f"{screenshot_dir}/no_chatgpt.png")
+                except Exception:
+                    pass
                 raise RuntimeError(f"Did not redirect to chatgpt.com, current={sanitize_url_for_log(page.url)}")
 
-            # --- [8] Extract access_token ---
-            sleep(5)
-            logger.info("[browser-reg] Fetching /api/auth/session ...")
-            session_info = page.evaluate('''async () => {
-                const r = await fetch("/api/auth/session", {credentials: "include"});
-                return await r.json();
-            }''')
-            result["access_token"] = session_info.get("accessToken", "")
-            logger.info(f"[browser-reg] access_token length: {len(result['access_token'])}")
-
-            # --- [9] Extract cookies ---
-            all_cookies = ctx.cookies()
-            chatgpt_cookies = [c for c in all_cookies if "chatgpt.com" in c.get("domain", "")]
-            for c in chatgpt_cookies:
-                n = c["name"]
-                if n == "__Secure-next-auth.session-token":
-                    result["session_token"] = c["value"]
-                if n in ("oai-did", "oai-device-id"):
-                    result["device_id"] = c["value"]
-                if n == "__Host-next-auth.csrf-token":
-                    val = c["value"]
-                    result["csrf_token"] = val.split("|")[0] if "|" in val else val
-            result["cookie_header"] = "; ".join(
-                f"{c['name']}={c['value']}" for c in chatgpt_cookies
-            )
-            logger.info(
-                f"[browser-reg] session_token={'yes' if result['session_token'] else 'no'} "
-                f"device_id={'yes' if result['device_id'] else 'no'}"
-            )
+            # --- [8] Refresh credentials if arrival capture was partial ---
+            if not result["access_token"] or not result["session_token"]:
+                sleep(2)
+                logger.info("[browser-reg] Refreshing /api/auth/session ...")
+                _capture_session_state("refresh")
 
             # --- [10] Optional Plus Trial Eligibility Check ---
             if result["access_token"] and _env_bool("BROWSER_CHECK_PLUS_TRIAL", False):
@@ -995,12 +1073,20 @@ def browser_register(
                 )
 
             # --- [11] Validation ---
-            if not result["access_token"] or not result["session_token"]:
-                page.screenshot(path=f"{screenshot_dir}/missing_token.png")
+            # Account creation is complete once a session cookie exists.
+            # access_token is derived from that cookie and can be refreshed by
+            # the dashboard later, so it must not make registration fail.
+            if not result["session_token"]:
+                try:
+                    page.screenshot(path=f"{screenshot_dir}/missing_token.png")
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"Missing credentials: access_token={bool(result['access_token'])} "
                     f"session_token={bool(result['session_token'])}"
                 )
+            if not result["access_token"]:
+                logger.warning("[browser-reg] access_token missing; account will be registered with session_token only")
     finally:
         try:
             shutil.rmtree(tmp_profile, ignore_errors=True)

@@ -136,14 +136,14 @@ func (s *orchestratorServer) RegisterAccountAtomicActivity(ctx context.Context, 
 			if data == nil {
 				data = map[string]any{}
 			}
-			data["terminal_reason"] = "email_already_registered"
+			data["terminal_reason"] = "openai_account_already_registered"
 			updateErr := s.updateAccount(ctx, &pb.Account{
 				AccountId:    input.AccountID,
-				Status:       accountStatusEmailAlreadyExists,
+				Status:       accountStatusRegistered,
 				ErrorMessage: err.Error(),
 			})
 			if updateErr != nil {
-				return RegisterActivityOutput{Data: data}, fmt.Errorf("%w; additionally failed to mark email already exists: %v", err, updateErr)
+				return RegisterActivityOutput{Data: data}, fmt.Errorf("%w; additionally failed to mark account registered: %v", err, updateErr)
 			}
 		}
 		return RegisterActivityOutput{Data: data}, err
@@ -196,15 +196,12 @@ func (s *orchestratorServer) registerWithMailboxRotation(ctx context.Context, jo
 			return nil, data, err
 		}
 
-		attemptData["terminal_reason"] = "email_already_registered"
-
-		nextAccount, rotationData, rotateErr := s.rotateAccountMailbox(ctx, current, err)
-		attemptData["mailbox_rotation"] = rotationData
-		if rotateErr != nil {
-			data["terminal_reason"] = "email_already_registered"
-			return nil, data, fmt.Errorf("%w; additionally failed to acquire replacement mailbox: %v", err, rotateErr)
+		attemptData["terminal_reason"] = "openai_account_already_registered"
+		if markErr := s.markOpenAIAccountRegistered(ctx, current, err); markErr != nil {
+			return nil, data, fmt.Errorf("%w; additionally failed to mark account registered: %v", err, markErr)
 		}
-		current = nextAccount
+		data["terminal_reason"] = "openai_account_already_registered"
+		return nil, data, err
 	}
 
 	if lastErr == nil {
@@ -212,6 +209,24 @@ func (s *orchestratorServer) registerWithMailboxRotation(ctx context.Context, jo
 	}
 	data["terminal_reason"] = "email_already_registered"
 	return nil, data, lastErr
+}
+
+func (s *orchestratorServer) markOpenAIAccountRegistered(ctx context.Context, account *pb.Account, cause error) error {
+	if account.GetEmail() != "" {
+		_, err := s.emailClient.MarkEmailStatus(ctx, &pb.MarkEmailStatusRequest{
+			EmailAddress: account.GetEmail(),
+			Status:       emailStatusRegistered,
+			LastError:    cause.Error(),
+		})
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+	}
+	return s.updateAccount(ctx, &pb.Account{
+		AccountId:    account.GetAccountId(),
+		Status:       accountStatusRegistered,
+		ErrorMessage: cause.Error(),
+	})
 }
 
 func (s *orchestratorServer) rotateAccountMailbox(ctx context.Context, account *pb.Account, cause error) (*pb.Account, map[string]any, error) {
@@ -365,6 +380,36 @@ func (s *orchestratorServer) ProbePlusTrialAtomicActivity(ctx context.Context, i
 		return output, err
 	}
 	return output, nil
+}
+
+func (s *orchestratorServer) LoginSessionAtomicActivity(ctx context.Context, input LoginSessionActivityInput) (LoginSessionActivityOutput, error) {
+	account, err := s.getAccount(ctx, input.AccountID)
+	if err != nil {
+		return LoginSessionActivityOutput{}, err
+	}
+	if strings.TrimSpace(account.GetEmail()) == "" {
+		return LoginSessionActivityOutput{}, fmt.Errorf("email is required")
+	}
+	if strings.TrimSpace(account.GetPassword()) == "" {
+		return LoginSessionActivityOutput{}, fmt.Errorf("password is required")
+	}
+
+	var result *pb.RegisterResponse
+	var data map[string]any
+	_, err = s.runAtomicStep(ctx, input.JobID, stepLoginSession, false, true, func() (any, error) {
+		var stepErr error
+		result, data, stepErr = s.loginSession(ctx, input.JobID, account)
+		return data, stepErr
+	})
+	if err != nil {
+		return LoginSessionActivityOutput{Data: data}, err
+	}
+	return LoginSessionActivityOutput{
+		SessionToken: result.GetSessionToken(),
+		AccessToken:  result.GetAccessToken(),
+		DeviceID:     result.GetDeviceId(),
+		Data:         data,
+	}, nil
 }
 
 func (s *orchestratorServer) RegisterMailboxAtomicActivity(ctx context.Context, input MailboxRegistrationActivityInput) (MailboxRegistrationActivityOutput, error) {

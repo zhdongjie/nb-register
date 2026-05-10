@@ -53,4 +53,7 @@ service BrowserRegistration {
   rpc StartRegister(RegisterRequest) returns (StartRegisterResponse);
   rpc CompleteRegister(CompleteRegisterRequest) returns (RegisterResponse);
   rpc CancelRegister(CancelRegisterRequest) returns (CancelRegisterResponse);
+  rpc StartLogin(RegisterRequest) returns (StartRegisterResponse);
+  rpc CompleteLogin(CompleteRegisterRequest) returns (RegisterResponse);
+  rpc CancelLogin(CancelRegisterRequest) returns (CancelRegisterResponse);
 }

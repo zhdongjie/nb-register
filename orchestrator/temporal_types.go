@@ -73,6 +73,18 @@ type ProbePlusTrialActivityOutput struct {
 	Data              map[string]any
 }
 
+type LoginSessionActivityInput struct {
+	JobID     string
+	AccountID string
+}
+
+type LoginSessionActivityOutput struct {
+	SessionToken string
+	AccessToken  string
+	DeviceID     string
+	Data         map[string]any
+}
+
 type PersistRegisteredInput struct {
 	AccountID         string
 	SessionToken      string
@@ -171,6 +183,18 @@ type ActivateAccountWorkflowResult struct {
 type ProbePlusTrialWorkflowInput struct {
 	JobID     string
 	AccountID string
+}
+
+type LoginSessionWorkflowInput struct {
+	JobID     string
+	AccountID string
+}
+
+type LoginSessionWorkflowResult struct {
+	JobID        string
+	SessionToken string
+	AccessToken  string
+	ErrorMessage string
 }
 
 type ProbePlusTrialWorkflowResult struct {

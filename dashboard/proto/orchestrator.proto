@@ -50,6 +50,16 @@ message ActivateAccountResponse {
   string snap_token = 5;
 }
 
+message LoginAccountRequest {
+  string account_id = 1;
+}
+
+message LoginAccountResponse {
+  string job_id = 1;
+  bool started = 2;
+  string error_message = 3;
+}
+
 message ProbePlusTrialRequest {
   string account_id = 1;
 }
@@ -161,6 +171,7 @@ message SubmitRegistrationOtpResponse {
 service OrchestratorService {
   rpc RegisterAccount(RegisterAccountRequest) returns (RegisterAccountResponse);
   rpc ActivateAccount(ActivateAccountRequest) returns (ActivateAccountResponse);
+  rpc LoginAccount(LoginAccountRequest) returns (LoginAccountResponse);
   rpc ProbePlusTrial(ProbePlusTrialRequest) returns (ProbePlusTrialResponse);
   rpc RegisterAndActivateAccount(RegisterAndActivateAccountRequest) returns (RegisterAndActivateAccountResponse);
   rpc RegisterMailbox(RegisterMailboxRequest) returns (RegisterMailboxResponse);

@@ -179,6 +179,27 @@ def _extract_midtrans_charge_reference(data: Any) -> str:
     return ""
 
 
+def _midtrans_charge_denial_message(data: dict[str, Any]) -> str:
+    status = str(data.get("transaction_status") or "").strip()
+    fraud_status = str(data.get("fraud_status") or "").strip()
+    status_code = str(data.get("status_code") or "").strip()
+    if status not in {"deny", "cancel", "expire", "failure"} and fraud_status != "deny":
+        return ""
+
+    parts = ["midtrans charge denied"]
+    if status_code:
+        parts.append(f"status_code={status_code}")
+    if status:
+        parts.append(f"transaction_status={status}")
+    if fraud_status:
+        parts.append(f"fraud_status={fraud_status}")
+    for key in ("status_message", "order_id", "transaction_id", "gross_amount", "currency"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
 def _request_with_retries(
     session: Any,
     method: str,
@@ -915,6 +936,9 @@ class GoPayCharger:
         )
         r.raise_for_status()
         data = r.json()
+        denied = _midtrans_charge_denial_message(data)
+        if denied:
+            raise GoPayError(denied)
         charge_ref = _extract_midtrans_charge_reference(data)
         if not charge_ref:
             raise GoPayError(f"midtrans charge: no reference in response {_json_excerpt(data)}")

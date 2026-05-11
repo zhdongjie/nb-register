@@ -6,6 +6,7 @@ from gopay import (
     GoPayError,
     GoPayOTPRejected,
     _extract_midtrans_charge_reference,
+    _midtrans_charge_denial_message,
     _request_with_retries,
     _resolve_expected_amount,
     _stripe_confirm_error_detail,
@@ -125,6 +126,22 @@ class MidtransChargeReferenceTests(unittest.TestCase):
         ref = _extract_midtrans_charge_reference({"payment_reference": "A555AA"})
 
         self.assertEqual(ref, "A555AA")
+
+    def test_denial_message_is_explicit(self):
+        message = _midtrans_charge_denial_message({
+            "status_code": "202",
+            "status_message": "Your transaction is denied.",
+            "transaction_status": "deny",
+            "fraud_status": "deny",
+            "order_id": "setatt_test",
+            "gross_amount": "1",
+            "currency": "IDR",
+        })
+
+        self.assertIn("midtrans charge denied", message)
+        self.assertIn("transaction_status=deny", message)
+        self.assertIn("fraud_status=deny", message)
+        self.assertIn("gross_amount=1", message)
 
 
 class StripeExpectedAmountTests(unittest.TestCase):

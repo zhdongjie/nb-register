@@ -523,23 +523,21 @@ def browser_register(
                 pass
             logger.info(f"[browser-reg] Reached auth page: {sanitize_url_for_log(page.url)}")
 
-            # Click "Continue with password" as soon as it appears
-            if not page.query_selector('input[type="password"]:visible'):
-                switched = False
-                # Wait for the link to render
+            def _password_input_ready() -> bool:
                 try:
-                    page.wait_for_selector(
-                        'a:has-text("Continue with password"), button:has-text("Continue with password"), '
-                        'a:has-text("Use password"), button:has-text("Use password"), '
-                        'input[type="password"]',
-                        state="visible", timeout=15000,
+                    return bool(
+                        page.query_selector('input[type="password"]:visible')
+                        or page.query_selector('input[name="password"]:visible')
                     )
                 except Exception:
-                    pass
+                    return False
+
+            def _click_password_flow() -> bool:
                 for sel in [
                     'button:has-text("Continue with password")',
                     'a:has-text("Continue with password")',
                     'button:has-text("continue with password")',
+                    'a:has-text("continue with password")',
                     'button:has-text("Use password")',
                     'a:has-text("Use password")',
                     'button:has-text("Password")',
@@ -547,49 +545,81 @@ def browser_register(
                 ]:
                     try:
                         el = page.query_selector(sel)
-                        if el and el.is_visible():
-                            el.click(timeout=5000)
-                            switched = True
+                        if el and el.is_visible() and _safe_click(el, f"Password flow {sel}", timeout=1500):
                             logger.info(f"[browser-reg] Switched to password flow: {sel}")
-                            break
+                            return True
                     except Exception:
                         continue
 
-                if not switched:
-                    # JS fallback — look for button/link with exact "Continue with password"
-                    try:
-                        found = page.evaluate('''() => {
-                            const els = document.querySelectorAll('a, button, div[role="button"]');
-                            for (const el of els) {
-                                const t = (el.textContent || '').trim();
-                                if (t === 'Continue with password' && el.offsetParent !== null) {
-                                    el.click();
-                                    return true;
-                                }
+                try:
+                    return bool(page.evaluate('''() => {
+                        const els = document.querySelectorAll('a, button, div[role="button"]');
+                        for (const el of els) {
+                            const rect = el.getBoundingClientRect();
+                            const visible = rect.width > 0 && rect.height > 0;
+                            const t = (el.textContent || '').trim().toLowerCase();
+                            if (visible && (
+                                t === 'continue with password' ||
+                                t === 'use password' ||
+                                t === 'password'
+                            )) {
+                                el.click();
+                                return true;
                             }
-                            return false;
-                        }''')
-                        if found:
-                            logger.info("[browser-reg] Switched to password flow via JS")
-                            switched = True
+                        }
+                        return false;
+                    }'''))
+                except Exception:
+                    return False
+
+            password_or_switch_selector = (
+                'input[type="password"], input[name="password"], '
+                'button:has-text("Continue with password"), '
+                'a:has-text("Continue with password"), '
+                'button:has-text("continue with password"), '
+                'a:has-text("continue with password"), '
+                'button:has-text("Use password"), '
+                'a:has-text("Use password"), '
+                'button:has-text("Password"), '
+                'a:has-text("Password")'
+            )
+
+            # Click "Continue with password" as soon as it appears. Keep this
+            # short: if the click does not switch pages, waiting for the password
+            # input only hides the real blocker.
+            if not _password_input_ready():
+                try:
+                    page.wait_for_selector(password_or_switch_selector, state="visible", timeout=8000)
+                except Exception:
+                    pass
+                check_cancel()
+                if not _password_input_ready() and not _click_password_flow():
+                    page.screenshot(path=f"{screenshot_dir}/no_password_link.png")
+                    raise RuntimeError("Continue with password button not found")
+                if not _password_input_ready():
+                    try:
+                        page.wait_for_selector(
+                            'input[type="password"], input[name="password"]',
+                            state="visible",
+                            timeout=5000,
+                        )
                     except Exception:
                         pass
-
-                if not switched:
-                    page.screenshot(path=f"{screenshot_dir}/no_password_link.png")
-                    logger.warning("[browser-reg] Could not find 'Continue with password' button")
+                if not _password_input_ready():
+                    page.screenshot(path=f"{screenshot_dir}/password_input_after_switch_missing.png")
+                    raise RuntimeError("Password input did not appear after Continue with password")
 
             # --- [4] Set password ---
             logger.info("[browser-reg] Waiting for password field ...")
             try:
-                page.wait_for_selector(
-                    'input[type="password"], input[name="password"]',
-                    state="visible", timeout=30000,
-                )
+                if not _password_input_ready():
+                    page.wait_for_selector(
+                        'input[type="password"], input[name="password"]',
+                        state="visible", timeout=3000,
+                    )
                 pwd_input = (page.query_selector('input[type="password"]:visible')
                              or page.query_selector('input[name="password"]:visible'))
                 pwd_input.click()
-                sleep(0.3)
                 pwd_input.fill(password)
                 sleep(random.uniform(0.5, 1.2))
                 for sel in [

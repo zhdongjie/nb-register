@@ -583,13 +583,21 @@ def browser_register(
                 'button:has-text("Password"), '
                 'a:has-text("Password")'
             )
+            # These are upper bounds only. wait_for_selector returns as soon as
+            # the element is visible, so the flow still clicks immediately when
+            # "Continue with password" appears.
+            password_switch_timeout_ms = 30000
+            password_input_after_switch_timeout_ms = 30000
+            password_input_final_timeout_ms = 30000
 
-            # Click "Continue with password" as soon as it appears. Keep this
-            # short: if the click does not switch pages, waiting for the password
-            # input only hides the real blocker.
+            # Click "Continue with password" as soon as it appears.
             if not _password_input_ready():
                 try:
-                    page.wait_for_selector(password_or_switch_selector, state="visible", timeout=8000)
+                    page.wait_for_selector(
+                        password_or_switch_selector,
+                        state="visible",
+                        timeout=password_switch_timeout_ms,
+                    )
                 except Exception:
                     pass
                 check_cancel()
@@ -601,7 +609,7 @@ def browser_register(
                         page.wait_for_selector(
                             'input[type="password"], input[name="password"]',
                             state="visible",
-                            timeout=5000,
+                            timeout=password_input_after_switch_timeout_ms,
                         )
                     except Exception:
                         pass
@@ -615,7 +623,7 @@ def browser_register(
                 if not _password_input_ready():
                     page.wait_for_selector(
                         'input[type="password"], input[name="password"]',
-                        state="visible", timeout=3000,
+                        state="visible", timeout=password_input_final_timeout_ms,
                     )
                 pwd_input = (page.query_selector('input[type="password"]:visible')
                              or page.query_selector('input[name="password"]:visible'))

@@ -548,13 +548,15 @@ function App() {
         </nav>
 
         <div className="contentPane">
-          <section className="metrics">
-            <Metric label="账号" value={accounts.length} hint="当前账号池总量" icon={<ShieldCheck />} />
-            <Metric label="已激活" value={accounts.filter((a) => a.status === 'ACTIVATED').length} hint="可进入后续使用的账号" icon={<Zap />} />
-            <Metric label="可取码邮箱" value={usableMailboxCount} hint="AVAILABLE 且 OAuth 已授权" icon={<Mail />} />
-            <Metric label="运行中任务" value={runningJobCount} hint="正在执行的工作流" icon={<Activity />} />
-            <Metric label="可重试失败" value={retryableFailureCount} hint="失败且可直接重试" icon={<RefreshCcw />} />
-          </section>
+          {activeView === 'accounts' && (
+            <section className="metrics">
+              <Metric label="账号" value={accounts.length} hint="当前账号池总量" icon={<ShieldCheck />} />
+              <Metric label="已激活" value={accounts.filter((a) => a.status === 'ACTIVATED').length} hint="可进入后续使用的账号" icon={<Zap />} />
+              <Metric label="可取码邮箱" value={usableMailboxCount} hint="AVAILABLE 且 OAuth 已授权" icon={<Mail />} />
+              <Metric label="运行中任务" value={runningJobCount} hint="正在执行的工作流" icon={<Activity />} />
+              <Metric label="可重试失败" value={retryableFailureCount} hint="失败且可直接重试" icon={<RefreshCcw />} />
+            </section>
+          )}
 
           <div className="contentStatus">
             {panelState.error && <PanelNotice kind="error" title="数据刷新失败" text={panelState.error} />}

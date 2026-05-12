@@ -302,6 +302,26 @@ class GoPayCharger:
                 except Exception:
                     pass
 
+    def _chatgpt_request(self, method: str, url: str, **kwargs: Any) -> Any:
+        log = getattr(self, "log", None)
+        return _request_with_retries(
+            self.cs,
+            method,
+            url,
+            log=log if callable(log) else (lambda _msg: None),
+            **kwargs,
+        )
+
+    def _ext_request(self, method: str, url: str, **kwargs: Any) -> Any:
+        log = getattr(self, "log", None)
+        return _request_with_retries(
+            self.ext,
+            method,
+            url,
+            log=log if callable(log) else (lambda _msg: None),
+            **kwargs,
+        )
+
     # ───── Step 1-4: ChatGPT/Stripe checkout ─────
 
     def _chatgpt_create_checkout(self) -> str:
@@ -316,7 +336,8 @@ class GoPayCharger:
             "checkout_ui_mode": "hosted",
             "cancel_url": "https://chatgpt.com/#pricing",
         }
-        r = self.cs.post(
+        r = self._chatgpt_request(
+            "post",
             "https://chatgpt.com/backend-api/payments/checkout",
             json=body, timeout=DEFAULT_TIMEOUT,
         )
@@ -499,7 +520,8 @@ class GoPayCharger:
 
     def _chatgpt_sentinel_ping(self):
         try:
-            self.cs.post(
+            self._chatgpt_request(
+                "post",
                 "https://chatgpt.com/backend-api/sentinel/ping",
                 json={}, timeout=DEFAULT_TIMEOUT,
             )
@@ -509,7 +531,8 @@ class GoPayCharger:
     def _chatgpt_approve(self, cs_id: str, processor_entity: str = "openai_llc"):
         # sentinel/ping 在 approve 之前刷一下，否则 approve 过但 setup_intent 不创
         self._chatgpt_sentinel_ping()
-        r = self.cs.post(
+        r = self._chatgpt_request(
+            "post",
             "https://chatgpt.com/backend-api/payments/checkout/approve",
             json={"checkout_session_id": cs_id, "processor_entity": processor_entity},
             timeout=DEFAULT_TIMEOUT,
@@ -555,7 +578,8 @@ class GoPayCharger:
             ),
         }
         while time.time() < deadline:
-            r = self.ext.get(
+            r = self._ext_request(
+                "get",
                 f"https://api.stripe.com/v1/payment_pages/{cs_id}",
                 params=params,
                 timeout=DEFAULT_TIMEOUT,
@@ -591,7 +615,7 @@ class GoPayCharger:
         )
         if direct:
             return direct.group(1)
-        r = self.ext.get(pm_url, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
+        r = self._ext_request("get", pm_url, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
         if r.status_code not in (301, 302, 303, 307, 308):
             raise GoPayError(f"pm-redirects: expected redirect, got {r.status_code}")
         loc = r.headers.get("Location", "")
@@ -604,7 +628,8 @@ class GoPayCharger:
         """Seed Midtrans cookies, then load transaction metadata."""
         redirection_url = self._midtrans_redirection_url(snap_token)
         try:
-            landing = self.ext.get(
+            landing = self._ext_request(
+                "get",
                 redirection_url,
                 headers={
                     "Accept": (
@@ -625,7 +650,8 @@ class GoPayCharger:
         except Exception:
             pass
 
-        r = self.ext.get(
+        r = self._ext_request(
+            "get",
             f"https://app.midtrans.com/snap/v1/transactions/{snap_token}",
             headers=self._midtrans_headers(snap_token, source=True),
             timeout=DEFAULT_TIMEOUT,
@@ -652,7 +678,8 @@ class GoPayCharger:
     def _midtrans_warm_snap_side_effects(self, snap_token: str):
         """Replay non-critical Snap XHRs seen before linking in the browser."""
         try:
-            self.ext.post(
+            self._ext_request(
+                "post",
                 f"https://app.midtrans.com/snap/v1/promos/{snap_token}/search",
                 headers=self._midtrans_headers(snap_token, source=True, origin=True),
                 timeout=DEFAULT_TIMEOUT,
@@ -660,7 +687,8 @@ class GoPayCharger:
         except Exception as e:
             self.log(f"[gopay] midtrans promos warmup skipped: {e}")
         try:
-            self.ext.get(
+            self._ext_request(
+                "get",
                 "https://app.midtrans.com/snap/v3/experiment",
                 params={"id": snap_token},
                 headers=self._midtrans_headers(snap_token, source=True),
@@ -723,7 +751,7 @@ class GoPayCharger:
         last_err: Optional[str] = None
         bypass_tried = False
         for attempt in range(1, LINK_RETRY_LIMIT + 2):
-            r = self.ext.post(url, json=body, headers=auth_headers, timeout=DEFAULT_TIMEOUT)
+            r = self._ext_request("post", url, json=body, headers=auth_headers, timeout=DEFAULT_TIMEOUT)
             ref = self._parse_linking_reference(r)
             if ref:
                 self.log(f"[gopay] midtrans linking ok reference={ref}")
@@ -747,7 +775,8 @@ class GoPayCharger:
                 self.log(
                     f"[gopay] midtrans linking rate-limited status={r.status_code}; retrying without Authorization",
                 )
-                rb = self.ext.post(
+                rb = self._ext_request(
+                    "post",
                     url, json=body, headers=base_headers, timeout=DEFAULT_TIMEOUT,
                 )
                 ref = self._parse_linking_reference(rb)
@@ -804,7 +833,8 @@ class GoPayCharger:
         return headers
 
     def _gopay_validate_reference(self, reference_id: str):
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             "https://gwa.gopayapi.com/v1/linking/validate-reference",
             json={"reference_id": reference_id},
             headers=self._gopay_headers(locale=None),
@@ -815,7 +845,8 @@ class GoPayCharger:
             raise GoPayError(f"validate-reference failed: {r.text[:300]}")
 
     def _gopay_user_consent(self, reference_id: str):
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             "https://gwa.gopayapi.com/v1/linking/user-consent",
             json={"reference_id": reference_id},
             headers=self._gopay_headers(locale=self.browser_locale),
@@ -828,7 +859,8 @@ class GoPayCharger:
 
     def _gopay_validate_otp(self, reference_id: str, otp: str) -> tuple[str, str]:
         """Returns (challenge_id, client_id) for PIN tokenization."""
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             "https://gwa.gopayapi.com/v1/linking/validate-otp",
             json={"reference_id": reference_id, "otp": otp},
             headers=self._gopay_headers(locale=self.browser_locale),
@@ -888,7 +920,8 @@ class GoPayCharger:
             }
         else:
             raise GoPayError(f"unknown pin token purpose={purpose!r}")
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             "https://customer.gopayapi.com/api/v1/users/pin/tokens/nb",
             json=body,
             headers=headers,
@@ -912,7 +945,8 @@ class GoPayCharger:
         return token
 
     def _gopay_validate_pin(self, reference_id: str, pin_token: str):
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             "https://gwa.gopayapi.com/v1/linking/validate-pin",
             json={"reference_id": reference_id, "token": pin_token},
             headers=self._gopay_headers(locale=self.browser_locale),
@@ -929,7 +963,8 @@ class GoPayCharger:
         """POST snap/v2/transactions/{snap}/charge → charge_ref like A12..."""
         url = f"https://app.midtrans.com/snap/v2/transactions/{snap_token}/charge"
         headers = self._midtrans_headers(snap_token, json_body=True, source=True)
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             url,
             json={"payment_type": "gopay", "tokenization": "true", "promo_details": None},
             headers=headers, timeout=DEFAULT_TIMEOUT,
@@ -950,7 +985,8 @@ class GoPayCharger:
         url = f"https://app.midtrans.com/snap/v1/transactions/{snap_token}/status"
         last = ""
         for _ in range(MIDTRANS_STATUS_POLL_LIMIT):
-            r = self.ext.get(
+            r = self._ext_request(
+                "get",
                 url,
                 headers=self._midtrans_headers(snap_token, source=True),
                 timeout=DEFAULT_TIMEOUT,
@@ -976,7 +1012,8 @@ class GoPayCharger:
     def _gopay_payment_validate(self, charge_ref: str):
         # midtrans 创建 charge 后 GoPay 后端要数秒才能 fetch；轮询直到 ready
         for i in range(8):
-            r = self.ext.get(
+            r = self._ext_request(
+                "get",
                 f"https://gwa.gopayapi.com/v1/payment/validate?reference_id={charge_ref}",
                 headers=self._gopay_headers(json_body=False),
                 timeout=DEFAULT_TIMEOUT,
@@ -988,7 +1025,8 @@ class GoPayCharger:
 
     def _gopay_payment_confirm(self, charge_ref: str) -> tuple[str, str]:
         """Returns (challenge_id, client_id) for the charge PIN."""
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             f"https://gwa.gopayapi.com/v1/payment/confirm?reference_id={charge_ref}",
             json={"payment_instructions": []},
             headers=self._gopay_headers(locale=None),
@@ -1002,7 +1040,8 @@ class GoPayCharger:
         return ch.get("challenge_id", ""), ch.get("client_id", "")
 
     def _gopay_payment_process(self, charge_ref: str, pin_token: str):
-        r = self.ext.post(
+        r = self._ext_request(
+            "post",
             f"https://gwa.gopayapi.com/v1/payment/process?reference_id={charge_ref}",
             json={
                 "challenge": {
@@ -1026,7 +1065,8 @@ class GoPayCharger:
         """Poll chatgpt verify until plan is active."""
         deadline = time.time() + 60
         while time.time() < deadline:
-            r = self.cs.get(
+            r = self._chatgpt_request(
+                "get",
                 "https://chatgpt.com/checkout/verify",
                 params={
                     "stripe_session_id": cs_id,

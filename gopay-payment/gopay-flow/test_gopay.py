@@ -65,6 +65,31 @@ class FlakySession:
         return FakeResponse(200, payload={"ok": True})
 
 
+class FlakyGoPayExt:
+    def __init__(self):
+        self.calls = 0
+        self.headers = {}
+        self.proxies = {}
+
+    def post(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("curl: (35) TLS connect error: invalid library")
+        return FakeResponse(200, payload={
+            "success": True,
+            "data": {
+                "challenge": {
+                    "action": {
+                        "value": {
+                            "challenge_id": "challenge-1",
+                            "client_id": "client-1",
+                        },
+                    },
+                },
+            },
+        })
+
+
 class GoPayValidateOtpTests(unittest.TestCase):
     def charger_for(self, response):
         charger = GoPayCharger.__new__(GoPayCharger)
@@ -86,6 +111,18 @@ class GoPayValidateOtpTests(unittest.TestCase):
 
         with self.assertRaises(GoPayOTPRejected):
             charger._gopay_validate_otp("ref", "111111")
+
+    def test_validate_otp_retries_tls_transport_error(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.ext = FlakyGoPayExt()
+        charger.browser_locale = "zh-CN"
+        charger.log = lambda _msg: None
+
+        challenge_id, client_id = charger._gopay_validate_otp("ref", "111111")
+
+        self.assertEqual(challenge_id, "challenge-1")
+        self.assertEqual(client_id, "client-1")
+        self.assertEqual(charger.ext.calls, 2)
 
 
 class RetryTransportTests(unittest.TestCase):

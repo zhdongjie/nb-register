@@ -26,7 +26,6 @@ import base64
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -39,7 +38,6 @@ GOPAY_CUSTOMER = GOPAY_API
 GOJEK_API = "https://api.gojekapi.com"
 GOTO_AUTH = "https://accounts.goto-products.com"
 
-STATE_FILE = os.environ.get("STATE_FILE", "/tmp/gopay_cycle_state.json")
 PROXY = os.environ.get("GOPAY_PROXY", "socks5://127.0.0.1:10810")
 HEROSMS_KEY = os.environ.get("HEROSMS_API_KEY", "")
 HEROSMS_SERVICE = os.environ.get("HEROSMS_SERVICE", "ni")
@@ -132,28 +130,11 @@ def wait_otp(prompt: str = "Enter OTP: ", activation_id: str = None) -> str:
 
 
 def load_state():
-    with _STATE_LOCK:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        return {}
+    return {}
 
 
 def save_state(state):
-    with _STATE_LOCK:
-        directory = os.path.dirname(STATE_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=".cycle_state.", suffix=".json", dir=directory or None)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2)
-                f.write("\n")
-            os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, STATE_FILE)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+    return None
 
 
 def _extract_recovery_token(data: dict) -> str:
@@ -461,6 +442,85 @@ def _store_token_response(state: dict, data: dict) -> None:
     state.pop("last_token_refresh_failed_at", None)
 
 
+def persist_login_start_state(state: dict, device: dict, phone: str) -> None:
+    state["device"] = device
+    state["_login_phone"] = phone
+    state["_login_started_at"] = int(time.time())
+    state["stage"] = "login"
+    state.pop("last_error", None)
+    save_state(state)
+
+
+def persist_login_ready_state(state: dict, token_data: dict, phone: str) -> None:
+    _store_token_response(state, token_data)
+    state["phone"] = phone
+    state["stage"] = "ready"
+    state["ready_at"] = int(time.time())
+    state.pop("last_error", None)
+    for key in LOGIN_STATE_KEYS:
+        state.pop(key, None)
+    save_state(state)
+
+
+def persist_login_otp_state(
+    state: dict,
+    phone: str,
+    country_code: str,
+    verification_id: str,
+    method: str,
+    otp_token: str,
+    two_fa_token: str,
+) -> None:
+    state["_login_phone"] = phone
+    state["_login_country_code"] = country_code
+    state["_login_verification_id"] = verification_id
+    state["_login_verification_method"] = method
+    state["_login_otp_token"] = otp_token
+    state["_login_2fa_token"] = two_fa_token
+    now = int(time.time())
+    state["_login_otp_sent_at"] = now
+    state["_login_otp_expires_at"] = now + GOPAY_LOGIN_OTP_TIMEOUT_SECONDS
+    state["stage"] = "login_otp_pending"
+    state.pop("last_error", None)
+    save_state(state)
+
+
+def persist_signup_start_state(state: dict, device: dict, phone: str, country_code: str, name: str, email: str) -> None:
+    state["device"] = device
+    state["_signup_phone"] = phone
+    state["_signup_country_code"] = country_code
+    state["_signup_name"] = name
+    state["_signup_email"] = email
+    state["_signup_started_at"] = int(time.time())
+    state["stage"] = "signup"
+    state.pop("last_error", None)
+    save_state(state)
+
+
+def persist_signup_otp_state(state: dict, verification_id: str, method: str, otp_token: str) -> None:
+    now = int(time.time())
+    state["_signup_verification_id"] = verification_id
+    state["_signup_verification_method"] = method
+    state["_signup_otp_token"] = otp_token
+    state["_signup_otp_sent_at"] = now
+    state["_signup_otp_expires_at"] = now + GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS
+    state["stage"] = "signup_otp_pending"
+    state.pop("last_error", None)
+    save_state(state)
+
+
+def persist_signup_complete_state(state: dict, token_data: dict, phone: str, name: str, email: str) -> None:
+    _store_token_response(state, token_data)
+    state["phone"] = phone
+    state["name"] = name
+    state["email"] = email
+    state["stage"] = "signup_pin_required"
+    state.pop("last_error", None)
+    for key in SIGNUP_OTP_STATE_KEYS:
+        state.pop(key, None)
+    save_state(state)
+
+
 def migrate_active_tokens_to_tmp(state: dict, phone: str = "") -> bool:
     moved = False
     for key in ACTIVE_TOKEN_STATE_KEYS:
@@ -706,12 +766,7 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "") 
     attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
     for attempt in range(1, attempts + 1):
         device = new_logon_device_profile()
-        state["device"] = device
-        state["_login_phone"] = normalized_phone
-        state["_login_started_at"] = int(time.time())
-        state["stage"] = "login"
-        state.pop("last_error", None)
-        save_state(state)
+        persist_login_start_state(state, device, normalized_phone)
 
         c = GopayClient("", proxy=PROXY, device=device)
         r = c.post(f"{GOTO_AUTH}/goto-auth/login/methods", body=_auth_body(
@@ -810,11 +865,7 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "") 
         token=one_fa_token,
     ))
     if r["status"] == 201:
-        _store_token_response(state, r["data"])
-        state["phone"] = normalized_phone
-        state["stage"] = "ready"
-        state["ready_at"] = int(time.time())
-        save_state(state)
+        persist_login_ready_state(state, r["data"], normalized_phone)
         return {"success": True, "ready": True, "otp_sent": False}
 
     two_fa_token = r["data"].get("2fa_token", "") if isinstance(r.get("data"), dict) else ""
@@ -844,17 +895,7 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "") 
     if not otp_token:
         return {"success": False, "error": "2fa otp_token missing"}
 
-    state["_login_phone"] = normalized_phone
-    state["_login_country_code"] = cc
-    state["_login_verification_id"] = verification_id
-    state["_login_verification_method"] = method
-    state["_login_otp_token"] = otp_token
-    state["_login_2fa_token"] = two_fa_token
-    now = int(time.time())
-    state["_login_otp_sent_at"] = now
-    state["_login_otp_expires_at"] = now + GOPAY_LOGIN_OTP_TIMEOUT_SECONDS
-    state["stage"] = "login_otp_pending"
-    save_state(state)
+    persist_login_otp_state(state, normalized_phone, cc, verification_id, method, otp_token, two_fa_token)
     return {"success": True, "ready": False, "otp_sent": True, "verification_id": verification_id, "method": method}
 
 
@@ -892,14 +933,7 @@ def complete_login(state: dict, otp: str) -> str:
     if r["status"] != 201:
         raise RuntimeError(_response_error("challenge token failed", r))
 
-    _store_token_response(state, r["data"])
-    state["phone"] = state.get("_login_phone", "")
-    state["stage"] = "ready"
-    state["ready_at"] = int(time.time())
-    state.pop("last_error", None)
-    for key in LOGIN_STATE_KEYS:
-        state.pop(key, None)
-    save_state(state)
+    persist_login_ready_state(state, r["data"], state.get("_login_phone", ""))
     return state["token"]
 
 
@@ -918,15 +952,7 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
     clear_signup_state(state)
     clear_login_state(state)
     device = new_logon_device_profile()
-    state["device"] = device
-    state["_signup_phone"] = normalized_phone
-    state["_signup_country_code"] = cc
-    state["_signup_name"] = name
-    state["_signup_email"] = email
-    state["_signup_started_at"] = int(time.time())
-    state["stage"] = "signup"
-    state.pop("last_error", None)
-    save_state(state)
+    persist_signup_start_state(state, device, normalized_phone, cc, name, email)
 
     c = GopayClient(state.get("token", ""), proxy=PROXY, device=device)
     r = c.post(f"{GOTO_AUTH}/cvs/v1/methods", body=_auth_body(
@@ -961,14 +987,7 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
     if not otp_token:
         return {"success": False, "error": "signup otp_token missing"}
 
-    now = int(time.time())
-    state["_signup_verification_id"] = verification_id
-    state["_signup_verification_method"] = method
-    state["_signup_otp_token"] = otp_token
-    state["_signup_otp_sent_at"] = now
-    state["_signup_otp_expires_at"] = now + GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS
-    state["stage"] = "signup_otp_pending"
-    save_state(state)
+    persist_signup_otp_state(state, verification_id, method, otp_token)
     return {
         "success": True,
         "otp_sent": True,
@@ -1027,14 +1046,7 @@ def complete_signup(state: dict, otp: str) -> dict:
     if r["status"] != 201:
         return {"success": False, "error": _response_error("customer signup failed", r)}
 
-    _store_token_response(state, r["data"])
-    state["phone"] = phone
-    state["name"] = name
-    state["email"] = email
-    state["stage"] = "signup_pin_required"
-    state.pop("last_error", None)
-    for key in SIGNUP_OTP_STATE_KEYS:
-        state.pop(key, None)
+    persist_signup_complete_state(state, r["data"], phone, name, email)
     refresh = ensure_access_token(state, force=True)
     if not refresh.get("success"):
         state["last_error"] = refresh.get("error", "signup token refresh failed")
@@ -1438,7 +1450,7 @@ def full_cycle(state, main_phone: str, pin: str, session_token: str = None):
         trigger_payment(session_token)
     else:
         print("\n[STEP 4] SKIPPED: No --session-token provided. Trigger payment manually.")
-        print(f"  Phone: +62{main_phone}, Token saved in {STATE_FILE}")
+        print(f"  Phone: +62{main_phone}, token is only present in the current state payload.")
 
     # Step 6: 解绑
     print("\n[STEP 5] Unlinking...")

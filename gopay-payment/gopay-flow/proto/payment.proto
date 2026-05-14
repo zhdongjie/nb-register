@@ -9,6 +9,7 @@ message StartGoPayRequest {
   reserved 2, 3, 4, 5;
   string access_token = 6;
   bool use_cycle_token = 7;
+  string tokenization = 8;
 }
 
 message StartGoPayResponse {
@@ -56,6 +57,10 @@ message CompleteGoPayRequest {
   string otp = 2;
 }
 
+message ConfirmGoPayPaymentRequest {
+  string flow_id = 1;
+}
+
 message CancelGoPayRequest {
   string flow_id = 1;
 }
@@ -70,6 +75,11 @@ message GoPayResponse {
   string error_message = 2;
   string charge_ref = 3;
   string snap_token = 4;
+  bool awaiting_manual_confirmation = 5;
+  string deeplink_url = 6;
+  string qr_code_url = 7;
+  string finish_redirect_url = 8;
+  string finish_200_redirect_url = 9;
 }
 
 service PaymentService {
@@ -77,5 +87,6 @@ service PaymentService {
   rpc ProbePlusTrial(ProbePlusTrialPaymentRequest) returns (ProbePlusTrialPaymentResponse);
   rpc ProbeTier(ProbeTierPaymentRequest) returns (ProbeTierPaymentResponse);
   rpc CompleteGoPay(CompleteGoPayRequest) returns (GoPayResponse);
+  rpc ConfirmGoPayPayment(ConfirmGoPayPaymentRequest) returns (GoPayResponse);
   rpc CancelGoPay(CancelGoPayRequest) returns (CancelGoPayResponse);
 }

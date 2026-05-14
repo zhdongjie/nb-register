@@ -9,6 +9,7 @@ option go_package = "./;pb";
 message ChangePhoneStartRequest {
   string pin = 1;
   string new_phone = 2;  // 编排服务从 SMS 服务取号后传入，不含国家码
+  string state_json = 100;
 }
 
 message ChangePhoneStartResponse {
@@ -17,51 +18,62 @@ message ChangePhoneStartResponse {
   string new_phone = 3;       // 实际获取到的号码
   string activation_id = 4;   // 保留字段；HeroSMS activation_id 由 SMS 服务持有
   bool otp_sent = 5;
+  string state_json = 100;
 }
 
 message ChangePhoneCompleteRequest {
   string otp = 1;
+  string state_json = 100;
 }
 
 message ChangePhoneCompleteResponse {
   bool success = 1;
   string error_message = 2;
+  string state_json = 100;
 }
 
-message ChangePhoneRetryRequest {}
+message ChangePhoneRetryRequest {
+  string state_json = 100;
+}
 
 message ChangePhoneRetryResponse {
   bool success = 1;
   string error_message = 2;
   bool otp_sent = 3;
+  string state_json = 100;
 }
 
 // === 注销 ===
 
 message DeactivateStartRequest {
   string pin = 1;
+  string state_json = 100;
 }
 
 message DeactivateStartResponse {
   bool success = 1;
   string error_message = 2;
   bool otp_sent = 3;
+  string state_json = 100;
 }
 
 message DeactivateCompleteRequest {
   string otp = 1;
+  string state_json = 100;
 }
 
 message DeactivateCompleteResponse {
   bool success = 1;
   string error_message = 2;
   int64 deactivated_at = 3;
+  string state_json = 100;
 }
 
 // === 登录 ===
 
 message LoginStartRequest {
   string phone = 1;  // 主号码（不含国家码）
+  string state_json = 100;
 }
 
 message LoginStartResponse {
@@ -69,10 +81,12 @@ message LoginStartResponse {
   string error_message = 2;
   bool otp_sent = 3;
   string verification_id = 4;
+  string state_json = 100;
 }
 
 message LoginCompleteRequest {
   string otp = 1;
+  string state_json = 100;
 }
 
 message LoginCompleteResponse {
@@ -81,6 +95,7 @@ message LoginCompleteResponse {
   reserved 3;
   reserved "token";
   string phone = 4;
+  string state_json = 100;
 }
 
 // === 注册 ===
@@ -90,6 +105,7 @@ message SignupStartRequest {
   string name = 2;
   string email = 3;
   string country_code = 4; // 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62
+  string state_json = 100;
 }
 
 message SignupStartResponse {
@@ -98,10 +114,12 @@ message SignupStartResponse {
   bool otp_sent = 3;
   string verification_id = 4;
   string verification_method = 5;
+  string state_json = 100;
 }
 
 message SignupCompleteRequest {
   string otp = 1;
+  string state_json = 100;
 }
 
 message SignupCompleteResponse {
@@ -109,10 +127,12 @@ message SignupCompleteResponse {
   string error_message = 2;
   string phone = 3;
   bool pin_setup_required = 4;
+  string state_json = 100;
 }
 
 message CreatePinStartRequest {
   string pin = 1;
+  string state_json = 100;
 }
 
 message CreatePinStartResponse {
@@ -121,11 +141,13 @@ message CreatePinStartResponse {
   bool otp_sent = 3;
   string verification_id = 4;
   string verification_method = 5;
+  string state_json = 100;
 }
 
 message CreatePinCompleteRequest {
   string otp = 1;
   string pin = 2;
+  string state_json = 100;
 }
 
 message CreatePinCompleteResponse {
@@ -133,6 +155,7 @@ message CreatePinCompleteResponse {
   string error_message = 2;
   string phone = 3;
   bool pin_setup_complete = 4;
+  string state_json = 100;
 }
 
 // === 登录 / 注册入口 ===
@@ -141,6 +164,7 @@ message AuthStartRequest {
   string phone = 1;        // 手机号；为空时使用 GOPAY_PHONE
   string country_code = 2; // 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62
   string pin = 3;          // login 或 signup PIN setup 使用；为空时使用 GOPAY_PIN
+  string state_json = 100;
 }
 
 message AuthStartResponse {
@@ -153,11 +177,13 @@ message AuthStartResponse {
   string verification_method = 7;
   bool ready = 8;
   bool pin_setup_required = 9;
+  string state_json = 100;
 }
 
 message AuthCompleteRequest {
   string otp = 1;
   string pin = 2;  // signup PIN setup 使用；为空时使用 GOPAY_PIN
+  string state_json = 100;
 }
 
 message AuthCompleteResponse {
@@ -169,9 +195,12 @@ message AuthCompleteResponse {
   bool ready = 6;
   bool pin_setup_required = 7;
   bool pin_setup_complete = 8;
+  string state_json = 100;
 }
 
-message CheckTokenValidRequest {}
+message CheckTokenValidRequest {
+  string state_json = 100;
+}
 
 message CheckTokenValidResponse {
   bool success = 1;
@@ -183,21 +212,27 @@ message CheckTokenValidResponse {
   int64 balance_amount = 7;
   bool has_min_balance = 8;
   string balance_currency = 9;
+  string state_json = 100;
 }
 
 // === 解绑 ===
 
-message UnlinkRequest {}
+message UnlinkRequest {
+  string state_json = 100;
+}
 
 message UnlinkResponse {
   bool success = 1;
   string error_message = 2;
   int32 unlinked_count = 3;
+  string state_json = 100;
 }
 
 // === 状态 ===
 
-message StatusRequest {}
+message StatusRequest {
+  string state_json = 100;
+}
 
 message StatusResponse {
   string stage = 1;
@@ -217,24 +252,31 @@ message StatusResponse {
   int64 balance_amount = 14;
   bool has_min_balance = 15;
   string balance_currency = 16;
+  string state_json = 100;
 }
 
-message GetReadyAccessTokenRequest {}
+message GetReadyAccessTokenRequest {
+  string state_json = 100;
+}
 
 message GetReadyAccessTokenResponse {
   bool success = 1;
   string error_message = 2;
   string access_token = 3;
   string phone = 4;
+  string state_json = 100;
 }
 
 // === 注销状态 ===
 
-message CheckDeactivationRequest {}
+message CheckDeactivationRequest {
+  string state_json = 100;
+}
 
 message CheckDeactivationResponse {
   bool completed = 1;
   int64 remaining_seconds = 2;
+  string state_json = 100;
 }
 
 // === 号码可用性检测 ===
@@ -249,11 +291,11 @@ message CheckPhoneRequest {
 message CheckPhoneResponse {
   bool available = 1;       // true=未注册，可用于接收改号
   string error_message = 2;
-  string status = 3;        // available / registered / exhausted / rate_limited / error
+  string status = 3;        // available / registered / rate_limited / error
 }
 
 service GopayCycleService {
-  // 号码可用性检测
+  // 号码可用性检测；stateless，使用随机设备指纹调用 login/methods。
   rpc CheckPhone(CheckPhoneRequest) returns (CheckPhoneResponse);
 
   // 改手机号（start/retry/complete）

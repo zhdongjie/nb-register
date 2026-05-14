@@ -79,6 +79,103 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_str(name: str, default: str) -> str:
+    value = os.environ.get(name, "").strip()
+    return value or default
+
+
+def browser_locale() -> str:
+    return _env_str("BROWSER_REG_LOCALE", "en-US")
+
+
+def browser_languages() -> list[str]:
+    raw = _env_str("BROWSER_REG_LANGUAGES", f"{browser_locale()},en")
+    languages: list[str] = []
+    for item in re.split(r"[\s,]+", raw):
+        item = item.strip()
+        if item and item not in languages:
+            languages.append(item)
+    return languages or ["en-US", "en"]
+
+
+def browser_accept_language() -> str:
+    languages = browser_languages()
+    if len(languages) == 1:
+        return languages[0]
+    return ", ".join(
+        lang if index == 0 else f"{lang};q={max(0.1, 1.0 - index * 0.1):.1f}"
+        for index, lang in enumerate(languages)
+    )
+
+
+def browser_timezone() -> str:
+    return _env_str("BROWSER_REG_TIMEZONE", "America/New_York")
+
+
+def browser_window_size() -> tuple[int, int]:
+    width = max(800, _env_int("BROWSER_REG_WINDOW_WIDTH", 1365))
+    height = max(600, _env_int("BROWSER_REG_WINDOW_HEIGHT", 768))
+    return width, height
+
+
+def browser_firefox_user_prefs() -> dict[str, Any]:
+    return {
+        "intl.accept_languages": browser_accept_language(),
+        "intl.locale.requested": browser_locale(),
+        "javascript.use_us_english_locale": True,
+    }
+
+
+def browser_process_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update({
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+        "LANGUAGE": "en_US:en",
+    })
+    return env
+
+
+def apply_browser_language_overrides(ctx) -> None:
+    languages = browser_languages()
+    locale = languages[0]
+    try:
+        ctx.set_extra_http_headers({"Accept-Language": browser_accept_language()})
+    except Exception as e:
+        logger.info("[browser-reg] set Accept-Language failed: %s", sanitize_text(e))
+
+    script = f"""
+(() => {{
+  const language = {locale!r};
+  const languages = {languages!r};
+  const define = (object, property, value) => {{
+    try {{
+      Object.defineProperty(object, property, {{
+        get: () => value,
+        configurable: true,
+      }});
+    }} catch (_) {{}}
+  }};
+  define(Navigator.prototype, 'language', language);
+  define(Navigator.prototype, 'languages', languages);
+}})();
+"""
+    try:
+        ctx.add_init_script(script)
+    except Exception as e:
+        logger.info("[browser-reg] language init script failed: %s", sanitize_text(e))
+
+
 def _is_playwright_target_closed_error(error: Exception) -> bool:
     text = str(error).lower()
     return (
@@ -428,8 +525,15 @@ def browser_register(
         import platform as _platform
         _debug_mode = _env_bool("BROWSER_REG_DEBUG", False)
         _headless = False if _debug_mode else ("virtual" if _platform.system() == "Linux" else False)
+        _locale = browser_locale()
+        _languages = browser_languages()
+        _timezone = browser_timezone()
+        _geoip_enabled = _env_bool("CAMOUFOX_GEOIP", True)
+        _window_width, _window_height = browser_window_size()
+        _block_images = _env_bool("BROWSER_REG_BLOCK_IMAGES", False)
         if _debug_mode:
             logger.info("[browser-reg] Debug mode enabled: headless=False")
+            logger.info("[browser-reg] Language override: locale=%s languages=%s timezone=%s", _locale, _languages, _timezone)
 
         check_cancel()
         with Camoufox(
@@ -437,11 +541,18 @@ def browser_register(
             humanize=True,
             persistent_context=True,
             user_data_dir=tmp_profile,
-            screen=Screen(max_width=1920, max_height=1080),
+            screen=Screen(max_width=_window_width, max_height=_window_height),
+            window=(_window_width, _window_height),
+            block_images=_block_images,
             proxy=cf_proxy,
-            geoip=True,
-            locale="en-US",
+            geoip=_geoip_enabled,
+            locale=_languages,
+            timezone_id=_timezone,
+            extra_http_headers={"Accept-Language": browser_accept_language()},
+            firefox_user_prefs=browser_firefox_user_prefs(),
+            env=browser_process_env(),
         ) as ctx:
+            apply_browser_language_overrides(ctx)
             check_cancel()
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
@@ -615,9 +726,9 @@ def browser_register(
             for sel in ['button[type="submit"]', 'button:has-text("Continue")', 'button:has-text("Next")']:
                 b = _query_selector(sel)
                 if b and b.is_visible():
-                    b.click()
-                    logger.info(f"[browser-reg] Email continue: {sel}")
-                    break
+                    if _safe_click(b, f"Email continue {sel}"):
+                        logger.info(f"[browser-reg] Email continue: {sel}")
+                        break
             sleep(0.5)
 
             # --- [3] Email-verification page → switch to password flow ---
@@ -1069,7 +1180,7 @@ def browser_register(
             if result["access_token"] and _env_bool("BROWSER_CHECK_PLUS_TRIAL", False):
                 try:
                     stripe_pk = (os.environ.get("STRIPE_PUBLISHABLE_KEY") or DEFAULT_STRIPE_PK).strip()
-                    trial_info = _page_evaluate('''async ({token, stripePk, deviceId}) => {
+                    trial_info = _page_evaluate('''async ({token, stripePk, deviceId, browserLocale, browserTimezone}) => {
                         try {
                             const resp = await fetch('/backend-api/payments/checkout', {
                                 method: 'POST',
@@ -1111,8 +1222,8 @@ def browser_register(
                                     ? crypto.randomUUID()
                                     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
                                 const body = new URLSearchParams({
-                                    browser_locale: 'en-US',
-                                    browser_timezone: 'Asia/Shanghai',
+                                    browser_locale: browserLocale,
+                                    browser_timezone: browserTimezone,
                                     'elements_session_client[client_betas][0]': 'custom_checkout_server_updates_1',
                                     'elements_session_client[client_betas][1]': 'custom_checkout_manual_approval_1',
                                     'elements_session_client[elements_init_source]': 'custom_checkout',
@@ -1166,6 +1277,8 @@ def browser_register(
                         "token": result["access_token"],
                         "stripePk": stripe_pk,
                         "deviceId": result["device_id"],
+                        "browserLocale": browser_locale(),
+                        "browserTimezone": browser_timezone(),
                     })
                     checkout_url = trial_info.get("url", "") or ""
                     result["checkout_url"] = checkout_url

@@ -149,7 +149,7 @@ type Step = {
 };
 
 type Toast = { kind: 'ok' | 'error'; text: string } | null;
-type ViewKey = 'accounts' | 'mailboxes' | 'mailboxRegistration' | 'jobs';
+type ViewKey = 'accounts' | 'gopay' | 'mailboxes' | 'mailboxRegistration' | 'jobs';
 type MailboxDetailTab = 'overview' | 'aliases' | 'inbox';
 type DisplayLabelMap = Record<string, string>;
 type PanelState = { loading: boolean; error: string };
@@ -202,6 +202,8 @@ const actionLabels: DisplayLabelMap = {
   REGISTER: '注册账号',
   LOGIN_SESSION: '登录取 Token',
   ACTIVATE: '激活支付',
+  AUTOPAY: '自动支付',
+  GOPAY_CYCLE: 'GoPay 换绑',
   REGISTER_AND_ACTIVATE: '注册并激活',
   PROBE_ACCOUNT: '探测账号',
   REGISTER_MAILBOX: '注册 Outlook 邮箱',
@@ -211,6 +213,8 @@ const actionLabels: DisplayLabelMap = {
 const stepLabels: DisplayLabelMap = {
   create_email: '创建邮箱',
   wait_outlook_otp: '等待 Outlook OTP',
+  gopay_cycle_login: 'GoPay 登录',
+  gopay_cycle_change_phone: 'GoPay 换绑',
   gopay_login: 'GoPay 登录',
   gopay_payment: 'GoPay 支付',
   oauth_exchange: '交换 OAuth Token',
@@ -290,6 +294,23 @@ function App() {
     }
   }
 
+  async function runGoPayCycle() {
+    setBusy(true);
+    try {
+      const resp = await api<any>('/api/workflows/gopay-cycle', { method: 'POST', body: '{}' });
+      if (resp.error_message) {
+        setToast({ kind: 'error', text: resp.error_message });
+      } else {
+        setToast({ kind: 'ok', text: `GoPay 换绑已提交: ${resp.job_id || 'ok'}` });
+        await refresh();
+      }
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteAccount(account: Account) {
     if (!window.confirm(`删除账号 ${account.email || account.account_id}？`)) return;
     setBusy(true);
@@ -333,6 +354,24 @@ function App() {
         return;
       }
       setToast({ kind: 'ok', text: `OTP 已提交: ${short(resp.job_id || job.job_id)}` });
+      await refresh();
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+      throw err;
+    }
+  }
+
+  async function submitPaymentConfirmation(job: Job) {
+    try {
+      const resp = await api<{ success: boolean; job_id: string; error_message?: string }>(`/api/jobs/${job.job_id}/payment-confirm`, {
+        method: 'POST',
+        body: '{}'
+      });
+      if (resp.error_message || !resp.success) {
+        setToast({ kind: 'error', text: resp.error_message || '支付确认提交失败' });
+        return;
+      }
+      setToast({ kind: 'ok', text: `支付确认已提交: ${short(resp.job_id || job.job_id)}` });
       await refresh();
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
@@ -520,6 +559,9 @@ function App() {
   const selectedMailboxAliases = selectedMailbox ? aliasesForMailbox(mailboxes, selectedMailbox) : [];
   const mailboxRegisterJobs = jobs.filter((job) => job.action === 'REGISTER_MAILBOX');
   const runningMailboxRegisterCount = mailboxRegisterJobs.filter((job) => job.status === 'RUNNING').length;
+  const gopayCycleJobs = jobs.filter((job) => job.action === 'GOPAY_CYCLE');
+  const runningGoPayCycleCount = gopayCycleJobs.filter((job) => job.status === 'RUNNING').length;
+  const latestGoPayCycleJob = gopayCycleJobs[0];
   const retryableFailureCount = jobs.filter((job) => canRetryJob(job)).length;
   const latestMailboxRegisterJob = mailboxRegisterJobs[0];
   const panelState: PanelState = {
@@ -546,6 +588,7 @@ function App() {
       <section className="appFrame">
         <nav className="navRail" aria-label="主导航">
           <NavItem active={activeView === 'accounts'} icon={<Database size={17} />} label="账号" count={accounts.length} countLabel="全部账号数" onClick={() => openView('accounts')} />
+          <NavItem active={activeView === 'gopay'} icon={<RefreshCcw size={17} />} label="GoPay" count={runningGoPayCycleCount} countLabel="运行中的 GoPay 换绑任务" onClick={() => openView('gopay')} />
           <NavItem active={activeView === 'mailboxes'} icon={<Inbox size={17} />} label="邮箱管理" count={allocatableMailboxCount} countLabel="可分配主邮箱数" onClick={() => openView('mailboxes')} />
           <NavItem active={activeView === 'mailboxRegistration'} icon={<Play size={17} />} label="邮箱注册" count={runningMailboxRegisterCount} countLabel="运行中的邮箱注册任务" onClick={() => openView('mailboxRegistration')} />
           <NavItem active={activeView === 'jobs'} icon={<ListChecks size={17} />} label="工作流" count={runningJobCount} countLabel="运行中的工作流任务" onClick={() => openView('jobs')} />
@@ -599,7 +642,8 @@ function App() {
                   onSelect={selectAccount}
                   onRegister={(account) => runAccountWorkflow('注册账号', '/api/workflows/register', account)}
                   onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
-                  onActivate={(account) => runAccountWorkflow('激活账号', '/api/workflows/activate', account)}
+                  onActivate={(account) => runAccountWorkflow('激活支付', '/api/workflows/activate', account)}
+                  onAutopay={(account) => runAccountWorkflow('自动支付', '/api/workflows/autopay', account)}
                   onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
                   onRegisterActivate={(account) => runAccountWorkflow('注册并激活', '/api/workflows/register-and-activate', account)}
                   onRefreshAccessToken={refreshAccountAccessToken}
@@ -612,6 +656,31 @@ function App() {
                   <Button className="secondaryButton" onClick={() => openView('jobs')}>查看全部</Button>
                 </PanelHeader>
                 <JobCompactList jobs={jobs.slice(0, 8)} selected={selectedJob?.job_id} busy={busy} onSelect={selectJob} onRetry={retryJob} />
+              </div>
+            </section>
+          )}
+
+          {activeView === 'gopay' && (
+            <section className="workspace jobsWorkspace">
+              <div className="panel jobsPanel">
+                <PanelHeader title="GoPay 换绑" icon={<RefreshCcw size={16} />}>
+                  <div className="headerControls">
+                    <Button className="primaryButton" onClick={runGoPayCycle} disabled={busy || runningGoPayCycleCount > 0}>
+                      <RefreshCcw size={16} /> {runningGoPayCycleCount > 0 ? '换绑中' : '启动换绑'}
+                    </Button>
+                    <Button className="secondaryButton" onClick={() => openView('jobs')}>
+                      <ListChecks size={14} /> 全部工作流
+                    </Button>
+                  </div>
+                </PanelHeader>
+                <PanelIntro text="GoPay 换绑流程不关联账号；当前只执行登录和换绑，注销、注册、建 PIN 暂不执行。" />
+                <div className="mailboxRegisterBody">
+                  <RegistrationSummary job={latestGoPayCycleJob} runningCount={runningGoPayCycleCount} />
+                  {latestGoPayCycleJob && canSubmitOtp(latestGoPayCycleJob) && (
+                    <OtpSubmitter job={latestGoPayCycleJob} onSubmit={submitJobOtp} />
+                  )}
+                  <JobTable jobs={gopayCycleJobs.slice(0, 20)} selected={selectedJob?.job_id} busy={busy} emptyText="暂无 GoPay 换绑任务" onSelect={selectJob} onRetry={retryJob} />
+                </div>
               </div>
             </section>
           )}
@@ -722,6 +791,7 @@ function App() {
             busy={busy}
             onJobRetry={retryJob}
             onOtpSubmit={submitJobOtp}
+            onPaymentConfirm={submitPaymentConfirmation}
           />
         )}
       </DetailDrawer>
@@ -886,11 +956,12 @@ function AccountDetails({ account, showSecrets, busy, refreshingAccessToken, onS
   );
 }
 
-function JobDetails({ job, busy, onJobRetry, onOtpSubmit }: {
+function JobDetails({ job, busy, onJobRetry, onOtpSubmit, onPaymentConfirm }: {
   job: Job;
   busy: boolean;
   onJobRetry: (job: Job) => void;
   onOtpSubmit: (job: Job, otp: string) => Promise<void>;
+  onPaymentConfirm: (job: Job) => Promise<void>;
 }) {
   return (
     <div className="details">
@@ -911,6 +982,7 @@ function JobDetails({ job, busy, onJobRetry, onOtpSubmit }: {
         <KV label="更新时间" value={formatJobTime(job.updated_at)} />
         <KV label="错误" value={job.error_message || '-'} />
         {canSubmitOtp(job) && <OtpSubmitter job={job} onSubmit={onOtpSubmit} />}
+        {canConfirmManualPayment(job) && <PaymentConfirmationSubmitter job={job} onSubmit={onPaymentConfirm} />}
         <div className="timeline">
           {(job.steps || []).map((step) => (
             <div className="step" key={step.step_name}>
@@ -933,6 +1005,33 @@ function JobDetails({ job, busy, onJobRetry, onOtpSubmit }: {
           {(!job.steps || job.steps.length === 0) && <EmptyBlock text="暂无步骤明细。" />}
         </div>
       </section>
+    </div>
+  );
+}
+
+function PaymentConfirmationSubmitter({ job, onSubmit }: {
+  job: Job;
+  onSubmit: (job: Job) => Promise<void>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit() {
+    setSubmitting(true);
+    try {
+      await onSubmit(job);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="otpSubmitter">
+      <span><CheckCircle2 size={14} /> GoPay 支付</span>
+      <div>
+        <Button className="primaryButton" disabled={submitting} onClick={() => void submit()}>
+          <CheckCircle2 size={14} /> 已完成支付
+        </Button>
+      </div>
     </div>
   );
 }
@@ -979,7 +1078,7 @@ function OtpSubmitter({ job, onSubmit }: {
   );
 }
 
-function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   accounts: Account[];
   selected?: string;
   showSecrets: boolean;
@@ -990,6 +1089,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   onRegister: (a: Account) => void;
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
+  onAutopay: (a: Account) => void;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1042,6 +1142,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
                     onRegister={onRegister}
                     onLogin={onLogin}
                     onActivate={onActivate}
+                    onAutopay={onAutopay}
                     onProbeAccount={onProbeAccount}
                     onRegisterActivate={onRegisterActivate}
                     onRefreshAccessToken={onRefreshAccessToken}
@@ -1057,7 +1158,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   );
 }
 
-function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   account: Account;
   accountBusy: boolean;
   busy: boolean;
@@ -1065,6 +1166,7 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
   onRegister: (a: Account) => void;
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
+  onAutopay: (a: Account) => void;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1074,14 +1176,17 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
 
   const actions: RowActionDescriptor[] = [];
   if (canRegister(account)) actions.push({ label: '注册账号', icon: <Play size={14} />, onClick: () => onRegister(account), disabled: busy, kind: 'primary' });
-  if (canActivate(account)) actions.push({ label: '激活支付', icon: <Zap size={14} />, onClick: () => onActivate(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
+  if (canActivate(account)) actions.push({ label: '激活支付', icon: <Zap size={14} />, onClick: () => onActivate(account), disabled: true, kind: 'secondary' });
+  if (canAutopay(account)) actions.push({ label: '自动支付', icon: <Zap size={14} />, onClick: () => onAutopay(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canRefreshAccessToken(account)) actions.push({ label: refreshingAccessToken ? '获取中' : '获取 Access', icon: <KeyRound size={14} />, onClick: () => void onRefreshAccessToken(account), disabled: busy || refreshingAccessToken, kind: actions.length ? 'secondary' : 'primary' });
   if (canLoginSession(account)) actions.push({ label: loginActionLabel(account), icon: <KeyRound size={14} />, onClick: () => onLogin(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canProbeAccount(account)) actions.push({ label: '探测账号', icon: <Search size={14} />, onClick: () => onProbeAccount(account), disabled: busy, kind: 'secondary' });
   if (canRegister(account)) actions.push({ label: '注册并激活', icon: <ShieldCheck size={14} />, onClick: () => onRegisterActivate(account), disabled: busy, kind: 'secondary' });
   actions.push({ label: '删除账号', icon: <Trash2 size={14} />, onClick: () => onDelete(account), disabled: busy, kind: 'danger' });
 
-  const primary = actions.find((action) => action.kind === 'primary') || actions[0];
+  const primary = actions.find((action) => action.kind === 'primary' && !action.disabled) ||
+    actions.find((action) => !action.disabled) ||
+    actions[0];
   const secondary = actions.filter((action) => action !== primary);
 
   return (
@@ -1614,6 +1719,14 @@ function CreateAccountForm({ onDone, onError }: {
 
   return (
     <div className="createAccount">
+      <div className="workflowButtons">
+        <Button className="primaryButton" onClick={() => run('注册账号', '/api/workflows/register', {})} disabled={!!working}>
+          <Play size={15} /> 注册账号
+        </Button>
+        <Button className="secondaryButton" onClick={() => run('注册并激活', '/api/workflows/register-and-activate', {})} disabled={!!working}>
+          <ShieldCheck size={15} /> 注册并激活
+        </Button>
+      </div>
       <div className="formGrid">
         <Input placeholder="邮箱，可空" value={form.email} onChange={(e) => update('email', e.target.value)} />
         <Input placeholder="密码，可空" type="password" value={form.password} onChange={(e) => update('password', e.target.value)} />
@@ -1769,6 +1882,16 @@ function canActivate(account: Account) {
     (!!account.session_token || !!account.access_token);
 }
 
+function canAutopay(account: Account) {
+  const tier = normalizeTier(account.tier);
+  return !isUserAlreadyExistsAccount(account) &&
+    account.status !== 'ACTIVATED' &&
+    !account.plus_active &&
+    account.plus_trial_eligible !== false &&
+    (tier === '' || tier === 'free') &&
+    (!!account.session_token || !!account.access_token);
+}
+
 function canProbeAccount(account: Account) {
   return !isUserAlreadyExistsAccount(account) && !!account.session_token;
 }
@@ -1817,12 +1940,31 @@ function canRetryJob(job: Job) {
 }
 
 function canSubmitOtp(job: Job) {
-  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'REGISTER_AND_ACTIVATE');
+  if (canConfirmManualPayment(job)) return false;
+  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_CYCLE' || job.action === 'REGISTER_AND_ACTIVATE');
+}
+
+function canConfirmManualPayment(job: Job) {
+  if (job.status !== 'RUNNING' || job.last_step !== 'gopay_payment') return false;
+  if (!(job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'REGISTER_AND_ACTIVATE')) return false;
+  const data = stepResultData(job, 'gopay_payment');
+  return !!data?.payment_complete?.awaiting_manual_confirmation && data?.manual_payment_confirmation?.confirmed !== true;
+}
+
+function stepResultData(job: Job, stepName: string): any | null {
+  const step = (job.steps || []).find((item) => item.step_name === stepName);
+  if (!step?.result_json) return null;
+  try {
+    return JSON.parse(step.result_json);
+  } catch {
+    return null;
+  }
 }
 
 function otpSubmitLabel(job: Job) {
   if (job.action === 'LOGIN_SESSION') return '登录 OTP';
-  if (job.action === 'ACTIVATE' || (job.action === 'REGISTER_AND_ACTIVATE' && (job.last_step === 'gopay_login' || job.last_step === 'gopay_payment'))) {
+  if (job.action === 'GOPAY_CYCLE') return 'GoPay OTP';
+  if (job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || (job.action === 'REGISTER_AND_ACTIVATE' && (job.last_step === 'gopay_login' || job.last_step === 'gopay_payment'))) {
     return '支付 OTP';
   }
   return '注册 OTP';

@@ -138,6 +138,7 @@ services:
       - GOPAY_OTP_SERVICE_ADDR=${GOPAY_OTP_SERVICE_ADDR:-whatsapp-otp-relay:50051}
       - GOPAY_OTP_TIMEOUT_SECONDS=${GOPAY_OTP_TIMEOUT_SECONDS:-60}
       - REGISTRATION_OTP_TIMEOUT_SECONDS=${REGISTRATION_OTP_TIMEOUT_SECONDS:-180}
+      - GOPAY_CHANGE_PHONE_DISABLED=${GOPAY_CHANGE_PHONE_DISABLED:-false}
       - GOPAY_CHANGE_PHONE_MAX_FAILURES=${GOPAY_CHANGE_PHONE_MAX_FAILURES:-3}
       - GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS=${GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS:-120}
       - GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS=${GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS:-1}
@@ -174,10 +175,13 @@ services:
       - GOPAY_CHECKOUT_PROXY_URL=${GOPAY_CHECKOUT_PROXY_URL}
       - GOPAY_PAYMENT_PROXY_URL=${GOPAY_PAYMENT_PROXY_URL}
       - GOPAY_CYCLE_ADDR=${GOPAY_CYCLE_ADDR:-gopay-cycle:50051}
+      - ACCOUNT_DB_ADDR=account-db:50051
     volumes:
       - ./gopay-payment/gopay-flow/config.json:/app/gopay-flow/config.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - account-db
     restart: always
 
   whatsapp-otp-relay:
@@ -211,10 +215,7 @@ services:
       - GOTO_SSO_CLIENT_SECRET=${GOTO_SSO_CLIENT_SECRET}
       - GOPAY_LOGIN_OTP_TIMEOUT_SECONDS=${GOPAY_LOGIN_OTP_TIMEOUT_SECONDS:-180}
       - CYCLE_PORT=50051
-      - STATE_FILE=/data/cycle_state.json
       - SMS_SERVICE_ADDR=sms-service:50051
-    volumes:
-      - gopay-cycle-data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
@@ -294,6 +295,8 @@ services:
     build:
       context: ./browser-reg
       dockerfile: Dockerfile
+    init: true
+    mem_limit: ${BROWSER_REG_MEM_LIMIT:-4g}
     ports:
       - "${BROWSER_REG_GRPC_PORT:-50050}:50051"
     environment:
@@ -301,11 +304,15 @@ services:
       - PROXY_URL=${REGISTER_PROXY_URL:-socks5://host.docker.internal:10813}
       - EMAIL_ADDR=outlook-imap-service:50051
       - BROWSER_CHECK_PLUS_TRIAL=${BROWSER_CHECK_PLUS_TRIAL:-false}
+      - CAMOUFOX_GEOIP=${CAMOUFOX_GEOIP:-true}
+      - BROWSER_REG_BLOCK_IMAGES=${BROWSER_REG_BLOCK_IMAGES:-false}
+      - BROWSER_REG_WINDOW_WIDTH=${BROWSER_REG_WINDOW_WIDTH:-1365}
+      - BROWSER_REG_WINDOW_HEIGHT=${BROWSER_REG_WINDOW_HEIGHT:-768}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    shm_size: "2gb"
     restart: always
 
 volumes:
   pgdata:
-  gopay-cycle-data:
   checkphone-tgbot-data:

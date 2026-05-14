@@ -15,6 +15,14 @@ from browser_reg.cookies import extract_session_token
 from browser_reg.flow import (
     BrowserRegistrationCancelled,
     _is_playwright_target_closed_error,
+    apply_browser_language_overrides,
+    browser_accept_language,
+    browser_firefox_user_prefs,
+    browser_languages,
+    browser_locale,
+    browser_process_env,
+    browser_timezone,
+    browser_window_size,
     cleanup_stale_browser_profiles,
 )
 from browser_reg.sensitive import redact_email, sanitize_text, sanitize_url_for_log
@@ -371,18 +379,31 @@ def browser_login(
         debug_mode = _env_bool("BROWSER_REG_DEBUG", False)
         headless = False if debug_mode else ("virtual" if _platform.system() == "Linux" else False)
         geoip_enabled = _env_bool("CAMOUFOX_GEOIP", True)
+        locale = browser_locale()
+        languages = browser_languages()
+        timezone = browser_timezone()
+        window_width, window_height = browser_window_size()
+        block_images = _env_bool("BROWSER_REG_BLOCK_IMAGES", False)
         if debug_mode:
             logger.info("[browser-reg] Debug mode enabled: headless=False")
+            logger.info("[browser-reg] Language override: locale=%s languages=%s timezone=%s", locale, languages, timezone)
         with Camoufox(
             headless=headless,
             humanize=True,
             persistent_context=True,
             user_data_dir=tmp_profile,
-            screen=Screen(max_width=1920, max_height=1080),
+            screen=Screen(max_width=window_width, max_height=window_height),
+            window=(window_width, window_height),
+            block_images=block_images,
             proxy=cf_proxy,
             geoip=geoip_enabled,
-            locale="en-US",
+            locale=languages,
+            timezone_id=timezone,
+            extra_http_headers={"Accept-Language": browser_accept_language()},
+            firefox_user_prefs=browser_firefox_user_prefs(),
+            env=browser_process_env(),
         ) as ctx:
+            apply_browser_language_overrides(ctx)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             logger.info("[browser-reg] Opening chatgpt.com for login ...")
             with_active_page(lambda p: p.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000))

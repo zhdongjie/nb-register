@@ -469,6 +469,18 @@ input, select {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+.workflowButtons {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflowButtons button {
+  min-height: 36px;
+  justify-content: center;
+}
+
 .createAccount .buttonRow {
   height: 34px;
 }
@@ -1534,7 +1546,8 @@ pre {
   .statusStripGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .createAccount,
   .mailboxForm,
-  .createAccount .formGrid { grid-template-columns: 1fr; }
+  .createAccount .formGrid,
+  .workflowButtons { grid-template-columns: 1fr; }
   .createAccount .buttonRow { height: auto; }
   .responsiveTable,
   .accountsPanel table,

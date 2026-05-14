@@ -3,6 +3,8 @@ GoPay Cycle gRPC Service - 显式步骤模式
 外部编排服务按需调用改号、注销、登录等步骤；本服务不做后台自动循环。
 """
 
+import contextvars
+import json
 import os
 import time
 import uuid
@@ -28,9 +30,7 @@ from gopay_cycle import (
     expire_login_if_needed,
     expire_signup_if_needed,
     clear_tmp_tokens,
-    load_state,
     migrate_active_tokens_to_tmp,
-    save_state,
     start_login,
     start_signup,
     start_signup_pin,
@@ -49,6 +49,53 @@ GOTO_AUTH = "https://accounts.goto-products.com"
 GOTO_SSO_CLIENT_ID = os.environ.get("GOTO_SSO_CLIENT_ID", "gojek:consumer:app")
 GOTO_SSO_CLIENT_SECRET = os.environ.get("GOTO_SSO_CLIENT_SECRET", "")
 GOPAY_CHANGE_PHONE_COUNTRY_SYNC = os.environ.get("GOPAY_CHANGE_PHONE_COUNTRY_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}
+_CURRENT_STATE = contextvars.ContextVar("gopay_cycle_state", default=None)
+
+
+def _parse_state_json(raw: str) -> dict:
+    raw = str(raw or "").strip()
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("state_json must be a JSON object")
+    return value
+
+
+def _state_json(state: dict) -> str:
+    return json.dumps(state or {}, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_state():
+    state = _CURRENT_STATE.get()
+    return state if state is not None else {}
+
+
+def save_state(state):
+    # Stateless service: callers persist the returned state_json via DB CRUD.
+    return None
+
+
+def _state_from_request(request) -> dict:
+    raw = getattr(request, "state_json", "")
+    if raw:
+        return _parse_state_json(raw)
+    current = _CURRENT_STATE.get()
+    return current if current is not None else {}
+
+
+def _stateful_rpc(fn):
+    def wrapped(self, request, context):
+        state = _state_from_request(request)
+        token = _CURRENT_STATE.set(state)
+        try:
+            resp = fn(self, request, context)
+            if hasattr(resp, "state_json"):
+                resp.state_json = _state_json(_CURRENT_STATE.get() or state)
+            return resp
+        finally:
+            _CURRENT_STATE.reset(token)
+    return wrapped
 
 
 def _client(state) -> GopayClient:
@@ -961,6 +1008,33 @@ class GopayCycleServicer(gopay_cycle_pb2_grpc.GopayCycleServiceServicer):
         if not deactivated_at:
             return gopay_cycle_pb2.CheckDeactivationResponse(completed=False, remaining_seconds=-1)
         return gopay_cycle_pb2.CheckDeactivationResponse(completed=True, remaining_seconds=0)
+
+
+for _method_name in (
+    "ChangePhoneStart",
+    "ChangePhoneRetry",
+    "ChangePhoneComplete",
+    "DeactivateStart",
+    "DeactivateComplete",
+    "LoginStart",
+    "LoginComplete",
+    "SignupStart",
+    "SignupComplete",
+    "CreatePinStart",
+    "CreatePinComplete",
+    "AuthStart",
+    "AuthComplete",
+    "CheckTokenValid",
+    "Unlink",
+    "Status",
+    "GetReadyAccessToken",
+    "CheckDeactivation",
+):
+    setattr(
+        GopayCycleServicer,
+        _method_name,
+        _stateful_rpc(getattr(GopayCycleServicer, _method_name)),
+    )
 
 
 def serve():

@@ -15,22 +15,27 @@ import (
 const (
 	taskQueueDefault = "nb-register-orchestrator"
 
-	createJobActivityName         = "CreateJobActivity"
-	ensureAccountActivityName     = "EnsureAccountActivity"
-	resolveAccountActivityName    = "ResolveAccountFromJobActivity"
-	registerAccountActivityName   = "RegisterAccountAtomicActivity"
-	ensureLogonActivityName       = "EnsureLogonActivity"
-	goPayPaymentActivityName      = "GoPayPaymentAtomicActivity"
-	cycleAndPayActivityName       = "CycleAndPayActivity"
-	probePlusTrialActivityName    = "ProbePlusTrialAtomicActivity"
-	probeTierActivityName         = "ProbeTierAtomicActivity"
-	loginSessionActivityName      = "LoginSessionAtomicActivity"
-	registerMailboxActivityName   = "RegisterMailboxAtomicActivity"
-	mailboxOAuthActivityName      = "MailboxOAuthAtomicActivity"
-	persistRegisteredActivityName = "PersistRegisteredActivity"
-	persistActivatedActivityName  = "PersistActivatedActivity"
-	markJobFailedActivityName     = "MarkJobFailedActivity"
-	markJobSucceededActivityName  = "MarkJobSucceededActivity"
+	createJobActivityName             = "CreateJobActivity"
+	ensureAccountActivityName         = "EnsureAccountActivity"
+	resolveAccountActivityName        = "ResolveAccountFromJobActivity"
+	registerAccountActivityName       = "RegisterAccountAtomicActivity"
+	ensureLogonActivityName           = "EnsureLogonActivity"
+	goPayPaymentActivityName          = "GoPayPaymentAtomicActivity"
+	cycleAndPayActivityName           = "CycleAndPayActivity"
+	goPayCycleLoginActivityName       = "GoPayCycleLoginActivity"
+	goPayCycleChangePhoneActivityName = "GoPayCycleChangePhoneActivity"
+	goPayCycleDeactivateActivityName  = "GoPayCycleDeactivateActivity"
+	goPayCycleSignupActivityName      = "GoPayCycleSignupActivity"
+	goPayCycleCreatePinActivityName   = "GoPayCycleCreatePinActivity"
+	probePlusTrialActivityName        = "ProbePlusTrialAtomicActivity"
+	probeTierActivityName             = "ProbeTierAtomicActivity"
+	loginSessionActivityName          = "LoginSessionAtomicActivity"
+	registerMailboxActivityName       = "RegisterMailboxAtomicActivity"
+	mailboxOAuthActivityName          = "MailboxOAuthAtomicActivity"
+	persistRegisteredActivityName     = "PersistRegisteredActivity"
+	persistActivatedActivityName      = "PersistActivatedActivity"
+	markJobFailedActivityName         = "MarkJobFailedActivity"
+	markJobSucceededActivityName      = "MarkJobSucceededActivity"
 )
 
 func RegisterAccountWorkflow(ctx workflow.Context, input RegisterAccountWorkflowInput) (RegisterAccountWorkflowResult, error) {
@@ -88,7 +93,12 @@ func ActivateAccountWorkflow(ctx workflow.Context, input ActivateAccountWorkflow
 	result := ActivateAccountWorkflowResult{JobID: input.JobID}
 	retryCtx := workflow.WithActivityOptions(ctx, retryableActivityOptions(30*time.Second, 5))
 	atomicCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(15*time.Minute))
+	paymentCtx := workflow.WithActivityOptions(ctx, paymentActivityOptions())
 	ensureLogonCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(30*time.Minute))
+	action := input.Action
+	if action == "" {
+		action = actionActivate
+	}
 
 	var account AccountRef
 	if err := workflow.ExecuteActivity(retryCtx, resolveAccountActivityName, ResolveAccountInput{
@@ -102,7 +112,7 @@ func ActivateAccountWorkflow(ctx workflow.Context, input ActivateAccountWorkflow
 	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
 		JobID:     input.JobID,
 		AccountID: account.AccountID,
-		Action:    actionActivate,
+		Action:    action,
 	}).Get(ctx, nil); err != nil {
 		result.ErrorMessage = err.Error()
 		return result, nil
@@ -131,7 +141,7 @@ func ActivateAccountWorkflow(ctx workflow.Context, input ActivateAccountWorkflow
 	}
 
 	var payment GoPayActivityOutput
-	if err := workflow.ExecuteActivity(atomicCtx, goPayPaymentActivityName, GoPayActivityInput{
+	if err := workflow.ExecuteActivity(paymentCtx, goPayPaymentActivityName, GoPayActivityInput{
 		JobID:         input.JobID,
 		AccountID:     account.AccountID,
 		UseCycleToken: ensureLogon.GetCycleTokenReady(),
@@ -157,6 +167,115 @@ func ActivateAccountWorkflow(ctx workflow.Context, input ActivateAccountWorkflow
 	result.Success = true
 	result.ChargeRef = payment.ChargeRef
 	result.SnapToken = payment.SnapToken
+	return result, nil
+}
+
+func AutoPayWorkflow(ctx workflow.Context, input AutoPayWorkflowInput) (AutoPayWorkflowResult, error) {
+	result := AutoPayWorkflowResult{JobID: input.JobID}
+	retryCtx := workflow.WithActivityOptions(ctx, retryableActivityOptions(30*time.Second, 5))
+	atomicCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(15*time.Minute))
+	paymentCtx := workflow.WithActivityOptions(ctx, paymentActivityOptions())
+
+	var account AccountRef
+	if err := workflow.ExecuteActivity(retryCtx, resolveAccountActivityName, ResolveAccountInput{
+		AccountID:   input.AccountID,
+		SourceJobID: input.SourceJobID,
+	}).Get(ctx, &account); err != nil {
+		result.ErrorMessage = err.Error()
+		return result, nil
+	}
+
+	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
+		JobID:     input.JobID,
+		AccountID: account.AccountID,
+		Action:    actionAutopay,
+	}).Get(ctx, nil); err != nil {
+		result.ErrorMessage = err.Error()
+		return result, nil
+	}
+
+	var probe ProbePlusTrialActivityOutput
+	if err := workflow.ExecuteActivity(atomicCtx, probePlusTrialActivityName, ProbePlusTrialActivityInput{
+		JobID:     input.JobID,
+		AccountID: account.AccountID,
+	}).Get(ctx, &probe); err != nil {
+		return failAutoPayWorkflow(ctx, retryCtx, result, input.JobID, stepProbePlusTrial, statusFailedRetryable, false, true, err, map[string]any{"probe_plus_trial": probe.Data}), nil
+	}
+	if !probe.Checked {
+		return failAutoPayWorkflow(ctx, retryCtx, result, input.JobID, stepProbePlusTrial, statusFailedRetryable, false, true, fmt.Errorf("plus trial eligibility is unknown"), map[string]any{"probe_plus_trial": probe.Data}), nil
+	}
+	if !probe.PlusTrialEligible {
+		return failAutoPayWorkflow(ctx, retryCtx, result, input.JobID, stepProbePlusTrial, statusFailedFinal, false, false, fmt.Errorf("account is not plus trial eligible"), map[string]any{"probe_plus_trial": probe.Data}), nil
+	}
+
+	var payment GoPayActivityOutput
+	if err := workflow.ExecuteActivity(paymentCtx, goPayPaymentActivityName, GoPayActivityInput{
+		JobID:        input.JobID,
+		AccountID:    account.AccountID,
+		Tokenization: "false",
+	}).Get(ctx, &payment); err != nil {
+		return failAutoPayWorkflow(ctx, retryCtx, result, input.JobID, stepGoPayPayment, statusFailedRetryable, false, true, err, map[string]any{"probe_plus_trial": probe.Data, "gopay_payment": payment.Data}), nil
+	}
+
+	combined := map[string]any{"probe_plus_trial": probe.Data, "gopay_payment": payment.Data}
+	_ = workflow.ExecuteActivity(retryCtx, markJobSucceededActivityName, JobSuccessInput{
+		JobID:  input.JobID,
+		Result: combined,
+	}).Get(ctx, nil)
+
+	result.Success = true
+	result.ChargeRef = payment.ChargeRef
+	result.SnapToken = payment.SnapToken
+	return result, nil
+}
+
+func GoPayCycleWorkflow(ctx workflow.Context, input GoPayCycleWorkflowInput) (GoPayCycleWorkflowResult, error) {
+	result := GoPayCycleWorkflowResult{JobID: input.JobID}
+	retryCtx := workflow.WithActivityOptions(ctx, retryableActivityOptions(30*time.Second, 5))
+	cycleCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(30*time.Minute))
+
+	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
+		JobID:  input.JobID,
+		Action: actionGoPayCycle,
+	}).Get(ctx, nil); err != nil {
+		result.ErrorMessage = err.Error()
+		return result, nil
+	}
+
+	combined := map[string]any{}
+	var login GoPayCycleStepOutput
+	if err := workflow.ExecuteActivity(cycleCtx, goPayCycleLoginActivityName, GoPayCycleStepInput{
+		JobID: input.JobID,
+	}).Get(ctx, &login); err != nil {
+		combined["login"] = login.Data
+		return failGoPayCycleWorkflow(ctx, retryCtx, result, input.JobID, stepGoPayCycleLogin, statusFailedRetryable, false, true, err, combined), nil
+	}
+	combined["login"] = login.Data
+
+	var changePhone GoPayCycleStepOutput
+	if err := workflow.ExecuteActivity(cycleCtx, goPayCycleChangePhoneActivityName, GoPayCycleStepInput{
+		JobID: input.JobID,
+	}).Get(ctx, &changePhone); err != nil {
+		combined["change_phone"] = changePhone.Data
+		return failGoPayCycleWorkflow(ctx, retryCtx, result, input.JobID, stepGoPayCycleChangePhone, statusFailedRetryable, false, true, err, combined), nil
+	}
+	combined["change_phone"] = changePhone.Data
+	result.ActivationID = changePhone.ActivationID
+	result.ChangePhoneComplete = changePhone.ChangePhoneComplete
+
+	// Later stages intentionally disabled for now. Re-enable these in order
+	// when the change-phone-only workflow is stable:
+	//   1. gopay_cycle_deactivate
+	//   2. gopay_cycle_signup
+	//   3. gopay_cycle_create_pin
+	result.CycleTokenReady = false
+
+	_ = workflow.ExecuteActivity(retryCtx, markJobSucceededActivityName, JobSuccessInput{
+		JobID:  input.JobID,
+		Result: combined,
+	}).Get(ctx, nil)
+
+	result.Success = true
 	return result, nil
 }
 
@@ -295,6 +414,7 @@ func RegisterAndActivateWorkflow(ctx workflow.Context, input RegisterAndActivate
 	result := RegisterAndActivateWorkflowResult{JobID: input.JobID}
 	retryCtx := workflow.WithActivityOptions(ctx, retryableActivityOptions(30*time.Second, 5))
 	atomicCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(15*time.Minute))
+	paymentCtx := workflow.WithActivityOptions(ctx, paymentActivityOptions())
 	ensureLogonCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(30*time.Minute))
 
 	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
@@ -360,7 +480,7 @@ func RegisterAndActivateWorkflow(ctx workflow.Context, input RegisterAndActivate
 	}
 
 	var payment GoPayActivityOutput
-	if err := workflow.ExecuteActivity(atomicCtx, goPayPaymentActivityName, GoPayActivityInput{
+	if err := workflow.ExecuteActivity(paymentCtx, goPayPaymentActivityName, GoPayActivityInput{
 		JobID:         input.JobID,
 		AccountID:     account.AccountID,
 		SessionToken:  register.SessionToken,
@@ -555,6 +675,18 @@ func failActivateWorkflow(ctx workflow.Context, activityCtx workflow.Context, re
 	return result
 }
 
+func failAutoPayWorkflow(ctx workflow.Context, activityCtx workflow.Context, result AutoPayWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) AutoPayWorkflowResult {
+	result.ErrorMessage = err.Error()
+	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
+	return result
+}
+
+func failGoPayCycleWorkflow(ctx workflow.Context, activityCtx workflow.Context, result GoPayCycleWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) GoPayCycleWorkflowResult {
+	result.ErrorMessage = err.Error()
+	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
+	return result
+}
+
 func failProbeAccountWorkflow(ctx workflow.Context, activityCtx workflow.Context, result ProbeAccountWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) ProbeAccountWorkflowResult {
 	result.ErrorMessage = err.Error()
 	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
@@ -610,6 +742,15 @@ func markWorkflowFailure(ctx workflow.Context, activityCtx workflow.Context, job
 func atomicActivityOptions(timeout time.Duration) workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		StartToCloseTimeout: timeout,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 1,
+		},
+	}
+}
+
+func paymentActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout: 15 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts: 1,
 		},

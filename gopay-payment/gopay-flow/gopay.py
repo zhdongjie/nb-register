@@ -25,11 +25,9 @@ Flow (15 steps):
     11. POST customer.gopayapi.com/api/v1/users/pin/tokens/nb       ← pin_token (JWT)
     12. POST gwa.gopayapi.com/v1/linking/validate-pin               ← linking complete
     13. POST app.midtrans.com/snap/v2/transactions/{snap}/charge    ← charge_ref (A12...)
-    14. GET  gwa.gopayapi.com/v1/payment/validate?reference_id=...
-        POST gwa.gopayapi.com/v1/payment/confirm?reference_id=...   ← second challenge
-        POST customer.gopayapi.com/api/v1/users/pin/tokens/nb       ← second pin_token
-        POST gwa.gopayapi.com/v1/payment/process?reference_id=...   ← settled
-    15. GET  chatgpt.com/checkout/verify?stripe_session_id=...      ← Plus active
+    14. tokenization=true: complete GoPay web challenge/PIN/process.
+        tokenization=false: user opens Midtrans GoPay deeplink/QR and pays externally.
+    15. Poll Midtrans status, then verify ChatGPT Plus.
 """
 
 from __future__ import annotations
@@ -653,10 +651,74 @@ def _is_retryable_transport_error(exc: Exception) -> bool:
 
 def _json_excerpt(value: Any, limit: int = 600) -> str:
     try:
-        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps(_redact_for_log(value), ensure_ascii=False, separators=(",", ":"))
     except Exception:
-        text = str(value)
+        text = _redact_text_for_log(value)
     return text[:limit]
+
+
+def _response_excerpt(response: Any, limit: int = 600) -> str:
+    text = str(getattr(response, "text", "") or "").strip()
+    try:
+        payload = response.json()
+        if payload not in ({}, [], None, "") or not text:
+            return _json_excerpt(payload, limit=limit)
+    except Exception:
+        pass
+    if not text:
+        text = "<empty response>"
+    try:
+        return _json_excerpt(json.loads(text), limit=limit)
+    except Exception:
+        return _redact_text_for_log(text)[:limit]
+
+
+def _redact_for_log(value: Any, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {item_key: _redact_for_log(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_for_log(item, key) for item in value]
+    if _is_url_log_key(key):
+        return "<redacted-url>" if value not in (None, "") else value
+    if _is_sensitive_log_key(key):
+        return "<redacted>" if value not in (None, "") else value
+    if isinstance(value, str):
+        return _redact_text_for_log(value)
+    return value
+
+
+def _is_url_log_key(key: str) -> bool:
+    lower = key.lower()
+    return any(part in lower for part in ("url", "uri", "deeplink", "redirect", "qr_code", "qrcode"))
+
+
+def _is_sensitive_log_key(key: str) -> bool:
+    lower = key.lower()
+    parts = [part for part in re.split(r"[^a-z0-9]+", lower) if part]
+    if lower in {"authorization", "cookie", "pin", "otp", "password", "passwd", "secret"}:
+        return True
+    if any(part in {"authorization", "cookie", "pin", "otp", "password", "passwd", "secret"} for part in parts):
+        return True
+    if "token" in parts or lower.endswith("_token"):
+        return True
+    if lower in {"challenge_id", "client_id", "snap_token", "session"}:
+        return True
+    return False
+
+
+def _redact_text_for_log(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"(?i)\b(?:https?|gopay)://[^\s\"'<>]+", "<redacted-url>", text)
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)\b(access_token|refresh_token|session_token|csrf_token|token|pin|otp|password|secret|cookie)"
+        r"\s*[:=]\s*['\"]?[^'\"\s,}]{6,}",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", "<redacted-token>", text)
+    text = re.sub(r"\b[A-Za-z0-9_-]{48,}\b", "<redacted-token>", text)
+    return text
 
 
 def _iter_json_strings(value: Any, path: str = ""):
@@ -718,6 +780,34 @@ def _extract_midtrans_charge_reference(data: Any) -> str:
         if "reference" in path.lower() and re.fullmatch(r"[A-Za-z0-9-]{6,}", text.strip()):
             return text.strip()
     return ""
+
+
+def _extract_midtrans_url(data: Any, *names: str) -> str:
+    if not isinstance(data, dict):
+        return ""
+    wanted = {name.lower() for name in names}
+    for name in names:
+        value = str(data.get(name) or "").strip()
+        if value:
+            return value
+    for action in data.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        name = str(action.get("name") or "").strip().lower()
+        if name in wanted:
+            value = str(action.get("url") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _midtrans_charge_urls(data: Any) -> dict[str, str]:
+    return {
+        "deeplink_url": _extract_midtrans_url(data, "deeplink_url", "deeplink"),
+        "qr_code_url": _extract_midtrans_url(data, "qr_code_url", "qr_code", "qrcode"),
+        "finish_redirect_url": _extract_midtrans_url(data, "finish_redirect_url"),
+        "finish_200_redirect_url": _extract_midtrans_url(data, "finish_200_redirect_url"),
+    }
 
 
 def _midtrans_charge_denial_message(data: dict[str, Any]) -> str:
@@ -1187,6 +1277,9 @@ class GoPayCharger:
         self.midtrans_client_id = str(
             gopay_cfg.get("midtrans_client_id") or DEFAULT_MIDTRANS_CLIENT_ID
         )
+        self.midtrans_tokenization = _normalize_midtrans_tokenization(
+            gopay_cfg.get("tokenization")
+        )
         self.otp_provider = otp_provider
         self.log = log
         self._midtrans_merchant_id: Optional[str] = None
@@ -1237,7 +1330,7 @@ class GoPayCharger:
 
     def _ext_request(self, method: str, url: str, **kwargs: Any) -> Any:
         log = getattr(self, "log", None)
-        _set_session_proxy(self.ext, self.payment_proxy)
+        _set_session_proxy(self.ext, getattr(self, "payment_proxy", None))
         return _request_with_retries(
             self.ext,
             method,
@@ -1276,9 +1369,9 @@ class GoPayCharger:
         data = r.json()
         cs_id = _extract_checkout_session_id(data)
         if not cs_id or not str(cs_id).startswith("cs_"):
-            raise GoPayError(f"checkout create: bad response {data!r}")
+            raise GoPayError(f"checkout create: bad response {_json_excerpt(data)}")
         self.checkout_url = _checkout_url_from_response(data, cs_id)
-        self.log(f"[gopay] checkout created cs={cs_id} hosted_url={'yes' if self.checkout_url else 'no'}")
+        self.log(f"[gopay] checkout created cs_present={'yes' if cs_id else 'no'} hosted_url={'yes' if self.checkout_url else 'no'}")
         return cs_id
 
     def _stripe_create_pm(self, cs_id: str, stripe_pk: str, billing: dict) -> str:
@@ -1306,8 +1399,8 @@ class GoPayCharger:
         r.raise_for_status()
         pm_id = r.json().get("id", "")
         if not pm_id.startswith("pm_"):
-            raise GoPayError(f"stripe payment_methods: bad response {r.text[:300]}")
-        self.log(f"[gopay] stripe pm={pm_id}")
+            raise GoPayError(f"stripe payment_methods: bad response {_response_excerpt(r, limit=300)}")
+        self.log("[gopay] stripe pm=present")
         return pm_id
 
     def _stripe_init(self, cs_id: str, stripe_pk: str) -> dict:
@@ -1346,7 +1439,7 @@ class GoPayCharger:
             )
         ic = data.get("init_checksum") or ""
         if not ic:
-            raise GoPayError(f"stripe init: no init_checksum {r.text[:200]}")
+            raise GoPayError(f"stripe init: no init_checksum {_response_excerpt(r, limit=200)}")
         return data
 
     @staticmethod
@@ -1471,7 +1564,7 @@ class GoPayCharger:
             )
             if detail:
                 raise GoPayError(detail)
-            raise GoPayError(f"stripe confirm {r.status_code}: {r.text[:400]}")
+            raise GoPayError(f"stripe confirm {r.status_code}: {_response_excerpt(r, limit=400)}")
         data = r.json() or {}
         self.log(
             f"[gopay] stripe confirm: payment_status={data.get('payment_status')} "
@@ -1487,7 +1580,7 @@ class GoPayCharger:
                 json={}, timeout=DEFAULT_TIMEOUT,
             )
         except Exception as e:
-            self.log(f"[gopay] sentinel/ping skipped: {e}")
+            self.log(f"[gopay] sentinel/ping skipped: {_redact_text_for_log(e)}")
 
     def _chatgpt_approve(self, cs_id: str, processor_entity: str = "openai_llc"):
         # sentinel/ping 在 approve 之前刷一下，否则 approve 过但 setup_intent 不创
@@ -1557,7 +1650,7 @@ class GoPayCharger:
                     pm_url = rtu.get("url") or ""
                     if pm_url:
                         snap_token = self._fetch_pm_redirect_snap_token(pm_url)
-                        self.log(f"[gopay] midtrans snap_token={snap_token}")
+                        self.log("[gopay] midtrans snap_token=present")
                         return snap_token
                 last_err = (
                     f"setup_intent status={si.get('status')!r} "
@@ -1566,7 +1659,7 @@ class GoPayCharger:
                     f"keys=[{','.join(sorted(payload.keys())[:8])}]"
                 )
             else:
-                last_err = f"http {r.status_code}: {r.text[:120]}"
+                last_err = f"http {r.status_code}: {_response_excerpt(r, limit=120)}"
             time.sleep(1)
         raise GoPayError(f"snap_token resolution timeout: {last_err}")
 
@@ -1586,7 +1679,7 @@ class GoPayCharger:
         loc = r.headers.get("Location", "")
         m = re.search(r"app\.midtrans\.com/snap/v[14]/redirection/([a-f0-9-]{36})", loc)
         if not m:
-            raise GoPayError(f"pm-redirects: no midtrans token in Location={loc!r}")
+            raise GoPayError(f"pm-redirects: no midtrans token in Location={_redact_text_for_log(loc)!r}")
         return m.group(1)
 
     def _midtrans_load_transaction(self, snap_token: str):
@@ -1608,7 +1701,7 @@ class GoPayCharger:
             if landing.status_code >= 400:
                 self.log(f"[gopay] midtrans redirection warmup status={landing.status_code}")
         except Exception as e:
-            self.log(f"[gopay] midtrans redirection warmup skipped: {e}")
+            self.log(f"[gopay] midtrans redirection warmup skipped: {_redact_text_for_log(e)}")
 
         try:
             self.ext.cookies.set("locale", "en", domain="app.midtrans.com", path="/")
@@ -1650,7 +1743,7 @@ class GoPayCharger:
                 timeout=DEFAULT_TIMEOUT,
             )
         except Exception as e:
-            self.log(f"[gopay] midtrans promos warmup skipped: {e}")
+            self.log(f"[gopay] midtrans promos warmup skipped: {_redact_text_for_log(e)}")
         try:
             self._ext_request(
                 "get",
@@ -1660,7 +1753,7 @@ class GoPayCharger:
                 timeout=DEFAULT_TIMEOUT,
             )
         except Exception as e:
-            self.log(f"[gopay] midtrans experiment warmup skipped: {e}")
+            self.log(f"[gopay] midtrans experiment warmup skipped: {_redact_text_for_log(e)}")
 
     def _midtrans_basic_auth(self) -> dict:
         import base64
@@ -1731,7 +1824,7 @@ class GoPayCharger:
                 elif isinstance(j, list) and j:
                     last_err = str(j[0])
                 else:
-                    last_err = r.text[:120]
+                    last_err = _response_excerpt(r, limit=120)
                 self.log(f"[gopay] midtrans linking 406 ({last_err}), 冷却 {LINK_RETRY_SLEEP_S}s 再重试 {attempt}/{LINK_RETRY_LIMIT}")
                 time.sleep(LINK_RETRY_SLEEP_S)
                 continue
@@ -1749,10 +1842,10 @@ class GoPayCharger:
                     self.log(f"[gopay] midtrans linking bypass ok reference={ref}")
                     return ref
                 raise GoPayError(
-                    f"midtrans linking bypass failed status={rb.status_code} body={rb.text[:300]}",
+                    f"midtrans linking bypass failed status={rb.status_code} body={_response_excerpt(rb, limit=300)}",
                 )
             raise GoPayError(
-                f"midtrans linking unexpected status={r.status_code} body={r.text[:300]}",
+                f"midtrans linking unexpected status={r.status_code} body={_response_excerpt(r, limit=300)}",
             )
         raise GoPayError(f"midtrans linking exhausted retries: {last_err}")
 
@@ -1766,7 +1859,7 @@ class GoPayCharger:
             return None
         m = re.search(r"reference=([a-f0-9-]{36})", data.get("activation_link_url", ""))
         if not m:
-            raise GoPayError(f"midtrans linking 201 but no reference: {data}")
+            raise GoPayError(f"midtrans linking 201 but no reference: {_json_excerpt(data)}")
         return m.group(1)
 
     @staticmethod
@@ -1805,9 +1898,10 @@ class GoPayCharger:
             headers=self._gopay_headers(locale=None),
             timeout=DEFAULT_TIMEOUT,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            raise GoPayError(f"validate-reference {r.status_code}: {_response_excerpt(r)}")
         if not r.json().get("success"):
-            raise GoPayError(f"validate-reference failed: {r.text[:300]}")
+            raise GoPayError(f"validate-reference failed: {_response_excerpt(r)}")
 
     def _gopay_user_consent(self, reference_id: str):
         r = self._ext_request(
@@ -1817,9 +1911,10 @@ class GoPayCharger:
             headers=self._gopay_headers(locale=self.browser_locale),
             timeout=DEFAULT_TIMEOUT,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            raise GoPayError(f"user-consent {r.status_code}: {_response_excerpt(r)}")
         if not r.json().get("success"):
-            raise GoPayError(f"user-consent failed: {r.text[:300]}")
+            raise GoPayError(f"user-consent failed: {_response_excerpt(r)}")
         self.log("[gopay] consent ok, OTP sent via WhatsApp")
 
     def _gopay_resend_otp(self, reference_id: str):
@@ -1832,9 +1927,9 @@ class GoPayCharger:
                 headers=self._gopay_headers(locale=self.browser_locale),
                 timeout=DEFAULT_TIMEOUT,
             )
-            self.log(f"[gopay] resend-otp status={r.status_code} body={r.text[:200]}")
+            self.log(f"[gopay] resend-otp status={r.status_code} body={_response_excerpt(r, limit=200)}")
         except Exception as e:
-            self.log(f"[gopay] resend-otp failed: {e}")
+            self.log(f"[gopay] resend-otp failed: {_redact_text_for_log(e)}")
 
     def _gopay_validate_otp(self, reference_id: str, otp: str) -> tuple[str, str]:
         """Returns (challenge_id, client_id) for PIN tokenization."""
@@ -1846,26 +1941,20 @@ class GoPayCharger:
             timeout=DEFAULT_TIMEOUT,
         )
         if r.status_code != 200:
-            body = (r.text or "").strip()
-            if not body:
-                try:
-                    body = json.dumps(r.json(), ensure_ascii=False)
-                except Exception:
-                    body = "<empty response>"
-            message = f"validate-otp {r.status_code}: {body[:400]}"
+            message = f"validate-otp {r.status_code}: {_response_excerpt(r, limit=400)}"
             if r.status_code == 400:
                 raise GoPayOTPRejected(message)
             raise GoPayError(message)
         data = r.json()
         if not data.get("success"):
-            raise GoPayOTPRejected(f"validate-otp failed: {data}")
+            raise GoPayOTPRejected(f"validate-otp failed: {_json_excerpt(data)}")
         challenge = (
             data.get("data", {}).get("challenge", {}).get("action", {}).get("value", {})
         )
         challenge_id = challenge.get("challenge_id") or ""
         client_id = challenge.get("client_id") or ""
         if not challenge_id or not client_id:
-            raise GoPayError(f"validate-otp: missing challenge details {data}")
+            raise GoPayError(f"validate-otp: missing challenge details {_json_excerpt(data)}")
         self.log(f"[gopay] otp ok challenge_id={challenge_id[:8]}…")
         return challenge_id, client_id
 
@@ -1907,8 +1996,9 @@ class GoPayCharger:
             timeout=DEFAULT_TIMEOUT,
         )
         if r.status_code in (400, 401, 403):
-            raise GoPayPINRejected(f"PIN rejected: {r.text[:200]}")
-        r.raise_for_status()
+            raise GoPayPINRejected(f"PIN rejected: {_response_excerpt(r, limit=300)}")
+        if r.status_code >= 400:
+            raise GoPayError(f"pin tokenize {r.status_code}: {_response_excerpt(r)}")
         body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         # Token can be in different shapes; check common keys
         token = (
@@ -1920,7 +2010,7 @@ class GoPayCharger:
         if not token:
             # Some flows return the JWT in a wrapper; check for raw redirect URL
             # hash extraction not needed since the JWT is in the body for /nb endpoints
-            raise GoPayError(f"pin tokenize: no token in response {r.text[:300]}")
+            raise GoPayError(f"pin tokenize: no token in response {_response_excerpt(r, limit=300)}")
         return token
 
     def _gopay_validate_pin(self, reference_id: str, pin_token: str):
@@ -1931,25 +2021,31 @@ class GoPayCharger:
             headers=self._gopay_headers(locale=self.browser_locale),
             timeout=DEFAULT_TIMEOUT,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            raise GoPayError(f"validate-pin {r.status_code}: {_response_excerpt(r)}")
         if not r.json().get("success"):
-            raise GoPayError(f"validate-pin failed: {r.text[:300]}")
+            raise GoPayError(f"validate-pin failed: {_response_excerpt(r)}")
         self.log("[gopay] linking complete")
 
     # ───── Step 13: Midtrans charge initiation ─────
 
-    def _midtrans_create_charge(self, snap_token: str) -> str:
-        """POST snap/v2/transactions/{snap}/charge → charge_ref like A12..."""
+    def _midtrans_create_charge_data(self, snap_token: str) -> dict:
+        """POST snap/v2/transactions/{snap}/charge and keep user-facing links."""
         url = f"https://app.midtrans.com/snap/v2/transactions/{snap_token}/charge"
         headers = self._midtrans_headers(snap_token, json_body=True, source=True)
         r = self._ext_request(
             "post",
             url,
-            json={"payment_type": "gopay", "tokenization": "true", "promo_details": None},
+            json={
+                "payment_type": "gopay",
+                "tokenization": self.midtrans_tokenization,
+                "promo_details": None,
+            },
             headers=headers, timeout=DEFAULT_TIMEOUT,
         )
         r.raise_for_status()
         data = r.json()
+        self.log("[gopay] midtrans charge response " + _json_excerpt(data, limit=1200))
         denied = _midtrans_charge_denial_message(data)
         if denied:
             raise GoPayError(denied)
@@ -1957,7 +2053,21 @@ class GoPayCharger:
         if not charge_ref:
             raise GoPayError(f"midtrans charge: no reference in response {_json_excerpt(data)}")
         self.log(f"[gopay] midtrans charge ref={charge_ref}")
-        return charge_ref
+        charge_data = {
+            "charge_ref": charge_ref,
+            "snap_token": snap_token,
+        }
+        charge_data.update(_midtrans_charge_urls(data))
+        if self.midtrans_tokenization.lower() == "false":
+            for key in ("deeplink_url", "qr_code_url", "finish_redirect_url", "finish_200_redirect_url"):
+                value = charge_data.get(key, "")
+                if value:
+                    self.log(f"[gopay] midtrans {key}=present")
+        return charge_data
+
+    def _midtrans_create_charge(self, snap_token: str) -> str:
+        """POST snap/v2/transactions/{snap}/charge → charge_ref like A12..."""
+        return str(self._midtrans_create_charge_data(snap_token).get("charge_ref") or "")
 
     def _midtrans_poll_status(self, snap_token: str) -> dict:
         """Poll Snap transaction status until GoPay settlement is visible."""
@@ -1979,12 +2089,46 @@ class GoPayCharger:
                     self.log(f"[gopay] midtrans status ok {last}")
                     return data
                 if status in {"deny", "cancel", "expire", "failure"}:
-                    raise GoPayError(f"midtrans transaction failed: {data}")
+                    raise GoPayError(f"midtrans transaction failed: {_json_excerpt(data)}")
             else:
-                last = f"http {r.status_code}: {r.text[:120]}"
+                last = f"http {r.status_code}: {_response_excerpt(r, limit=120)}"
             time.sleep(2)
         self.log(f"[gopay] midtrans status poll timeout: {last}")
         return {}
+
+    def _midtrans_finish_redirect_url(self, state: dict, midtrans_status: dict) -> str:
+        for source in (midtrans_status, state):
+            if not isinstance(source, dict):
+                continue
+            for key in ("finish_redirect_url", "finish_200_redirect_url"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
+
+    def _follow_midtrans_finish_redirect(self, state: dict, midtrans_status: dict) -> str:
+        finish_url = self._midtrans_finish_redirect_url(state, midtrans_status)
+        if not finish_url:
+            self.log("[gopay] midtrans finish redirect skipped: no URL")
+            return ""
+        try:
+            r = self._ext_request(
+                "get",
+                finish_url,
+                headers={
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                        "image/avif,image/webp,image/apng,*/*;q=0.8"
+                    ),
+                    "Referer": self._midtrans_redirection_url(str(state.get("snap_token") or "")),
+                },
+                allow_redirects=True,
+                timeout=DEFAULT_TIMEOUT,
+            )
+            self.log(f"[gopay] midtrans finish redirect status={r.status_code}")
+        except Exception as exc:
+            self.log(f"[gopay] midtrans finish redirect failed: {_redact_text_for_log(exc)[:240]}")
+        return finish_url
 
     # ───── Step 14: GoPay charge processing ─────
 
@@ -2000,7 +2144,7 @@ class GoPayCharger:
             if r.status_code == 200 and r.json().get("success"):
                 return
             time.sleep(1.5)
-        raise GoPayError(f"payment/validate failed after retries: {r.status_code} {r.text[:200]}")
+        raise GoPayError(f"payment/validate failed after retries: {r.status_code} {_response_excerpt(r, limit=200)}")
 
     def _gopay_payment_confirm(self, charge_ref: str) -> tuple[str, str]:
         """Returns (challenge_id, client_id) for the charge PIN."""
@@ -2011,10 +2155,11 @@ class GoPayCharger:
             headers=self._gopay_headers(locale=None),
             timeout=DEFAULT_TIMEOUT,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            raise GoPayError(f"payment/confirm {r.status_code}: {_response_excerpt(r)}")
         data = r.json()
         if not data.get("success"):
-            raise GoPayError(f"payment/confirm failed: {data}")
+            raise GoPayError(f"payment/confirm failed: {_json_excerpt(data)}")
         ch = data.get("data", {}).get("challenge", {}).get("action", {}).get("value", {})
         return ch.get("challenge_id", ""), ch.get("client_id", "")
 
@@ -2032,10 +2177,10 @@ class GoPayCharger:
             timeout=DEFAULT_TIMEOUT,
         )
         if r.status_code != 200:
-            raise GoPayError(f"payment/process {r.status_code}: {r.text[:600]}")
+            raise GoPayError(f"payment/process {r.status_code}: {_response_excerpt(r)}")
         data = r.json()
         if not data.get("success") or data.get("data", {}).get("next_action") != "payment-success":
-            raise GoPayError(f"payment/process failed: {data}")
+            raise GoPayError(f"payment/process failed: {_json_excerpt(data)}")
         self.log("[gopay] charge settled")
 
     # ───── Step 15: Stripe + ChatGPT verify ─────
@@ -2075,7 +2220,7 @@ class GoPayCharger:
         URL 粘过来；gopay 接管 Midtrans linking + OTP + PIN + 扣款 + verify。
         """
         snap_token = self._fetch_pm_redirect_snap_token(pm_redirect_url)
-        self.log(f"[gopay] midtrans snap_token={snap_token}")
+        self.log("[gopay] midtrans snap_token=present")
         return self._run_midtrans_and_gopay(snap_token, cs_id, stripe_pk)
 
     def start_until_otp(self, stripe_pk: str, billing: Optional[dict] = None) -> dict:
@@ -2115,7 +2260,7 @@ class GoPayCharger:
                 else:
                     self._chatgpt_approve(cs_id)
                     snap_token = self._follow_redirect_to_midtrans(cs_id, stripe_pk)
-        self.log(f"[gopay] midtrans snap_token={snap_token}")
+        self.log("[gopay] midtrans snap_token=present")
         return self.start_linking_until_otp(snap_token, cs_id, stripe_pk)
 
     def start_linking_until_otp(
@@ -2136,11 +2281,10 @@ class GoPayCharger:
             "issued_after_unix": issued_after_unix,
         }
 
-    def complete_after_otp(self, state: dict, otp: str) -> dict:
-        """Resume a segmented GoPay flow after orchestrator supplies OTP."""
+    def complete_after_otp_until_manual_confirmation(self, state: dict, otp: str) -> dict:
+        """Resume after OTP, create the Midtrans charge, then wait for manual pay."""
         reference_id = str(state.get("reference_id") or "")
         snap_token = str(state.get("snap_token") or "")
-        cs_id = str(state.get("cs_id") or "")
         if not reference_id or not snap_token:
             raise GoPayError("payment flow state is missing reference_id/snap_token")
         otp = (otp or "").strip()
@@ -2151,12 +2295,29 @@ class GoPayCharger:
         pin_token = self._tokenize_pin(challenge_id, client_id, purpose="linking")
         self._gopay_validate_pin(reference_id, pin_token)
 
-        charge_ref = self._midtrans_create_charge(snap_token)
-        self._gopay_payment_validate(charge_ref)
-        ch2_id, ch2_client = self._gopay_payment_confirm(charge_ref)
-        pin_token2 = self._tokenize_pin(ch2_id, ch2_client, purpose="payment")
-        self._gopay_payment_process(charge_ref, pin_token2)
-        midtrans_status = self._midtrans_poll_status(snap_token)
+        charge_data = self._midtrans_create_charge_data(snap_token)
+        next_state = dict(state)
+        next_state.update(charge_data)
+        next_state["state"] = "awaiting_manual_confirmation"
+        return next_state
+
+    def complete_after_manual_confirmation(self, state: dict) -> dict:
+        """Continue after the user confirms the external GoPay payment is done."""
+        snap_token = str(state.get("snap_token") or "")
+        cs_id = str(state.get("cs_id") or "")
+        charge_ref = str(state.get("charge_ref") or "")
+        if not charge_ref or not snap_token:
+            raise GoPayError("payment flow state is missing charge_ref/snap_token")
+
+        if self.midtrans_tokenization.lower() == "false":
+            midtrans_status = self._midtrans_poll_status(snap_token)
+            self._follow_midtrans_finish_redirect(state, midtrans_status)
+        else:
+            self._gopay_payment_validate(charge_ref)
+            ch2_id, ch2_client = self._gopay_payment_confirm(charge_ref)
+            pin_token2 = self._tokenize_pin(ch2_id, ch2_client, purpose="payment")
+            self._gopay_payment_process(charge_ref, pin_token2)
+            midtrans_status = self._midtrans_poll_status(snap_token)
 
         if cs_id:
             result = self._chatgpt_verify(cs_id)
@@ -2164,6 +2325,10 @@ class GoPayCharger:
                 "snap_token": snap_token,
                 "charge_ref": charge_ref,
                 "midtrans_status": midtrans_status.get("transaction_status", ""),
+                "deeplink_url": str(state.get("deeplink_url") or ""),
+                "qr_code_url": str(state.get("qr_code_url") or ""),
+                "finish_redirect_url": str(state.get("finish_redirect_url") or ""),
+                "finish_200_redirect_url": str(state.get("finish_200_redirect_url") or ""),
             })
             return result
         return {
@@ -2171,7 +2336,16 @@ class GoPayCharger:
             "snap_token": snap_token,
             "charge_ref": charge_ref,
             "midtrans_status": midtrans_status.get("transaction_status", ""),
+            "deeplink_url": str(state.get("deeplink_url") or ""),
+            "qr_code_url": str(state.get("qr_code_url") or ""),
+            "finish_redirect_url": str(state.get("finish_redirect_url") or ""),
+            "finish_200_redirect_url": str(state.get("finish_200_redirect_url") or ""),
         }
+
+    def complete_after_otp(self, state: dict, otp: str) -> dict:
+        """Resume a segmented GoPay flow after orchestrator supplies OTP."""
+        next_state = self.complete_after_otp_until_manual_confirmation(state, otp)
+        return self.complete_after_manual_confirmation(next_state)
 
     def _run_midtrans_and_gopay(
         self, snap_token: str, cs_id: str, stripe_pk: str = "",
@@ -2251,6 +2425,14 @@ def _bool_cfg(cfg: dict, key: str, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_midtrans_tokenization(value: Any) -> str:
+    if value in (None, ""):
+        return "true"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip() or "true"
 
 
 def _parse_stripe_amount(value: Any) -> Optional[int]:

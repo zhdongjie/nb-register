@@ -49,6 +49,7 @@ type GoPayActivityInput struct {
 	SessionToken  string
 	AccessToken   string
 	UseCycleToken bool
+	Tokenization  string
 }
 
 type GoPayActivityOutput struct {
@@ -58,6 +59,24 @@ type GoPayActivityOutput struct {
 	PlusTrialChecked  bool
 	PlusActive        bool
 	Data              map[string]any
+}
+
+type GoPayCycleStepInput struct {
+	JobID        string
+	ActivationID string
+}
+
+type GoPayCycleStepOutput struct {
+	ActivationID        string
+	Ready               bool
+	Stage               string
+	Phone               string
+	CycleTokenReady     bool
+	ChangePhoneComplete bool
+	DeactivateComplete  bool
+	SignupComplete      bool
+	SignupPinComplete   bool
+	Data                map[string]any
 }
 
 type ProbePlusTrialActivityInput struct {
@@ -192,6 +211,7 @@ type ActivateAccountWorkflowInput struct {
 	JobID       string
 	AccountID   string
 	SourceJobID string
+	Action      string
 }
 
 type ActivateAccountWorkflowResult struct {
@@ -200,6 +220,36 @@ type ActivateAccountWorkflowResult struct {
 	ErrorMessage string
 	ChargeRef    string
 	SnapToken    string
+}
+
+type AutoPayWorkflowInput struct {
+	JobID       string
+	AccountID   string
+	SourceJobID string
+}
+
+type AutoPayWorkflowResult struct {
+	JobID        string
+	Success      bool
+	ErrorMessage string
+	ChargeRef    string
+	SnapToken    string
+}
+
+type GoPayCycleWorkflowInput struct {
+	JobID string
+}
+
+type GoPayCycleWorkflowResult struct {
+	JobID               string
+	Success             bool
+	ErrorMessage        string
+	ActivationID        string
+	CycleTokenReady     bool
+	ChangePhoneComplete bool
+	DeactivateComplete  bool
+	SignupComplete      bool
+	SignupPinComplete   bool
 }
 
 type ProbeAccountWorkflowInput struct {

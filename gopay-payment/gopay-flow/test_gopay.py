@@ -153,6 +153,17 @@ class GoPayValidateOtpTests(unittest.TestCase):
         self.assertEqual(client_id, "client-1")
         self.assertEqual(charger.ext.calls, 2)
 
+    def test_validate_reference_400_includes_response_body(self):
+        body = '{"success":false,"errors":[{"code":"GoPay-5001","message":"retry later"}]}'
+        charger = self.charger_for(FakeResponse(400, body))
+
+        with self.assertRaises(GoPayError) as raised:
+            charger._gopay_validate_reference("ref")
+
+        message = str(raised.exception)
+        self.assertIn("validate-reference 400", message)
+        self.assertIn("GoPay-5001", message)
+
 
 class RetryTransportTests(unittest.TestCase):
     def test_retries_retryable_transport_error(self):
@@ -208,6 +219,123 @@ class MidtransChargeReferenceTests(unittest.TestCase):
         self.assertIn("transaction_status=deny", message)
         self.assertIn("fraud_status=deny", message)
         self.assertIn("gross_amount=1", message)
+
+    def test_create_charge_uses_configured_tokenization_and_redacts_response_logs(self):
+        payload = {
+            "payment_reference": "A555AA",
+            "actions": [
+                {
+                    "name": "deeplink",
+                    "url": (
+                        "gopay%3A%2F%2Fpay%3Freference%3DA555AA%26callback_url%3D"
+                        "https%253A%252F%252Fpm-redirects.example%252Freturn%253Forder_id%253Dsetatt_test"
+                    ),
+                },
+                {
+                    "name": "finish_redirect_url",
+                    "url": "https%3A%2F%2Fpm-redirects.example%2Freturn%3Forder_id%3Dsetatt_test",
+                },
+            ],
+        }
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.ext = CapturingPostSession(FakeResponse(200, payload=payload))
+        charger.payment_proxy = None
+        charger.midtrans_tokenization = "false"
+        logs = []
+        charger.log = logs.append
+
+        charge_ref = GoPayCharger._midtrans_create_charge(charger, "snap_test")
+
+        self.assertEqual(charge_ref, "A555AA")
+        body = charger.ext.posts[0][1]["json"]
+        self.assertEqual(body["payment_type"], "gopay")
+        self.assertEqual(body["tokenization"], "false")
+        joined_logs = "\n".join(logs)
+        self.assertIn("midtrans charge response", joined_logs)
+        self.assertIn("midtrans deeplink_url=present", joined_logs)
+        self.assertIn("midtrans finish_redirect_url=present", joined_logs)
+        self.assertNotIn("gopay://pay", joined_logs)
+        self.assertNotIn("callback_url", joined_logs)
+        self.assertNotIn("order_id=setatt_test", joined_logs)
+
+
+class ManualConfirmationRoutingTests(unittest.TestCase):
+    def base_charger(self, tokenization):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.midtrans_tokenization = tokenization
+        charger.log = lambda _msg: None
+        return charger
+
+    def test_tokenization_false_uses_midtrans_status_without_gopay_confirm(self):
+        charger = self.base_charger("false")
+        calls = []
+        charger._midtrans_poll_status = lambda snap: calls.append(("poll", snap)) or {
+            "transaction_status": "settlement",
+            "status_code": "200",
+            "finish_redirect_url": "https://pm-redirects.example/return",
+        }
+        charger._follow_midtrans_finish_redirect = (
+            lambda state, status: calls.append(("finish", status["transaction_status"]))
+        )
+        charger._chatgpt_verify = lambda cs: calls.append(("verify", cs)) or {
+            "state": "succeeded",
+            "cs_id": cs,
+        }
+        charger._gopay_payment_validate = lambda _ref: self.fail("payment/validate should be skipped")
+        charger._gopay_payment_confirm = lambda _ref: self.fail("payment/confirm should be skipped")
+        charger._tokenize_pin = lambda *_args, **_kwargs: self.fail("payment PIN tokenization should be skipped")
+        charger._gopay_payment_process = lambda *_args: self.fail("payment/process should be skipped")
+
+        result = GoPayCharger.complete_after_manual_confirmation(charger, {
+            "snap_token": "snap",
+            "charge_ref": "A123",
+            "cs_id": "cs_test",
+            "deeplink_url": "gopay://pay",
+        })
+
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(calls, [
+            ("poll", "snap"),
+            ("finish", "settlement"),
+            ("verify", "cs_test"),
+        ])
+
+    def test_tokenization_true_keeps_gopay_confirm_process_path(self):
+        charger = self.base_charger("true")
+        calls = []
+        charger._gopay_payment_validate = lambda ref: calls.append(("validate", ref))
+        charger._gopay_payment_confirm = lambda ref: calls.append(("confirm", ref)) or ("challenge", "client")
+        charger._tokenize_pin = (
+            lambda challenge, client, *, purpose: calls.append(("pin", challenge, client, purpose)) or "pin-token"
+        )
+        charger._gopay_payment_process = lambda ref, token: calls.append(("process", ref, token))
+        charger._midtrans_poll_status = lambda snap: calls.append(("poll", snap)) or {
+            "transaction_status": "capture",
+            "status_code": "200",
+        }
+        charger._follow_midtrans_finish_redirect = (
+            lambda *_args: self.fail("finish redirect should not run for tokenization=true")
+        )
+        charger._chatgpt_verify = lambda cs: calls.append(("verify", cs)) or {
+            "state": "succeeded",
+            "cs_id": cs,
+        }
+
+        result = GoPayCharger.complete_after_manual_confirmation(charger, {
+            "snap_token": "snap",
+            "charge_ref": "A123",
+            "cs_id": "cs_test",
+        })
+
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(calls, [
+            ("validate", "A123"),
+            ("confirm", "A123"),
+            ("pin", "challenge", "client", "payment"),
+            ("process", "A123", "pin-token"),
+            ("poll", "snap"),
+            ("verify", "cs_test"),
+        ])
 
 
 class StripeExpectedAmountTests(unittest.TestCase):

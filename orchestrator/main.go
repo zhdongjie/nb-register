@@ -27,6 +27,8 @@ import (
 const (
 	actionRegister            = "REGISTER"
 	actionActivate            = "ACTIVATE"
+	actionAutopay             = "AUTOPAY"
+	actionGoPayCycle          = "GOPAY_CYCLE"
 	actionProbeAccount        = "PROBE_ACCOUNT"
 	actionLoginSession        = "LOGIN_SESSION"
 	actionRegisterAndActivate = "REGISTER_AND_ACTIVATE"
@@ -57,19 +59,27 @@ const (
 	emailAuthStatusAuthFailed        = "AUTH_FAILED"
 	emailAuthStatusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
 
-	stepRegisterAccount = "register_account"
-	stepEnsureLogon     = "ensure_logon"
-	stepGoPayPayment    = "gopay_payment"
-	stepProbePlusTrial  = "probe_plus_trial"
-	stepProbeTier       = "probe_tier"
-	stepLoginSession    = "login_session"
-	stepRegisterMailbox = "register_mailbox"
-	stepMailboxOAuth    = "mailbox_oauth"
+	stepRegisterAccount       = "register_account"
+	stepEnsureLogon           = "ensure_logon"
+	stepGoPayCycleLogin       = "gopay_cycle_login"
+	stepGoPayCycleChangePhone = "gopay_cycle_change_phone"
+	stepGoPayCycleDeactivate  = "gopay_cycle_deactivate"
+	stepGoPayCycleSignup      = "gopay_cycle_signup"
+	stepGoPayCycleCreatePin   = "gopay_cycle_create_pin"
+	stepGoPayPayment          = "gopay_payment"
+	stepProbePlusTrial        = "probe_plus_trial"
+	stepProbeTier             = "probe_tier"
+	stepLoginSession          = "login_session"
+	stepRegisterMailbox       = "register_mailbox"
+	stepMailboxOAuth          = "mailbox_oauth"
 
 	registrationOTPParam            = "registration_otp"
 	registrationOTPSubmittedAtParam = "registration_otp_submitted_at_unix"
 	paymentOTPParam                 = "payment_otp"
 	paymentOTPSubmittedAtParam      = "payment_otp_submitted_at_unix"
+	paymentManualConfirmParam       = "payment_manual_confirmed"
+	paymentManualConfirmAtParam     = "payment_manual_confirmed_at_unix"
+	goPayCycleStateKey              = "default"
 )
 
 type orchestratorServer struct {
@@ -86,6 +96,7 @@ type orchestratorServer struct {
 	otpTimeout                        int32
 	regOTPTimeout                     int32
 	changePhoneMaxFailures            int
+	changePhoneDisabled               bool
 	changePhoneOTPWaitSeconds         int32
 	changePhoneOTPRetryAttempts       int
 	changePhoneGetNumberRetryDelay    time.Duration
@@ -301,6 +312,18 @@ func (s *orchestratorServer) runAtomicStep(ctx context.Context, jobID, stepName 
 	}
 
 	return result, nil
+}
+
+func (s *orchestratorServer) updateRunningStepData(ctx context.Context, jobID, stepName string, result any) {
+	resultJSON := marshalStepResult(jobID, stepName, result)
+	if resultJSON == "" {
+		return
+	}
+	if err := s.db.WithContext(ctx).Model(&db.JobStep{}).
+		Where("job_id = ? AND step_name = ? AND status = ?", jobID, stepName, statusRunning).
+		Update("result_json", resultJSON).Error; err != nil {
+		log.Printf("[orchestrator] update running step data failed job=%s step=%s: %v", jobID, stepName, err)
+	}
 }
 
 func failedStatus(recoverable bool, retryable bool) string {
@@ -578,19 +601,21 @@ func (s *orchestratorServer) consumeManualRegistrationOtp(ctx context.Context, j
 	return code, true, nil
 }
 
-func (s *orchestratorServer) pay(ctx context.Context, jobID string, account *pb.Account, sessionToken, accessToken string, useCycleToken bool) (result *pb.GoPayResponse, data map[string]any, err error) {
+func (s *orchestratorServer) pay(ctx context.Context, jobID string, account *pb.Account, sessionToken, accessToken string, useCycleToken bool, tokenization string) (result *pb.GoPayResponse, data map[string]any, err error) {
 	if sessionToken == "" {
 		sessionToken = account.GetSessionToken()
 	}
 	if accessToken == "" {
 		accessToken = account.GetAccessToken()
 	}
+	tokenization = strings.TrimSpace(tokenization)
 
 	data = map[string]any{
 		"account_id":             account.GetAccountId(),
 		"session_token_present":  sessionToken != "",
 		"access_token_present":   accessToken != "",
 		"used_cycle_token":       useCycleToken,
+		"tokenization":           tokenization,
 		"otp_value_recorded":     false,
 		"payment_result_present": false,
 	}
@@ -619,6 +644,7 @@ func (s *orchestratorServer) pay(ctx context.Context, jobID string, account *pb.
 		SessionToken:  sessionToken,
 		AccessToken:   accessToken,
 		UseCycleToken: useCycleToken,
+		Tokenization:  tokenization,
 	})
 	data["payment_start"] = paymentStartData(started)
 	if err != nil {
@@ -666,6 +692,43 @@ func (s *orchestratorServer) pay(ctx context.Context, jobID string, account *pb.
 	}
 	if !result.GetSuccess() {
 		return nil, data, fmt.Errorf("payment complete failed: %s", result.GetErrorMessage())
+	}
+	if result.GetAwaitingManualConfirmation() {
+		issuedAfterUnix := time.Now().Unix()
+		data["manual_payment_confirmation"] = map[string]any{
+			"required":          true,
+			"issued_after_unix": issuedAfterUnix,
+			"confirmed":         false,
+		}
+		s.updateRunningStepData(ctx, jobID, stepGoPayPayment, data)
+
+		if err := s.waitForManualPaymentConfirmation(ctx, jobID, issuedAfterUnix); err != nil {
+			data["manual_payment_confirmation"] = map[string]any{
+				"required":          true,
+				"issued_after_unix": issuedAfterUnix,
+				"confirmed":         false,
+				"error_message":     err.Error(),
+			}
+			return nil, data, err
+		}
+		data["manual_payment_confirmation"] = map[string]any{
+			"required":          true,
+			"issued_after_unix": issuedAfterUnix,
+			"confirmed":         true,
+		}
+
+		result, err = s.paymentClient.ConfirmGoPayPayment(ctx, &pb.ConfirmGoPayPaymentRequest{FlowId: flowID})
+		data["payment_confirm"] = paymentResultData(result)
+		data["payment_result_present"] = result != nil
+		if err != nil {
+			return nil, data, err
+		}
+		if result == nil {
+			return nil, data, fmt.Errorf("payment confirm returned empty response")
+		}
+		if !result.GetSuccess() {
+			return nil, data, fmt.Errorf("payment confirm failed: %s", result.GetErrorMessage())
+		}
 	}
 	completed = true
 
@@ -759,12 +822,60 @@ func (s *orchestratorServer) waitForPaymentOtp(ctx context.Context, jobID string
 	}
 }
 
+func (s *orchestratorServer) waitForManualPaymentConfirmation(ctx context.Context, jobID string, issuedAfterUnix int64) error {
+	defer func() {
+		_ = s.deleteJobParam(context.Background(), jobID, paymentManualConfirmParam)
+		_ = s.deleteJobParam(context.Background(), jobID, paymentManualConfirmAtParam)
+	}()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			confirmed, err := s.consumeManualPaymentConfirmation(ctx, jobID, issuedAfterUnix)
+			if err != nil {
+				return err
+			}
+			if confirmed {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (s *orchestratorServer) consumeManualPaymentConfirmation(ctx context.Context, jobID string, issuedAfterUnix int64) (bool, error) {
+	value, found, err := s.getJobParam(ctx, jobID, paymentManualConfirmParam)
+	if err != nil || !found {
+		return false, err
+	}
+	if !manualParamSubmittedAfter(ctx, s, jobID, paymentManualConfirmParam, paymentManualConfirmAtParam, issuedAfterUnix) {
+		return false, nil
+	}
+	confirmed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil || !confirmed {
+		if err := s.deleteJobParam(ctx, jobID, paymentManualConfirmParam); err != nil {
+			return false, err
+		}
+		_ = s.deleteJobParam(ctx, jobID, paymentManualConfirmAtParam)
+		return false, nil
+	}
+	if err := s.deleteJobParam(ctx, jobID, paymentManualConfirmParam); err != nil {
+		return false, err
+	}
+	_ = s.deleteJobParam(ctx, jobID, paymentManualConfirmAtParam)
+	return true, nil
+}
+
 func (s *orchestratorServer) consumeManualPaymentOtp(ctx context.Context, jobID string, issuedAfterUnix int64) (string, bool, error) {
 	value, found, err := s.getJobParam(ctx, jobID, paymentOTPParam)
 	if err != nil || !found {
 		return "", false, err
 	}
-	if !manualOTPSubmittedAfter(ctx, s, jobID, paymentOTPParam, paymentOTPSubmittedAtParam, issuedAfterUnix) {
+	if !manualParamSubmittedAfter(ctx, s, jobID, paymentOTPParam, paymentOTPSubmittedAtParam, issuedAfterUnix) {
 		return "", false, nil
 	}
 	code := normalizeOTP(value)
@@ -784,18 +895,22 @@ type jobParamStore interface {
 }
 
 func manualOTPSubmittedAfter(ctx context.Context, store jobParamStore, jobID, otpParam, submittedAtParam string, issuedAfterUnix int64) bool {
+	return manualParamSubmittedAfter(ctx, store, jobID, otpParam, submittedAtParam, issuedAfterUnix)
+}
+
+func manualParamSubmittedAfter(ctx context.Context, store jobParamStore, jobID, valueParam, submittedAtParam string, issuedAfterUnix int64) bool {
 	if issuedAfterUnix <= 0 {
 		return true
 	}
 	submittedAtValue, found, err := store.getJobParam(ctx, jobID, submittedAtParam)
 	if err != nil || !found {
-		_ = store.deleteJobParam(ctx, jobID, otpParam)
+		_ = store.deleteJobParam(ctx, jobID, valueParam)
 		_ = store.deleteJobParam(ctx, jobID, submittedAtParam)
 		return false
 	}
 	submittedAt, err := strconv.ParseInt(strings.TrimSpace(submittedAtValue), 10, 64)
 	if err != nil || submittedAt < issuedAfterUnix {
-		_ = store.deleteJobParam(ctx, jobID, otpParam)
+		_ = store.deleteJobParam(ctx, jobID, valueParam)
 		_ = store.deleteJobParam(ctx, jobID, submittedAtParam)
 		return false
 	}
@@ -838,6 +953,31 @@ func (s *orchestratorServer) ActivateAccount(ctx context.Context, req *pb.Activa
 	jobID := uuid.NewString()
 	var result ActivateAccountWorkflowResult
 	run, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions("activate-"+jobID), ActivateAccountWorkflow, ActivateAccountWorkflowInput{
+		JobID:       jobID,
+		AccountID:   strings.TrimSpace(req.GetAccountId()),
+		SourceJobID: req.GetJobId(),
+		Action:      actionActivate,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := run.Get(ctx, &result); err != nil {
+		return &pb.ActivateAccountResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+
+	return &pb.ActivateAccountResponse{
+		JobId:        result.JobID,
+		Success:      result.Success,
+		ErrorMessage: result.ErrorMessage,
+		ChargeRef:    result.ChargeRef,
+		SnapToken:    result.SnapToken,
+	}, nil
+}
+
+func (s *orchestratorServer) AutopayAccount(ctx context.Context, req *pb.ActivateAccountRequest) (*pb.ActivateAccountResponse, error) {
+	jobID := uuid.NewString()
+	var result AutoPayWorkflowResult
+	run, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions("autopay-"+jobID), AutoPayWorkflow, AutoPayWorkflowInput{
 		JobID:       jobID,
 		AccountID:   strings.TrimSpace(req.GetAccountId()),
 		SourceJobID: req.GetJobId(),
@@ -888,6 +1028,17 @@ func (s *orchestratorServer) ProbeAccount(ctx context.Context, req *pb.ProbeAcco
 		return &pb.ProbeAccountResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
 	}
 	return &pb.ProbeAccountResponse{JobId: jobID, Started: true}, nil
+}
+
+func (s *orchestratorServer) RunGoPayCycle(ctx context.Context, req *pb.GoPayCycleRequest) (*pb.GoPayCycleResponse, error) {
+	jobID := uuid.NewString()
+	_, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions("gopay-cycle-"+jobID), GoPayCycleWorkflow, GoPayCycleWorkflowInput{
+		JobID: jobID,
+	})
+	if err != nil {
+		return &pb.GoPayCycleResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	return &pb.GoPayCycleResponse{JobId: jobID, Started: true}, nil
 }
 
 func (s *orchestratorServer) RegisterAndActivateAccount(ctx context.Context, req *pb.RegisterAndActivateAccountRequest) (*pb.RegisterAndActivateAccountResponse, error) {
@@ -999,6 +1150,74 @@ func (s *orchestratorServer) SubmitRegistrationOtp(ctx context.Context, req *pb.
 	return &pb.SubmitRegistrationOtpResponse{Success: true, JobId: jobID}, nil
 }
 
+func (s *orchestratorServer) SubmitPaymentConfirmation(ctx context.Context, req *pb.SubmitPaymentConfirmationRequest) (*pb.SubmitPaymentConfirmationResponse, error) {
+	jobID, err := s.resolveManualPaymentConfirmationJob(ctx, strings.TrimSpace(req.GetJobId()), strings.TrimSpace(req.GetAccountId()))
+	if err != nil {
+		return &pb.SubmitPaymentConfirmationResponse{Success: false, ErrorMessage: err.Error()}, nil
+	}
+
+	if err := s.setJobParams(ctx, jobID, map[string]string{
+		paymentManualConfirmParam:   "true",
+		paymentManualConfirmAtParam: strconv.FormatInt(time.Now().Unix(), 10),
+	}); err != nil {
+		return &pb.SubmitPaymentConfirmationResponse{Success: false, JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+
+	log.Printf("[orchestrator] payment manual confirmation submitted job=%s", jobID)
+	return &pb.SubmitPaymentConfirmationResponse{Success: true, JobId: jobID}, nil
+}
+
+func (s *orchestratorServer) resolveManualPaymentConfirmationJob(ctx context.Context, jobID, accountID string) (string, error) {
+	if jobID != "" {
+		var job db.Job
+		err := s.db.WithContext(ctx).First(&job, "id = ?", jobID).Error
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return "", fmt.Errorf("job not found: %s", jobID)
+			}
+			return "", err
+		}
+		if err := validateManualPaymentConfirmationJob(&job); err != nil {
+			return "", err
+		}
+		return job.ID, nil
+	}
+	if accountID == "" {
+		return "", fmt.Errorf("job_id or account_id is required")
+	}
+
+	var job db.Job
+	err := s.db.WithContext(ctx).
+		Where("account_id = ? AND action IN ? AND status = ? AND last_step = ?", accountID, []string{actionActivate, actionAutopay, actionRegisterAndActivate}, statusRunning, stepGoPayPayment).
+		Order("updated_at DESC").
+		First(&job).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return "", fmt.Errorf("running payment-confirming job not found for account %s", accountID)
+		}
+		return "", err
+	}
+	return job.ID, nil
+}
+
+func validateManualPaymentConfirmationJob(job *db.Job) error {
+	if job == nil {
+		return fmt.Errorf("job is required")
+	}
+	if job.Status != statusRunning {
+		return fmt.Errorf("job is not running: %s", job.Status)
+	}
+	if job.LastStep != stepGoPayPayment {
+		return fmt.Errorf("job is not waiting for payment confirmation: %s", job.LastStep)
+	}
+	switch job.Action {
+	case actionActivate, actionAutopay, actionRegisterAndActivate:
+		return nil
+	default:
+		return fmt.Errorf("job does not accept payment confirmation: %s", job.Action)
+	}
+}
+
 func (s *orchestratorServer) resolveManualOTPJob(ctx context.Context, jobID, accountID string) (string, string, string, string, error) {
 	if jobID != "" {
 		var job db.Job
@@ -1024,7 +1243,7 @@ func (s *orchestratorServer) resolveManualOTPJob(ctx context.Context, jobID, acc
 
 	var job db.Job
 	err := s.db.WithContext(ctx).
-		Where("account_id = ? AND action IN ? AND status = ?", accountID, []string{actionRegister, actionActivate, actionRegisterAndActivate, actionLoginSession}, statusRunning).
+		Where("account_id = ? AND action IN ? AND status = ?", accountID, []string{actionRegister, actionActivate, actionAutopay, actionGoPayCycle, actionRegisterAndActivate, actionLoginSession}, statusRunning).
 		Order("updated_at DESC").
 		First(&job).Error
 	if err != nil {
@@ -1061,7 +1280,7 @@ func manualOTPParamsForJobSnapshot(job *db.Job) (string, string, string, error) 
 	switch job.Action {
 	case actionRegister, actionLoginSession:
 		return registrationOTPParam, registrationOTPSubmittedAtParam, "registration", nil
-	case actionActivate:
+	case actionActivate, actionAutopay, actionGoPayCycle:
 		return paymentOTPParam, paymentOTPSubmittedAtParam, "payment", nil
 	case actionRegisterAndActivate:
 		if job.LastStep == stepEnsureLogon || job.LastStep == stepGoPayPayment {
@@ -1230,11 +1449,16 @@ func paymentResultData(resp *pb.GoPayResponse) map[string]any {
 		return map[string]any{"response_present": false}
 	}
 	return map[string]any{
-		"response_present":   true,
-		"success":            resp.GetSuccess(),
-		"error_message":      resp.GetErrorMessage(),
-		"charge_ref":         resp.GetChargeRef(),
-		"snap_token_present": resp.GetSnapToken() != "",
+		"response_present":             true,
+		"success":                      resp.GetSuccess(),
+		"error_message":                resp.GetErrorMessage(),
+		"charge_ref":                   resp.GetChargeRef(),
+		"snap_token_present":           resp.GetSnapToken() != "",
+		"awaiting_manual_confirmation": resp.GetAwaitingManualConfirmation(),
+		"deeplink_url":                 resp.GetDeeplinkUrl(),
+		"qr_code_url":                  resp.GetQrCodeUrl(),
+		"finish_redirect_url":          resp.GetFinishRedirectUrl(),
+		"finish_200_redirect_url":      resp.GetFinish_200RedirectUrl(),
 	}
 }
 
@@ -1365,6 +1589,7 @@ func main() {
 		otpTimeout:                        envInt32("GOPAY_OTP_TIMEOUT_SECONDS", 60),
 		regOTPTimeout:                     envInt32("REGISTRATION_OTP_TIMEOUT_SECONDS", 180),
 		changePhoneMaxFailures:            envInt("GOPAY_CHANGE_PHONE_MAX_FAILURES", defaultChangePhoneMaxFailures),
+		changePhoneDisabled:               envBool("GOPAY_CHANGE_PHONE_DISABLED", false),
 		changePhoneOTPWaitSeconds:         envInt32("GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS", defaultChangePhoneOTPWaitSeconds),
 		changePhoneOTPRetryAttempts:       envIntNonNegative("GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS", defaultChangePhoneOTPRetryAttempts),
 		changePhoneGetNumberRetryDelay:    envNonNegativeDurationSeconds("GOPAY_CHANGE_PHONE_GET_NUMBER_RETRY_SECONDS", defaultChangePhoneGetNumberRetryDelay),

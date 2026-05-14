@@ -30,10 +30,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY gopay-payment/gopay-flow/ /app/gopay-flow/
 COPY proto/gopay_cycle.proto /app/proto/gopay_cycle.proto
+COPY proto/account_db.proto /app/proto/account_db.proto
 COPY gopay-payment/NOTICE gopay-payment/LICENSE gopay-payment/run_gopay.sh gopay-payment/run_payment_server.sh /app/
 
 WORKDIR /app/gopay-flow
-RUN python -m grpc_tools.protoc -I proto -I /app/proto --python_out=. --grpc_python_out=. proto/payment.proto /app/proto/gopay_cycle.proto
+RUN python -m grpc_tools.protoc -I proto -I /app/proto --python_out=. --grpc_python_out=. proto/payment.proto /app/proto/gopay_cycle.proto /app/proto/account_db.proto
 
 EXPOSE 50051
 

@@ -344,7 +344,7 @@ func (s *orchestratorServer) GoPayPaymentAtomicActivity(ctx context.Context, inp
 	var data map[string]any
 	_, err = s.runAtomicStep(ctx, input.JobID, stepGoPayPayment, false, true, func() (any, error) {
 		var stepErr error
-		result, data, stepErr = s.pay(ctx, input.JobID, account, input.SessionToken, input.AccessToken, input.UseCycleToken)
+		result, data, stepErr = s.pay(ctx, input.JobID, account, input.SessionToken, input.AccessToken, input.UseCycleToken, input.Tokenization)
 		return data, stepErr
 	})
 	if err != nil {

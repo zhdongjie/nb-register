@@ -28,6 +28,12 @@ func TestManualOTPParamsForJob(t *testing.T) {
 			wantKind:  "payment",
 		},
 		{
+			name:      "autopay",
+			job:       db.Job{Action: actionAutopay},
+			wantParam: paymentOTPParam,
+			wantKind:  "payment",
+		},
+		{
 			name:      "register and activate during registration",
 			job:       db.Job{Action: actionRegisterAndActivate, LastStep: stepRegisterAccount},
 			wantParam: registrationOTPParam,

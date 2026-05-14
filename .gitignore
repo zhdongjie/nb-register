@@ -23,6 +23,7 @@ deploy-browser-reg.sh
 vps.txt
 token.txt
 tokens/
+compose.env
 *.token
 *.secret
 *.pem
@@ -41,7 +42,6 @@ state.json
 .env
 .env.*
 !.env.example
-compose.env
 **/.env
 **/.env.*
 !**/.env.example
@@ -109,6 +109,7 @@ gopay-payment/**/*.pyc
 
 # Scratch
 scratch/
+.tmp_*/
 .playwright-cli/
 memdump.bin
 .env

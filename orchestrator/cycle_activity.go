@@ -153,7 +153,7 @@ func (s *orchestratorServer) CycleAndPayActivity(ctx context.Context, input GoPa
 	var result *pb.GoPayResponse
 	_, err = s.runAtomicStep(ctx, input.JobID, stepGoPayPayment, false, true, func() (any, error) {
 		var stepErr error
-		result, data, stepErr = s.pay(ctx, input.JobID, account, "", "", true)
+		result, data, stepErr = s.pay(ctx, input.JobID, account, "", "", true, "")
 		return data, stepErr
 	})
 	if err != nil {
@@ -172,11 +172,87 @@ func (s *orchestratorServer) CycleAndPayActivity(ctx context.Context, input GoPa
 	}, nil
 }
 
+func (s *orchestratorServer) GoPayCycleLoginActivity(ctx context.Context, input GoPayCycleStepInput) (GoPayCycleStepOutput, error) {
+	output := GoPayCycleStepOutput{Data: map[string]any{}}
+	_, err := s.runAtomicStep(ctx, input.JobID, stepGoPayCycleLogin, false, true, func() (any, error) {
+		data := output.Data
+		statusBefore, statusErr := s.cycleStatus(ctx)
+		data["status_before"] = cycleStatusSnapshotData(cycleStatusSnapshot(statusBefore, statusErr))
+		if statusErr != nil {
+			data["error_message"] = statusErr.Error()
+			return data, statusErr
+		}
+
+		tokenResp, err := s.ensureCycleSeedLogon(ctx, input.JobID)
+		data["check_token_valid"] = checkTokenValidData(tokenResp)
+		if err != nil {
+			data["error_message"] = err.Error()
+			return data, err
+		}
+
+		statusAfter, statusErr := s.cycleStatus(ctx)
+		data["status_after"] = cycleStatusSnapshotData(cycleStatusSnapshot(statusAfter, statusErr))
+		if statusErr != nil {
+			data["error_message"] = statusErr.Error()
+			return data, statusErr
+		}
+		output.Ready = cycleStatusTokenReady(statusAfter)
+		output.CycleTokenReady = tokenResp.GetTokenValid() || output.Ready
+		output.Stage = statusAfter.GetStage()
+		output.Phone = statusAfter.GetPhone()
+		data["cycle_token_ready"] = output.CycleTokenReady
+		data["ready"] = output.Ready
+		return data, nil
+	})
+	return output, err
+}
+
+func (s *orchestratorServer) GoPayCycleChangePhoneActivity(ctx context.Context, input GoPayCycleStepInput) (GoPayCycleStepOutput, error) {
+	output := GoPayCycleStepOutput{Data: map[string]any{}}
+	_, err := s.runAtomicStep(ctx, input.JobID, stepGoPayCycleChangePhone, false, true, func() (any, error) {
+		data := output.Data
+		statusBefore, statusErr := s.cycleStatus(ctx)
+		data["status_before"] = cycleStatusSnapshotData(cycleStatusSnapshot(statusBefore, statusErr))
+		if statusErr != nil {
+			data["error_message"] = statusErr.Error()
+			return data, statusErr
+		}
+
+		activationID, err := s.cycleChangePhone(ctx)
+		if err != nil {
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		output.ActivationID = activationID
+		output.ChangePhoneComplete = true
+		data["activation_id"] = activationID
+		data["change_phone_complete"] = true
+
+		statusAfter, statusErr := s.cycleStatus(ctx)
+		data["status_after"] = cycleStatusSnapshotData(cycleStatusSnapshot(statusAfter, statusErr))
+		if statusErr != nil {
+			data["error_message"] = statusErr.Error()
+			return data, statusErr
+		}
+		output.Stage = statusAfter.GetStage()
+		output.Phone = statusAfter.GetPhone()
+		return data, nil
+	})
+	return output, err
+}
+
 func (s *orchestratorServer) cycleStatus(ctx context.Context) (*pb.StatusResponse, error) {
 	if s.cycleClient == nil {
 		return nil, fmt.Errorf("cycle client not configured")
 	}
-	resp, err := s.cycleClient.Status(ctx, &pb.StatusRequest{})
+	stateJSON, err := s.loadGoPayCycleState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.cycleClient.Status(ctx, &pb.StatusRequest{StateJson: stateJSON})
+	if err == nil {
+		err = s.saveGoPayCycleState(ctx, resp.GetStateJson())
+	}
 	if err != nil {
 		return resp, fmt.Errorf("Status: %w", err)
 	}
@@ -184,6 +260,41 @@ func (s *orchestratorServer) cycleStatus(ctx context.Context) (*pb.StatusRespons
 		return nil, fmt.Errorf("Status returned empty response")
 	}
 	return resp, nil
+}
+
+func (s *orchestratorServer) loadGoPayCycleState(ctx context.Context) (string, error) {
+	if s.accountClient == nil {
+		return "{}", fmt.Errorf("account database client not configured")
+	}
+	resp, err := s.accountClient.GetGoPayCycleState(ctx, &pb.GetGoPayCycleStateRequest{StateKey: goPayCycleStateKey})
+	if err != nil {
+		return "", fmt.Errorf("GetGoPayCycleState: %w", err)
+	}
+	stateJSON := strings.TrimSpace(resp.GetState().GetStateJson())
+	if stateJSON == "" {
+		stateJSON = "{}"
+	}
+	return stateJSON, nil
+}
+
+func (s *orchestratorServer) saveGoPayCycleState(ctx context.Context, stateJSON string) error {
+	stateJSON = strings.TrimSpace(stateJSON)
+	if stateJSON == "" {
+		return nil
+	}
+	if s.accountClient == nil {
+		return fmt.Errorf("account database client not configured")
+	}
+	_, err := s.accountClient.UpsertGoPayCycleState(ctx, &pb.UpsertGoPayCycleStateRequest{
+		State: &pb.GoPayCycleState{
+			StateKey:  goPayCycleStateKey,
+			StateJson: stateJSON,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("UpsertGoPayCycleState: %w", err)
+	}
+	return nil
 }
 
 func cycleStatusTokenReady(resp *pb.StatusResponse) bool {
@@ -194,7 +305,14 @@ func (s *orchestratorServer) validateCycleSeedToken(ctx context.Context) (*pb.Ch
 	if s.cycleClient == nil {
 		return nil, fmt.Errorf("cycle client not configured")
 	}
-	resp, err := s.cycleClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{})
+	stateJSON, err := s.loadGoPayCycleState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.cycleClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{StateJson: stateJSON})
+	if err == nil {
+		err = s.saveGoPayCycleState(ctx, resp.GetStateJson())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +367,19 @@ func (s *orchestratorServer) waitForCycleMinBalance(ctx context.Context) error {
 	lastCurrency := "IDR"
 	var lastErr string
 	for {
-		resp, err := s.cycleClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{})
+		var resp *pb.CheckTokenValidResponse
+		var err error
+		stateJSON, stateErr := s.loadGoPayCycleState(ctx)
+		if stateErr != nil {
+			lastErr = stateErr.Error()
+			resp = nil
+			err = stateErr
+		} else {
+			resp, err = s.cycleClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{StateJson: stateJSON})
+			if err == nil {
+				err = s.saveGoPayCycleState(ctx, resp.GetStateJson())
+			}
+		}
 		if err != nil {
 			lastErr = err.Error()
 		} else if resp == nil {
@@ -407,6 +537,35 @@ func cycleStatusSnapshotData(snapshot *pb.CycleStatusSnapshot) map[string]any {
 	return data
 }
 
+func checkTokenValidData(resp *pb.CheckTokenValidResponse) map[string]any {
+	if resp == nil {
+		return map[string]any{"response_present": false}
+	}
+	data := map[string]any{
+		"response_present": true,
+		"success":          resp.GetSuccess(),
+		"token_valid":      resp.GetTokenValid(),
+		"refreshed":        resp.GetRefreshed(),
+		"has_min_balance":  resp.GetHasMinBalance(),
+	}
+	if resp.GetStage() != "" {
+		data["stage"] = resp.GetStage()
+	}
+	if resp.GetPhone() != "" {
+		data["phone"] = resp.GetPhone()
+	}
+	if resp.GetBalanceAmount() != 0 || resp.GetBalanceCurrency() != "" {
+		data["balance_amount"] = resp.GetBalanceAmount()
+		if resp.GetBalanceCurrency() != "" {
+			data["balance_currency"] = resp.GetBalanceCurrency()
+		}
+	}
+	if resp.GetErrorMessage() != "" {
+		data["error_message"] = resp.GetErrorMessage()
+	}
+	return data
+}
+
 func cycleStatusSnapshotEmpty(snapshot *pb.CycleStatusSnapshot) bool {
 	return snapshot.GetStage() == "" &&
 		snapshot.GetPhone() == "" &&
@@ -505,6 +664,9 @@ func (s *orchestratorServer) recordChangePhoneFailure(ctx context.Context, activ
 }
 
 func (s *orchestratorServer) cycleChangePhone(ctx context.Context) (string, error) {
+	if s.changePhoneDisabled {
+		return "", fmt.Errorf("cycle change phone disabled by GOPAY_CHANGE_PHONE_DISABLED")
+	}
 	if s.cycleClient == nil || s.smsClient == nil {
 		return "", fmt.Errorf("cycle or sms client not configured")
 	}
@@ -560,9 +722,18 @@ phoneAttempts:
 		}
 
 		// 改号
+		stateJSON, err := s.loadGoPayCycleState(ctx)
+		if err != nil {
+			s.cancelSMSActivation(ctx, activationID)
+			return "", err
+		}
 		changeResp, err := s.cycleClient.ChangePhoneStart(ctx, &pb.ChangePhoneStartRequest{
-			NewPhone: phone,
+			NewPhone:  phone,
+			StateJson: stateJSON,
 		})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, changeResp.GetStateJson())
+		}
 		if err != nil {
 			s.cancelSMSActivation(ctx, activationID)
 			return "", fmt.Errorf("ChangePhoneStart: %w", err)
@@ -604,7 +775,15 @@ phoneAttempts:
 				break
 			}
 			if otpAttempt < otpRetryAttempts {
-				retryResp, err := s.cycleClient.ChangePhoneRetry(ctx, &pb.ChangePhoneRetryRequest{})
+				stateJSON, stateErr := s.loadGoPayCycleState(ctx)
+				if stateErr != nil {
+					s.cancelSMSActivation(ctx, activationID)
+					return "", stateErr
+				}
+				retryResp, err := s.cycleClient.ChangePhoneRetry(ctx, &pb.ChangePhoneRetryRequest{StateJson: stateJSON})
+				if err == nil {
+					err = s.saveGoPayCycleState(ctx, retryResp.GetStateJson())
+				}
 				if err != nil {
 					s.cancelSMSActivation(ctx, activationID)
 					return "", fmt.Errorf("ChangePhoneRetry after WaitOTP failure (%s): %w", otpResp.GetErrorMessage(), err)
@@ -631,7 +810,15 @@ phoneAttempts:
 		}
 
 		// 完成改号
-		completeResp, err := s.cycleClient.ChangePhoneComplete(ctx, &pb.ChangePhoneCompleteRequest{Otp: otpCode})
+		stateJSON, err = s.loadGoPayCycleState(ctx)
+		if err != nil {
+			s.finishSMSActivation(ctx, activationID)
+			return "", err
+		}
+		completeResp, err := s.cycleClient.ChangePhoneComplete(ctx, &pb.ChangePhoneCompleteRequest{Otp: otpCode, StateJson: stateJSON})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, completeResp.GetStateJson())
+		}
 		if err != nil {
 			s.finishSMSActivation(ctx, activationID)
 			return "", fmt.Errorf("ChangePhoneComplete: %w", err)
@@ -656,7 +843,15 @@ func (s *orchestratorServer) cycleDeactivate(ctx context.Context, activationID s
 	}
 
 	// 发起注销
-	deactResp, err := s.cycleClient.DeactivateStart(ctx, &pb.DeactivateStartRequest{})
+	stateJSON, err := s.loadGoPayCycleState(ctx)
+	if err != nil {
+		s.finishSMSActivation(ctx, activationID)
+		return err
+	}
+	deactResp, err := s.cycleClient.DeactivateStart(ctx, &pb.DeactivateStartRequest{StateJson: stateJSON})
+	if err == nil {
+		err = s.saveGoPayCycleState(ctx, deactResp.GetStateJson())
+	}
 	if err != nil {
 		s.finishSMSActivation(ctx, activationID)
 		return fmt.Errorf("DeactivateStart: %w", err)
@@ -675,7 +870,15 @@ func (s *orchestratorServer) cycleDeactivate(ctx context.Context, activationID s
 		return fmt.Errorf("WaitOTP deactivate: %s", otpResp.GetErrorMessage())
 	}
 
-	completeResp, err := s.cycleClient.DeactivateComplete(ctx, &pb.DeactivateCompleteRequest{Otp: otpResp.GetCode()})
+	stateJSON, err = s.loadGoPayCycleState(ctx)
+	if err != nil {
+		s.finishSMSActivation(ctx, activationID)
+		return err
+	}
+	completeResp, err := s.cycleClient.DeactivateComplete(ctx, &pb.DeactivateCompleteRequest{Otp: otpResp.GetCode(), StateJson: stateJSON})
+	if err == nil {
+		err = s.saveGoPayCycleState(ctx, completeResp.GetStateJson())
+	}
 	if err != nil {
 		s.finishSMSActivation(ctx, activationID)
 		return fmt.Errorf("DeactivateComplete: %w", err)
@@ -855,7 +1058,14 @@ func (s *orchestratorServer) cycleLoginOrSignupSeed(ctx context.Context, jobID s
 		}
 
 		startedAt := time.Now().Unix()
-		startResp, err := s.cycleClient.AuthStart(ctx, &pb.AuthStartRequest{})
+		stateJSON, err := s.loadGoPayCycleState(ctx)
+		if err != nil {
+			return err
+		}
+		startResp, err := s.cycleClient.AuthStart(ctx, &pb.AuthStartRequest{StateJson: stateJSON})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, startResp.GetStateJson())
+		}
 		if err != nil {
 			return fmt.Errorf("gopay auth start: %w", err)
 		}
@@ -896,7 +1106,14 @@ func (s *orchestratorServer) cycleLoginOrSignupSeed(ctx context.Context, jobID s
 			return fmt.Errorf("waiting auth OTP: %w", err)
 		}
 
-		completeResp, err := s.cycleClient.AuthComplete(ctx, &pb.AuthCompleteRequest{Otp: otp.Code})
+		stateJSON, err = s.loadGoPayCycleState(ctx)
+		if err != nil {
+			return err
+		}
+		completeResp, err := s.cycleClient.AuthComplete(ctx, &pb.AuthCompleteRequest{Otp: otp.Code, StateJson: stateJSON})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, completeResp.GetStateJson())
+		}
 		if err != nil {
 			return fmt.Errorf("gopay auth complete: %w", err)
 		}
@@ -954,7 +1171,14 @@ func (s *orchestratorServer) cycleSignupAndCreatePin(ctx context.Context, jobID 
 			}
 		} else {
 			startedAt := time.Now().Unix()
-			startResp, err := s.cycleClient.SignupStart(ctx, &pb.SignupStartRequest{})
+			stateJSON, err := s.loadGoPayCycleState(ctx)
+			if err != nil {
+				return result, err
+			}
+			startResp, err := s.cycleClient.SignupStart(ctx, &pb.SignupStartRequest{StateJson: stateJSON})
+			if err == nil {
+				err = s.saveGoPayCycleState(ctx, startResp.GetStateJson())
+			}
 			if err != nil {
 				return result, fmt.Errorf("gopay signup start: %w", err)
 			}
@@ -985,7 +1209,14 @@ func (s *orchestratorServer) cycleSignupAndCreatePin(ctx context.Context, jobID 
 			return result, fmt.Errorf("waiting signup OTP: %w", err)
 		}
 
-		completeResp, err := s.cycleClient.SignupComplete(ctx, &pb.SignupCompleteRequest{Otp: otp.Code})
+		stateJSON, err := s.loadGoPayCycleState(ctx)
+		if err != nil {
+			return result, err
+		}
+		completeResp, err := s.cycleClient.SignupComplete(ctx, &pb.SignupCompleteRequest{Otp: otp.Code, StateJson: stateJSON})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, completeResp.GetStateJson())
+		}
 		if err != nil {
 			return result, fmt.Errorf("gopay signup complete: %w", err)
 		}
@@ -1014,7 +1245,14 @@ createPin:
 		}
 	} else {
 		startedAt := time.Now().Unix()
-		startResp, err := s.cycleClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{})
+		stateJSON, err := s.loadGoPayCycleState(ctx)
+		if err != nil {
+			return result, err
+		}
+		startResp, err := s.cycleClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{StateJson: stateJSON})
+		if err == nil {
+			err = s.saveGoPayCycleState(ctx, startResp.GetStateJson())
+		}
 		if err != nil {
 			return result, fmt.Errorf("gopay create pin start: %w", err)
 		}
@@ -1044,7 +1282,14 @@ createPin:
 		return result, fmt.Errorf("waiting create pin OTP: %w", err)
 	}
 
-	completeResp, err := s.cycleClient.CreatePinComplete(ctx, &pb.CreatePinCompleteRequest{Otp: otp.Code})
+	stateJSON, err := s.loadGoPayCycleState(ctx)
+	if err != nil {
+		return result, err
+	}
+	completeResp, err := s.cycleClient.CreatePinComplete(ctx, &pb.CreatePinCompleteRequest{Otp: otp.Code, StateJson: stateJSON})
+	if err == nil {
+		err = s.saveGoPayCycleState(ctx, completeResp.GetStateJson())
+	}
 	if err != nil {
 		return result, fmt.Errorf("gopay create pin complete: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 func registerTemporalWorker(w worker.Worker, s *orchestratorServer) {
 	w.RegisterWorkflow(RegisterAccountWorkflow)
 	w.RegisterWorkflow(ActivateAccountWorkflow)
+	w.RegisterWorkflow(AutoPayWorkflow)
+	w.RegisterWorkflow(GoPayCycleWorkflow)
 	w.RegisterWorkflow(ProbeAccountWorkflow)
 	w.RegisterWorkflow(LoginSessionWorkflow)
 	w.RegisterWorkflow(RegisterAndActivateWorkflow)
@@ -21,6 +23,8 @@ func registerTemporalWorker(w worker.Worker, s *orchestratorServer) {
 	w.RegisterActivityWithOptions(s.EnsureLogonActivity, activity.RegisterOptions{Name: ensureLogonActivityName})
 	w.RegisterActivityWithOptions(s.GoPayPaymentAtomicActivity, activity.RegisterOptions{Name: goPayPaymentActivityName})
 	w.RegisterActivityWithOptions(s.CycleAndPayActivity, activity.RegisterOptions{Name: cycleAndPayActivityName})
+	w.RegisterActivityWithOptions(s.GoPayCycleLoginActivity, activity.RegisterOptions{Name: goPayCycleLoginActivityName})
+	w.RegisterActivityWithOptions(s.GoPayCycleChangePhoneActivity, activity.RegisterOptions{Name: goPayCycleChangePhoneActivityName})
 	w.RegisterActivityWithOptions(s.ProbePlusTrialAtomicActivity, activity.RegisterOptions{Name: probePlusTrialActivityName})
 	w.RegisterActivityWithOptions(s.ProbeTierAtomicActivity, activity.RegisterOptions{Name: probeTierActivityName})
 	w.RegisterActivityWithOptions(s.LoginSessionAtomicActivity, activity.RegisterOptions{Name: loginSessionActivityName})

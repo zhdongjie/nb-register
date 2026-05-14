@@ -36,7 +36,8 @@ python3 -m grpc_tools.protoc \
   --python_out="${ROOT}/gopay-payment/gopay-flow" \
   --grpc_python_out="${ROOT}/gopay-payment/gopay-flow" \
   "${ROOT}/gopay-payment/gopay-flow/proto/payment.proto" \
-  "${ROOT}/proto/gopay_cycle.proto"
+  "${ROOT}/proto/gopay_cycle.proto" \
+  "${ROOT}/proto/account_db.proto"
 
 python3 -m grpc_tools.protoc \
   -I "${ROOT}/proto" \

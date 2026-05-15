@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import gopay_client
 import gopay_cycle
+import replay
 
 try:
     import cycle_server
@@ -391,6 +392,138 @@ class ProfileHeaderTests(unittest.TestCase):
             "transaction-id",
         ):
             self.assertNotIn(key, lower)
+
+
+class ReplayTests(unittest.TestCase):
+    def test_build_qris_payment_body_from_raw_qr(self):
+        merchant_account = replay.encode_tlv(
+            [
+                ("00", "COM.EXAMPLE.QRIS"),
+                ("01", "123456780000000001"),
+                ("02", "MERCHANT01"),
+                ("03", "UME"),
+            ]
+        )
+        additional = replay.encode_tlv([("07", "TERM1"), ("50", "ORDER123")])
+        qr = replay.encode_tlv(
+            [
+                ("00", "01"),
+                ("01", "12"),
+                ("26", merchant_account),
+                ("52", "5817"),
+                ("53", "360"),
+                ("54", "1"),
+                ("58", "ID"),
+                ("59", "Example Shop"),
+                ("60", "JAKARTA"),
+                ("61", "12345"),
+                ("62", additional),
+                ("63", "ABCD"),
+            ]
+        )
+
+        body = replay.build_qris_payment_body(qr)
+
+        self.assertEqual(body["amount"], {"value": 1, "currency": "IDR"})
+        self.assertEqual(body["channel_type"], "DYNAMIC_QR")
+        info = body["additional_data"]["aspiqr_information"]
+        self.assertEqual(info["merchant_id"], "MERCHANT01")
+        self.assertEqual(
+            info["additional_data_national"],
+            replay.build_additional_data_national("12345", replay.parse_emv_tlv(additional)),
+        )
+
+    def test_run_qr_payment_uses_order_and_pin_without_files(self):
+        calls = []
+        case = self
+
+        class FakeClient:
+            def post(self, url, body=None, extra_headers=None, **kwargs):
+                calls.append(("post", url, body, extra_headers or {}))
+                if url.endswith("/checkout/list"):
+                    return {
+                        "status": 200,
+                        "data": {"selected_options": [{"token": "payment-token"}]},
+                        "raw": {"success": True},
+                    }
+                if url.endswith("/pin/tokens"):
+                    case.assertEqual(body["pin"], TEST_PIN)
+                    return {"status": 200, "data": {"token": "pin-token"}, "raw": {"success": True}}
+                raise AssertionError(f"unexpected post {url}")
+
+            def put(self, url, body=None, **kwargs):
+                calls.append(("put", url, body, {}))
+                return {"status": 200, "data": {}, "raw": {"success": True}}
+
+            def get(self, url, **kwargs):
+                calls.append(("get", url, None, {}))
+                return {"status": 200, "data": {}, "raw": {"success": True}}
+
+            def patch(self, url, body=None, extra_headers=None, **kwargs):
+                calls.append(("patch", url, body, extra_headers or {}))
+                if body.get("challenge") is None:
+                    return {
+                        "status": 461,
+                        "data": {
+                            "challenge": {
+                                "action": {"value": {"challenge_id": "challenge-id", "client_id": "client-id"}},
+                                "metadata": {"challenge_id": "challenge-id", "client_id": "client-id"},
+                            }
+                        },
+                        "raw": {"success": False},
+                    }
+                case.assertEqual(body["challenge"]["value"]["pin_token"], "pin-token")
+                return {"status": 200, "data": {"payment_id": "pay-1", "status": "PAID"}, "raw": {"success": True}}
+
+        order = {
+            "payment_id": "pay-1",
+            "amount": {"value": 1, "currency": "IDR"},
+            "payment_widget_metadata": {"service_id": "1001", "merchant_id": "MERCHANT01"},
+            "additional_data": {"merchant_information": {"id": "MERCHANT01"}},
+            "metadata": {},
+            "checksum": {"version": "3", "value": "1"},
+            "channel_type": "ONLINE_GATEWAY",
+        }
+
+        result = replay.run_qr_payment(
+            FakeClient(),
+            replay.QrPaymentOptions(order_json=json.dumps(order), pin=TEST_PIN),
+        )
+
+        self.assertTrue(result["success"], result.get("error_message"))
+        self.assertEqual(result["payment_id"], "pay-1")
+        self.assertEqual([call[0] for call in calls], ["post", "put", "patch", "get", "post", "patch"])
+        self.assertEqual([step["label"] for step in result["steps"]], [
+            "checkout_list", "last_used", "capture1", "pin_page", "pin_tokens", "capture2",
+        ])
+
+    @unittest.skipIf(cycle_server is None, f"cycle_server import failed: {CYCLE_SERVER_IMPORT_ERROR}")
+    def test_replay_qr_rpc_uses_state_token(self):
+        returned = {
+            "success": True,
+            "error_message": "",
+            "payment_id": "pay-1",
+            "status": "PAID",
+            "steps": [{"label": "capture2", "status_code": 200}],
+        }
+        state = {"stage": "ready", "token": "state-token", "device": {}}
+        fake_client = object()
+        with patch.object(cycle_server, "_client", return_value=fake_client) as make_client, \
+                patch.object(cycle_server, "run_qr_payment", return_value=returned) as run:
+            resp = cycle_server.GopayCycleServicer().ReplayQrPayment(
+                cycle_server.gopay_cycle_pb2.ReplayQrPaymentRequest(
+                    order_json=json.dumps({"payment_id": "pay-1"}),
+                    pin=TEST_PIN,
+                    state_json=json.dumps(state),
+                ),
+                None,
+            )
+
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.payment_id, "pay-1")
+        self.assertEqual(json.loads(resp.state_json)["token"], "state-token")
+        make_client.assert_called_once()
+        self.assertIs(run.call_args.args[0], fake_client)
 
 
 class LoginStartTests(unittest.TestCase):

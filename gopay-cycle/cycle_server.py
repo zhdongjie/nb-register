@@ -35,6 +35,7 @@ from gopay_cycle import (
     start_signup,
     start_signup_pin,
 )
+from replay import QrPaymentOptions, run_qr_payment
 
 PORT = int(os.environ.get("CYCLE_PORT", "50051"))
 MAIN_PHONE = os.environ.get("GOPAY_PHONE", "")
@@ -263,6 +264,37 @@ class GopayCycleServicer(gopay_cycle_pb2_grpc.GopayCycleServiceServicer):
         except Exception as e:
             return gopay_cycle_pb2.CheckPhoneResponse(
                 available=False, status="error", error_message=str(e))
+
+    def ReplayQrPayment(self, request, context):
+        try:
+            state = load_state()
+            client = _client(state)
+            options = QrPaymentOptions(
+                qr_code=str(request.qr_code or "").strip(),
+                order_json=str(request.order_json or "").strip(),
+                pin=str(request.pin or GOPAY_PIN or "").strip(),
+                amount_value=int(request.amount_value or 0),
+                amount_currency=str(request.amount_currency or "IDR").strip() or "IDR",
+                body_limit=int(request.body_limit or 1200),
+            )
+            result = run_qr_payment(client, options)
+            return gopay_cycle_pb2.ReplayQrPaymentResponse(
+                success=bool(result.get("success")),
+                error_message=str(result.get("error_message") or ""),
+                payment_id=str(result.get("payment_id") or ""),
+                status=str(result.get("status") or ""),
+                steps=[
+                    gopay_cycle_pb2.ReplayStepResult(
+                        label=str(item.get("label") or ""),
+                        status_code=int(item.get("status_code") or 0),
+                        response_text=str(item.get("response_text") or ""),
+                        error_message=str(item.get("error_message") or ""),
+                    )
+                    for item in result.get("steps", [])
+                ],
+            )
+        except Exception as e:
+            return gopay_cycle_pb2.ReplayQrPaymentResponse(success=False, error_message=str(e))
 
     def ChangePhoneStart(self, request, context):
         try:
@@ -1029,6 +1061,7 @@ for _method_name in (
     "Status",
     "GetReadyAccessToken",
     "CheckDeactivation",
+    "ReplayQrPayment",
 ):
     setattr(
         GopayCycleServicer,

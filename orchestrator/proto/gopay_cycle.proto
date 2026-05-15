@@ -294,6 +294,34 @@ message CheckPhoneResponse {
   string status = 3;        // available / registered / rate_limited / error
 }
 
+// === QR 支付 ===
+
+message ReplayStepResult {
+  string label = 1;
+  int32 status_code = 2;
+  string response_text = 3;
+  string error_message = 4;
+}
+
+message ReplayQrPaymentRequest {
+  string qr_code = 1;       // 原始 QRIS/EMV QR 内容；与 order_json 二选一
+  string order_json = 2;    // 已创建的 /v1/qris/payments 响应 data 或包含 data 的 JSON
+  string pin = 3;
+  int64 amount_value = 4;   // QR 未带金额时必填
+  string amount_currency = 5;
+  int32 body_limit = 6;
+  string state_json = 100;
+}
+
+message ReplayQrPaymentResponse {
+  bool success = 1;
+  string error_message = 2;
+  string payment_id = 3;
+  string status = 4;
+  repeated ReplayStepResult steps = 5;
+  string state_json = 100;
+}
+
 service GopayCycleService {
   // 号码可用性检测；stateless，使用随机设备指纹调用 login/methods。
   rpc CheckPhone(CheckPhoneRequest) returns (CheckPhoneResponse);
@@ -329,4 +357,7 @@ service GopayCycleService {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc GetReadyAccessToken(GetReadyAccessTokenRequest) returns (GetReadyAccessTokenResponse);
   rpc CheckDeactivation(CheckDeactivationRequest) returns (CheckDeactivationResponse);
+
+  // QR 支付；token 只从 state_json/数据库态获取。
+  rpc ReplayQrPayment(ReplayQrPaymentRequest) returns (ReplayQrPaymentResponse);
 }

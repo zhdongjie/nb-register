@@ -32,22 +32,18 @@ gen_py outlook-register-service "${ROOT}/outlook-register-service/proto/mailbox_
 
 python3 -m grpc_tools.protoc \
   -I "${ROOT}/gopay-payment/gopay-flow/proto" \
-  -I "${ROOT}/proto" \
   --python_out="${ROOT}/gopay-payment/gopay-flow" \
   --grpc_python_out="${ROOT}/gopay-payment/gopay-flow" \
-  "${ROOT}/gopay-payment/gopay-flow/proto/payment.proto" \
-  "${ROOT}/proto/gopay_cycle.proto" \
-  "${ROOT}/proto/account_db.proto"
+  "${ROOT}/gopay-payment/gopay-flow/proto/payment.proto"
 
 python3 -m grpc_tools.protoc \
   -I "${ROOT}/proto" \
-  --python_out="${ROOT}/gopay-cycle" \
-  --grpc_python_out="${ROOT}/gopay-cycle" \
-  "${ROOT}/proto/gopay_cycle.proto" \
-  "${ROOT}/proto/sms.proto"
+  --python_out="${ROOT}/gopay-app" \
+  --grpc_python_out="${ROOT}/gopay-app" \
+  "${ROOT}/proto/gopay_app.proto"
 
 python3 -m grpc_tools.protoc \
   -I "${ROOT}/proto" \
-  --python_out="${ROOT}/sms-service" \
-  --grpc_python_out="${ROOT}/sms-service" \
-  "${ROOT}/proto/sms.proto"
+  --python_out="${ROOT}/herosms-sms-service" \
+  --grpc_python_out="${ROOT}/herosms-sms-service" \
+  "${ROOT}/proto/code_receiver.proto"

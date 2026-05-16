@@ -212,9 +212,11 @@ def browser_login(
         for sel in [
             'input[type="email"]:visible',
             'input[name="email"]:visible',
+            'input[name*="email" i]:visible',
             'input[autocomplete="email"]:visible',
             'input[placeholder*="email" i]:visible',
-            'input[type="text"]:visible',
+            'input[aria-label*="email" i]:visible',
+            'input[name="username"]:visible',
         ]:
             try:
                 el = query_selector(sel)
@@ -223,6 +225,92 @@ def browser_login(
             except Exception:
                 continue
         return None
+
+    def input_value(element) -> str:
+        try:
+            value = element.evaluate("el => el.value || ''")
+            return value.strip() if isinstance(value, str) else ""
+        except Exception:
+            return ""
+
+    def fill_email_input() -> bool:
+        target = email.strip()
+        for attempt in range(4):
+            check_cancel()
+            email_input = find_email_input()
+            if not email_input:
+                sleep(0.5)
+                continue
+            if not fill_input(email_input, email):
+                sleep(0.5)
+                continue
+            sleep(0.2)
+            if input_value(email_input) == target:
+                return True
+            refreshed = find_email_input()
+            if refreshed and input_value(refreshed) == target:
+                return True
+            logger.info("[browser-reg] Login email field did not retain value, retry %s/4", attempt + 1)
+            sleep(0.5)
+        return False
+
+    def click_email_continue(label: str) -> bool:
+        try:
+            clicked = page_evaluate('''() => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0
+                        && rect.height > 0
+                        && style.visibility !== 'hidden'
+                        && style.display !== 'none';
+                };
+                const candidates = document.querySelectorAll(
+                    'button, input[type="submit"], a, div[role="button"]'
+                );
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || el.value || '').trim();
+                    const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                    if (!disabled && visible(el) && /^(continue|next)$/i.test(text)) {
+                        el.click();
+                        return true;
+                    }
+                }
+
+                const email = document.querySelector(
+                    'input[type="email"], input[name="email"], input[name*="email" i], ' +
+                    'input[autocomplete="email"], input[placeholder*="email" i], ' +
+                    'input[aria-label*="email" i], input[name="username"]'
+                );
+                if (email && email.form) {
+                    if (email.form.requestSubmit) {
+                        email.form.requestSubmit();
+                    } else {
+                        email.form.submit();
+                    }
+                    return true;
+                }
+                return false;
+            }''')
+            if clicked:
+                logger.info("[browser-reg] %s: JS form submit", label)
+                return True
+        except Exception as e:
+            logger.info("[browser-reg] %s JS submit failed: %s", label, sanitize_text(e))
+
+        try:
+            with_active_page(lambda p: p.keyboard.press("Enter"))
+            logger.info("[browser-reg] %s: keyboard Enter", label)
+            return True
+        except Exception as e:
+            logger.info("[browser-reg] %s keyboard submit failed: %s", label, sanitize_text(e))
+            return False
+
+    def submit_email_entry(label: str) -> bool:
+        if not fill_email_input():
+            return False
+        sleep(random.uniform(0.2, 0.5))
+        return click_email_continue(label)
 
     def click_login_entry() -> bool:
         for sel in [
@@ -386,23 +474,31 @@ def browser_login(
         block_images = _env_bool("BROWSER_REG_BLOCK_IMAGES", False)
         if debug_mode:
             logger.info("[browser-reg] Debug mode enabled: headless=False")
-            logger.info("[browser-reg] Language override: locale=%s languages=%s timezone=%s", locale, languages, timezone)
-        with Camoufox(
-            headless=headless,
-            humanize=True,
-            persistent_context=True,
-            user_data_dir=tmp_profile,
-            screen=Screen(max_width=window_width, max_height=window_height),
-            window=(window_width, window_height),
-            block_images=block_images,
-            proxy=cf_proxy,
-            geoip=geoip_enabled,
-            locale=languages,
-            timezone_id=timezone,
-            extra_http_headers={"Accept-Language": browser_accept_language()},
-            firefox_user_prefs=browser_firefox_user_prefs(),
-            env=browser_process_env(),
-        ) as ctx:
+            logger.info(
+                "[browser-reg] Language override: locale=%s languages=%s timezone=%s",
+                locale,
+                languages,
+                timezone or "geoip",
+            )
+        camoufox_options = {
+            "headless": headless,
+            "humanize": True,
+            "persistent_context": True,
+            "user_data_dir": tmp_profile,
+            "screen": Screen(max_width=window_width, max_height=window_height),
+            "window": (window_width, window_height),
+            "block_images": block_images,
+            "proxy": cf_proxy,
+            "geoip": geoip_enabled,
+            "locale": languages,
+            "extra_http_headers": {"Accept-Language": browser_accept_language()},
+            "firefox_user_prefs": browser_firefox_user_prefs(),
+            "env": browser_process_env(),
+        }
+        if timezone:
+            camoufox_options["timezone_id"] = timezone
+
+        with Camoufox(**camoufox_options) as ctx:
             apply_browser_language_overrides(ctx)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             logger.info("[browser-reg] Opening chatgpt.com for login ...")
@@ -410,16 +506,12 @@ def browser_login(
             sleep(3)
 
             click_login_entry()
-            email_input = wait_for_email_input()
-            if not email_input or not fill_input(email_input, email):
+            if not wait_for_email_input() or not submit_email_entry("Login email continue"):
                 page_screenshot(path=f"{screenshot_dir}/login_no_email.png")
                 raise RuntimeError("login email input not found")
-            for sel in ['button[type="submit"]', 'button:has-text("Continue")', 'button:has-text("Next")']:
-                b = query_selector(sel)
-                if b and b.is_visible() and safe_click(b, "Login email continue"):
-                    break
 
             password_ready = False
+            email_resubmits = 0
             for i in range(60):
                 sleep(1)
                 if query_selector('input[type="password"]:visible') or query_selector('input[name="password"]:visible'):
@@ -428,6 +520,15 @@ def browser_login(
                 cur = page_url()
                 if "chatgpt.com" in cur and "auth.openai.com" not in cur and capture_session_state("login-email-arrival"):
                     return result
+                if email_resubmits < 2 and find_email_input():
+                    email_resubmits += 1
+                    logger.info(
+                        "[browser-reg] Still on login email entry after submit, retrying %s/2",
+                        email_resubmits,
+                    )
+                    if submit_email_entry(f"Login email continue retry {email_resubmits}"):
+                        sleep(2)
+                        continue
                 if click_password_flow():
                     sleep(2)
                     continue

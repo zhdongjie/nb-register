@@ -3,6 +3,7 @@ syntax = "proto3";
 package orchestrator;
 
 import "email.proto";
+import "gopay_app.proto";
 
 option go_package = "./;pb";
 
@@ -72,9 +73,9 @@ message ProbeAccountResponse {
   string error_message = 3;
 }
 
-message GoPayCycleRequest {}
+message GoPayAppRequest {}
 
-message GoPayCycleResponse {
+message GoPayAppResponse {
   string job_id = 1;
   bool started = 2;
   string error_message = 3;
@@ -99,39 +100,146 @@ message RegisterAndActivateAccountResponse {
   string access_token = 9;
 }
 
-// === 编排层 GoPay Logon（Temporal activity payload）===
+message GoPayUserStatusRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+}
 
-message CycleStatusSnapshot {
-  string stage = 1;
+message GoPayUserStatusResponse {
+  bool success = 1;
+  string error_message = 2;
+  gopay_app.StatusResponse status = 3;
+}
+
+message GoPayUserClearStateRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+}
+
+message GoPayUserClearStateResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message GoPayUserAuthStartRequest {
+  string state_key = 1; // local 或 tg:<user_id>
   string phone = 2;
-  bool token_present = 3;
-  string device_fingerprint = 4;
-  int64 deactivated_at = 5;
-  string error_message = 6;
-  int64 balance_amount = 7;
-  bool has_min_balance = 8;
-  string balance_currency = 9;
+  string country_code = 3;
+  string pin = 4;
 }
 
-message EnsureLogonRequest {
-  string job_id = 1;
-  string account_id = 2;
+message GoPayUserAuthStartResponse {
+  bool success = 1;
+  string error_message = 2;
+  string mode = 3;
+  string stage = 4;
+  bool otp_sent = 5;
+  string verification_id = 6;
+  string verification_method = 7;
+  bool ready = 8;
+  bool pin_setup_required = 9;
 }
 
-message EnsureLogonResponse {
-  bool ready = 1;
-  string stage = 2;
+message GoPayUserAuthCompleteRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string otp = 2;
+  string pin = 3;
+}
+
+message GoPayUserAuthCompleteResponse {
+  bool success = 1;
+  string error_message = 2;
+  string mode = 3;
+  string stage = 4;
+  string phone = 5;
+  bool ready = 6;
+  bool pin_setup_required = 7;
+  bool pin_setup_complete = 8;
+}
+
+message GoPayUserChangePhoneStartRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string new_phone = 2;
+  string pin = 3;
+}
+
+message GoPayUserChangePhoneStartResponse {
+  bool success = 1;
+  string error_message = 2;
+  string new_phone = 3;
+  bool otp_sent = 4;
+}
+
+message GoPayUserChangePhoneCompleteRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string otp = 2;
+}
+
+message GoPayUserChangePhoneCompleteResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message GoPayUserChangePhoneRetryRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+}
+
+message GoPayUserChangePhoneRetryResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool otp_sent = 3;
+}
+
+message GoPayUserSignupStartRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string phone = 2;
+  string name = 3;
+  string email = 4;
+  string country_code = 5;
+}
+
+message GoPayUserSignupStartResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool otp_sent = 3;
+  string verification_id = 4;
+  string verification_method = 5;
+}
+
+message GoPayUserSignupCompleteRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string otp = 2;
+}
+
+message GoPayUserSignupCompleteResponse {
+  bool success = 1;
+  string error_message = 2;
   string phone = 3;
-  CycleStatusSnapshot status_before = 4;
-  CycleStatusSnapshot status_after = 5;
-  bool already_ready = 6;
-  bool change_phone_complete = 7;
-  bool deactivate_complete = 8;
-  bool logon_complete = 9;
-  bool cycle_token_ready = 10;
-  string error_message = 11;
-  bool signup_complete = 12;
-  bool signup_pin_complete = 13;
+  bool pin_setup_required = 4;
+}
+
+message GoPayUserCreatePinStartRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string pin = 2;
+}
+
+message GoPayUserCreatePinStartResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool otp_sent = 3;
+  string verification_id = 4;
+  string verification_method = 5;
+}
+
+message GoPayUserCreatePinCompleteRequest {
+  string state_key = 1; // local 或 tg:<user_id>
+  string otp = 2;
+  string pin = 3;
+}
+
+message GoPayUserCreatePinCompleteResponse {
+  bool success = 1;
+  string error_message = 2;
+  string phone = 3;
+  bool pin_setup_complete = 4;
 }
 
 message JobStep {
@@ -213,17 +321,6 @@ message SubmitRegistrationOtpResponse {
   string error_message = 3;
 }
 
-message SubmitPaymentConfirmationRequest {
-  string job_id = 1;
-  string account_id = 2;
-}
-
-message SubmitPaymentConfirmationResponse {
-  bool success = 1;
-  string job_id = 2;
-  string error_message = 3;
-}
-
 message FetchMailboxInboxesRequest {
   int32 limit_per_mailbox = 1;
   int32 max_mailboxes = 2;
@@ -257,14 +354,24 @@ service OrchestratorService {
   rpc AutopayAccount(ActivateAccountRequest) returns (ActivateAccountResponse);
   rpc LoginAccount(LoginAccountRequest) returns (LoginAccountResponse);
   rpc ProbeAccount(ProbeAccountRequest) returns (ProbeAccountResponse);
-  rpc RunGoPayCycle(GoPayCycleRequest) returns (GoPayCycleResponse);
+  rpc RunGoPayApp(GoPayAppRequest) returns (GoPayAppResponse);
   rpc RegisterAndActivateAccount(RegisterAndActivateAccountRequest) returns (RegisterAndActivateAccountResponse);
   rpc RegisterMailbox(RegisterMailboxRequest) returns (RegisterMailboxResponse);
   rpc RunMailboxOAuth(StartMailboxOAuthRequest) returns (StartMailboxOAuthResponse);
   rpc FetchMailboxInboxes(FetchMailboxInboxesRequest) returns (FetchMailboxInboxesResponse);
   rpc SubmitRegistrationOtp(SubmitRegistrationOtpRequest) returns (SubmitRegistrationOtpResponse);
-  rpc SubmitPaymentConfirmation(SubmitPaymentConfirmationRequest) returns (SubmitPaymentConfirmationResponse);
   rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc GoPayUserStatus(GoPayUserStatusRequest) returns (GoPayUserStatusResponse);
+  rpc GoPayUserClearState(GoPayUserClearStateRequest) returns (GoPayUserClearStateResponse);
+  rpc GoPayUserAuthStart(GoPayUserAuthStartRequest) returns (GoPayUserAuthStartResponse);
+  rpc GoPayUserAuthComplete(GoPayUserAuthCompleteRequest) returns (GoPayUserAuthCompleteResponse);
+  rpc GoPayUserChangePhoneStart(GoPayUserChangePhoneStartRequest) returns (GoPayUserChangePhoneStartResponse);
+  rpc GoPayUserChangePhoneComplete(GoPayUserChangePhoneCompleteRequest) returns (GoPayUserChangePhoneCompleteResponse);
+  rpc GoPayUserChangePhoneRetry(GoPayUserChangePhoneRetryRequest) returns (GoPayUserChangePhoneRetryResponse);
+  rpc GoPayUserSignupStart(GoPayUserSignupStartRequest) returns (GoPayUserSignupStartResponse);
+  rpc GoPayUserSignupComplete(GoPayUserSignupCompleteRequest) returns (GoPayUserSignupCompleteResponse);
+  rpc GoPayUserCreatePinStart(GoPayUserCreatePinStartRequest) returns (GoPayUserCreatePinStartResponse);
+  rpc GoPayUserCreatePinComplete(GoPayUserCreatePinCompleteRequest) returns (GoPayUserCreatePinCompleteResponse);
 
   // Deprecated: use RegisterAccount.
   rpc RequestAccount(RequestAccountRequest) returns (RequestAccountResponse);

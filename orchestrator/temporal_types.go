@@ -1,333 +1,77 @@
 package main
 
-type AccountSpec struct {
-	AccountID string
-	Email     string
-	Password  string
-}
+import pb "orchestrator/pb"
 
-type CreateJobInput struct {
-	JobID     string
-	AccountID string
-	Action    string
-	Params    map[string]string
-}
+type AccountSpec = pb.AccountSpec
+type CreateJobInput = pb.CreateJobInput
+type EnsureAccountInput = pb.EnsureAccountInput
+type AccountRef = pb.AccountRef
+type ResolveAccountInput = pb.ResolveAccountInput
 
-type EnsureAccountInput struct {
-	Account AccountSpec
-}
+type RegisterActivityOutput = pb.RegisterActivityOutput
+type BrowserAuthStartInput = pb.BrowserAuthStartInput
+type BrowserAuthStartOutput = pb.BrowserAuthStartOutput
+type BrowserAuthCompleteInput = pb.BrowserAuthCompleteInput
+type BrowserAuthCancelInput = pb.BrowserAuthCancelInput
+type OTPWaitInput = pb.OTPWaitInput
+type OTPWaitOutput = pb.OTPWaitOutput
+type ManualOTPSignal = pb.ManualOTPSignal
+type GoPayActivityInput = pb.GoPayActivityInput
+type GoPayActivityOutput = pb.GoPayActivityOutput
+type GoPayPaymentStartOutput = pb.GoPayPaymentStartOutput
+type GoPayPaymentCompleteInput = pb.GoPayPaymentCompleteInput
+type GoPayPaymentCancelInput = pb.GoPayPaymentCancelInput
 
-type AccountRef struct {
-	AccountID         string
-	PlusTrialKnown    bool
-	PlusTrialEligible bool
-}
+type GoPayAppStepInput = pb.GoPayAppStepInput
+type GoPayAppStepOutput = pb.GoPayAppStepOutput
+type GoPayAppChangePhoneStartInput = pb.GoPayAppChangePhoneStartInput
+type GoPayAppChangePhoneStartOutput = pb.GoPayAppChangePhoneStartOutput
+type GoPayAppChangePhoneRetryInput = pb.GoPayAppChangePhoneRetryInput
+type GoPayAppChangePhoneRetryOutput = pb.GoPayAppChangePhoneRetryOutput
+type GoPayAppSMSActivationInput = pb.GoPayAppSMSActivationInput
+type GoPayAppSMSActivationOutput = pb.GoPayAppSMSActivationOutput
+type GoPayAppChangePhoneCompleteInput = pb.GoPayAppChangePhoneCompleteInput
+type GoPayAppChangePhoneCompleteOutput = pb.GoPayAppChangePhoneCompleteOutput
+type GoPayAppDeactivateStartInput = pb.GoPayAppDeactivateStartInput
+type GoPayAppDeactivateStartOutput = pb.GoPayAppDeactivateStartOutput
+type GoPayAppDeactivateCompleteInput = pb.GoPayAppDeactivateCompleteInput
+type GoPayAppDeactivateCompleteOutput = pb.GoPayAppDeactivateCompleteOutput
+type GoPayAppOTPStartInput = pb.GoPayAppOTPStartInput
+type GoPayAppOTPOutput = pb.GoPayAppOTPOutput
+type GoPayAppOTPCompleteInput = pb.GoPayAppOTPCompleteInput
 
-type ResolveAccountInput struct {
-	AccountID   string
-	SourceJobID string
-}
+type ProbePlusTrialActivityInput = pb.ProbePlusTrialActivityInput
+type ProbeTierActivityInput = pb.ProbeTierActivityInput
+type ProbePlusTrialActivityOutput = pb.ProbePlusTrialActivityOutput
+type ProbeTierActivityOutput = pb.ProbeTierActivityOutput
+type LoginSessionActivityOutput = pb.LoginSessionActivityOutput
 
-type RegisterActivityInput struct {
-	JobID     string
-	AccountID string
-}
+type PersistRegisteredInput = pb.PersistRegisteredInput
+type PersistActivatedInput = pb.PersistActivatedInput
+type JobFailureInput = pb.JobFailureInput
+type JobSuccessInput = pb.JobSuccessInput
 
-type RegisterActivityOutput struct {
-	SessionToken      string
-	AccessToken       string
-	DeviceID          string
-	PlusTrialEligible bool
-	PlusTrialChecked  bool
-	CheckoutURL       string
-	Data              map[string]any
-}
+type MailboxRegistrationActivityInput = pb.MailboxRegistrationActivityInput
+type MailboxRegistrationActivityOutput = pb.MailboxRegistrationActivityOutput
+type RegisteredMailboxResult = pb.RegisteredMailboxResult
+type MailboxOAuthActivityInput = pb.MailboxOAuthActivityInput
+type MailboxOAuthActivityOutput = pb.MailboxOAuthActivityOutput
 
-type GoPayActivityInput struct {
-	JobID         string
-	AccountID     string
-	SessionToken  string
-	AccessToken   string
-	UseCycleToken bool
-	Tokenization  string
-}
-
-type GoPayActivityOutput struct {
-	ChargeRef         string
-	SnapToken         string
-	PlusTrialEligible bool
-	PlusTrialChecked  bool
-	PlusActive        bool
-	Data              map[string]any
-}
-
-type GoPayCycleStepInput struct {
-	JobID        string
-	ActivationID string
-}
-
-type GoPayCycleStepOutput struct {
-	ActivationID        string
-	Ready               bool
-	Stage               string
-	Phone               string
-	CycleTokenReady     bool
-	ChangePhoneComplete bool
-	DeactivateComplete  bool
-	SignupComplete      bool
-	SignupPinComplete   bool
-	Data                map[string]any
-}
-
-type ProbePlusTrialActivityInput struct {
-	JobID     string
-	AccountID string
-}
-
-type ProbeTierActivityInput struct {
-	JobID     string
-	AccountID string
-}
-
-type ProbePlusTrialActivityOutput struct {
-	Success           bool
-	Checked           bool
-	PlusTrialEligible bool
-	PlusActive        bool
-	Amount            int64
-	Currency          string
-	Source            string
-	PlanType          string
-	CheckoutURL       string
-	ErrorMessage      string
-	Data              map[string]any
-}
-
-type ProbeTierActivityOutput struct {
-	Success      bool
-	Checked      bool
-	Tier         string
-	PlusActive   bool
-	Source       string
-	ErrorMessage string
-	Data         map[string]any
-}
-
-type LoginSessionActivityInput struct {
-	JobID     string
-	AccountID string
-}
-
-type LoginSessionActivityOutput struct {
-	SessionToken string
-	AccessToken  string
-	DeviceID     string
-	Data         map[string]any
-}
-
-type PersistRegisteredInput struct {
-	AccountID         string
-	SessionToken      string
-	AccessToken       string
-	PlusTrialEligible bool
-	PlusTrialChecked  bool
-}
-
-type PersistActivatedInput struct {
-	AccountID         string
-	SessionToken      string
-	AccessToken       string
-	ChargeRef         string
-	PlusTrialEligible bool
-	PlusTrialChecked  bool
-	PlusActive        bool
-}
-
-type JobFailureInput struct {
-	JobID        string
-	StepName     string
-	Status       string
-	Recoverable  bool
-	Retryable    bool
-	ErrorMessage string
-	Result       map[string]any
-}
-
-type JobSuccessInput struct {
-	JobID  string
-	Result map[string]any
-}
-
-type MailboxRegistrationActivityInput struct {
-	JobID      string
-	Enabled    bool
-	ImportOnly bool
-}
-
-type MailboxRegistrationActivityOutput struct {
-	Success      bool
-	ExitCode     int32
-	ErrorMessage string
-	Mailboxes    []RegisteredMailboxResult
-	Data         map[string]any
-}
-
-type RegisteredMailboxResult struct {
-	EmailAddress string
-	Status       string
-}
-
-type MailboxOAuthActivityInput struct {
-	JobID        string
-	EmailAddress string
-	OnlyMissing  bool
-	Limit        int32
-}
-
-type MailboxOAuthActivityOutput struct {
-	Success      bool
-	Processed    int32
-	Succeeded    int32
-	Failed       int32
-	ErrorMessage string
-	Data         map[string]any
-}
-
-type RegisterAccountWorkflowInput struct {
-	JobID   string
-	Account AccountSpec
-}
-
-type RegisterAccountWorkflowResult struct {
-	JobID             string
-	SessionToken      string
-	AccessToken       string
-	PlusTrialEligible bool
-	CheckoutURL       string
-	ErrorMessage      string
-}
-
-type ActivateAccountWorkflowInput struct {
-	JobID       string
-	AccountID   string
-	SourceJobID string
-	Action      string
-}
-
-type ActivateAccountWorkflowResult struct {
-	JobID        string
-	Success      bool
-	ErrorMessage string
-	ChargeRef    string
-	SnapToken    string
-}
-
-type AutoPayWorkflowInput struct {
-	JobID       string
-	AccountID   string
-	SourceJobID string
-}
-
-type AutoPayWorkflowResult struct {
-	JobID        string
-	Success      bool
-	ErrorMessage string
-	ChargeRef    string
-	SnapToken    string
-}
-
-type GoPayCycleWorkflowInput struct {
-	JobID string
-}
-
-type GoPayCycleWorkflowResult struct {
-	JobID               string
-	Success             bool
-	ErrorMessage        string
-	ActivationID        string
-	CycleTokenReady     bool
-	ChangePhoneComplete bool
-	DeactivateComplete  bool
-	SignupComplete      bool
-	SignupPinComplete   bool
-}
-
-type ProbeAccountWorkflowInput struct {
-	JobID     string
-	AccountID string
-}
-
-type LoginSessionWorkflowInput struct {
-	JobID     string
-	AccountID string
-}
-
-type LoginSessionWorkflowResult struct {
-	JobID        string
-	SessionToken string
-	AccessToken  string
-	ErrorMessage string
-}
-
-type ProbeAccountWorkflowResult struct {
-	JobID             string
-	Success           bool
-	PlusTrialChecked  bool
-	PlusTrialEligible bool
-	TierChecked       bool
-	Tier              string
-	PlusActive        bool
-	Amount            int64
-	Currency          string
-	Source            string
-	PlanType          string
-	CheckoutURL       string
-	ErrorMessage      string
-}
-
-type RegisterAndActivateWorkflowInput struct {
-	JobID   string
-	Account AccountSpec
-}
-
-type RegisterAndActivateWorkflowResult struct {
-	JobID             string
-	SessionToken      string
-	AccessToken       string
-	PlusTrialEligible bool
-	CheckoutURL       string
-	ActivationSuccess bool
-	ErrorMessage      string
-	ChargeRef         string
-	SnapToken         string
-}
-
-type RegisterMailboxWorkflowInput struct {
-	JobID      string
-	ImportOnly bool
-	AutoOAuth  bool
-}
-
-type RegisterMailboxWorkflowResult struct {
-	JobID        string
-	Success      bool
-	ExitCode     int32
-	ErrorMessage string
-	Mailboxes    []RegisteredMailboxResult
-}
-
-type MailboxOAuthWorkflowInput struct {
-	JobID        string
-	EmailAddress string
-	OnlyMissing  bool
-	Limit        int32
-}
-
-type MailboxOAuthWorkflowResult struct {
-	JobID        string
-	Success      bool
-	Processed    int32
-	Succeeded    int32
-	Failed       int32
-	ErrorMessage string
-}
+type RegisterAccountWorkflowInput = pb.RegisterAccountWorkflowInput
+type RegisterAccountWorkflowResult = pb.RegisterAccountWorkflowResult
+type ActivateAccountWorkflowInput = pb.ActivateAccountWorkflowInput
+type ActivateAccountWorkflowResult = pb.ActivateAccountWorkflowResult
+type AutoPayWorkflowInput = pb.AutoPayWorkflowInput
+type AutoPayWorkflowResult = pb.AutoPayWorkflowResult
+type GoPayAppWorkflowInput = pb.GoPayAppWorkflowInput
+type GoPayAppWorkflowResult = pb.GoPayAppWorkflowResult
+type ProbeAccountWorkflowInput = pb.ProbeAccountWorkflowInput
+type LoginSessionWorkflowInput = pb.LoginSessionWorkflowInput
+type LoginSessionWorkflowResult = pb.LoginSessionWorkflowResult
+type ProbeAccountWorkflowResult = pb.ProbeAccountWorkflowResult
+type RegisterAndActivateWorkflowInput = pb.RegisterAndActivateWorkflowInput
+type RegisterAndActivateWorkflowResult = pb.RegisterAndActivateWorkflowResult
+type RegisterMailboxWorkflowInput = pb.RegisterMailboxWorkflowInput
+type RegisterMailboxWorkflowResult = pb.RegisterMailboxWorkflowResult
+type MailboxOAuthWorkflowInput = pb.MailboxOAuthWorkflowInput
+type MailboxOAuthWorkflowResult = pb.MailboxOAuthWorkflowResult

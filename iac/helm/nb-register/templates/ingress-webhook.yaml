@@ -1,0 +1,35 @@
+{{- if .Values.ingress.webhook.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "webhook") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "webhook") | nindent 4 }}
+  {{- with .Values.ingress.webhook.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.webhook.className }}
+  ingressClassName: {{ .Values.ingress.webhook.className | quote }}
+  {{- end }}
+  {{- with .Values.ingress.webhook.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.webhook.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "nb-register.componentFullname" (dict "root" $ "component" "whatsapp-otp-relay") }}
+                port:
+                  number: 8081
+          {{- end }}
+    {{- end }}
+{{- end }}

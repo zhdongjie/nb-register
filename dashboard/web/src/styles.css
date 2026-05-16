@@ -1366,6 +1366,17 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
+  user-select: text;
+}
+
+.kv .valueButton {
+  min-width: 0;
+  min-height: 34px;
+}
+
+.maskedValue {
+  -webkit-text-security: disc;
 }
 
 .editLine {
@@ -1441,6 +1452,9 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
 .step p {
   margin-top: 6px;
   color: var(--danger);
+}
+.step .stepProgress {
+  color: var(--muted);
 }
 .rawHint,
 .stepTime {

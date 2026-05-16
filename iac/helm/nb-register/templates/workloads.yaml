@@ -1,0 +1,170 @@
+{{- range $component, $workload := .Values.workloads }}
+{{- if $workload.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" $ "component" $component) }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ default 1 $workload.replicas }}
+  {{- if $workload.strategyType }}
+  strategy:
+    type: {{ $workload.strategyType }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nb-register.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nb-register.selectorLabels" (dict "root" $ "component" $component) | nindent 8 }}
+        {{- with $.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nb-register.serviceAccountName" $ }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $workload.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $workload.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $workload.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $component }}
+          image: {{ include "nb-register.image" (dict "root" $ "image" $workload.image) | quote }}
+          imagePullPolicy: {{ default $.Values.global.imagePullPolicy $workload.imagePullPolicy }}
+          {{- with $workload.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $workload.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $workload.ports }}
+          ports:
+            {{- range . }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: {{ default "TCP" .protocol }}
+            {{- end }}
+          {{- end }}
+          env:
+            {{- if $workload.postgresEnv }}
+            - name: POSTGRES_USER
+              value: {{ $.Values.postgres.auth.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ $.Values.postgres.auth.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nb-register.appSecretName" $ }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+            {{- range $name, $value := $workload.env }}
+            - name: {{ $name }}
+              value: {{ tpl (toString $value) $ | quote }}
+            {{- end }}
+            {{- range $item := $workload.secretEnv }}
+            - name: {{ $item.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nb-register.appSecretName" $ }}
+                  key: {{ default $item.name $item.key }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "nb-register.configName" $ }}
+          {{- with $workload.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $workload.probes }}
+          readinessProbe:
+            {{- if .httpGet }}
+            httpGet:
+              path: {{ .httpGet.path | quote }}
+              port: {{ .httpGet.port }}
+            {{- else if .tcpSocketPort }}
+            tcpSocket:
+              port: {{ .tcpSocketPort }}
+            {{- end }}
+            initialDelaySeconds: {{ default 5 .initialDelaySeconds }}
+            periodSeconds: {{ default 10 .periodSeconds }}
+          livenessProbe:
+            {{- if .httpGet }}
+            httpGet:
+              path: {{ .httpGet.path | quote }}
+              port: {{ .httpGet.port }}
+            {{- else if .tcpSocketPort }}
+            tcpSocket:
+              port: {{ .tcpSocketPort }}
+            {{- end }}
+            initialDelaySeconds: {{ default 20 .livenessInitialDelaySeconds }}
+            periodSeconds: {{ default 20 .livenessPeriodSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml $workload.resources | nindent 12 }}
+      {{- with $workload.volumes }}
+      volumes:
+        {{- range . }}
+        - name: {{ .name }}
+          {{- if eq .type "emptyDir" }}
+          emptyDir:
+            {{- if .medium }}
+            medium: {{ .medium | quote }}
+            {{- end }}
+            {{- if .sizeLimit }}
+            sizeLimit: {{ .sizeLimit | quote }}
+            {{- end }}
+          {{- else if eq .type "secret" }}
+          secret:
+            secretName: {{ tpl .secretName $ }}
+            {{- with .items }}
+            items:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+{{- if and $workload.service $workload.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" $ "component" $component) }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  type: {{ default "ClusterIP" $workload.service.type }}
+  ports:
+    {{- range $workload.service.ports }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort }}
+      protocol: {{ default "TCP" .protocol }}
+      {{- if .nodePort }}
+      nodePort: {{ .nodePort }}
+      {{- end }}
+    {{- end }}
+  selector:
+    {{- include "nb-register.selectorLabels" (dict "root" $ "component" $component) | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}

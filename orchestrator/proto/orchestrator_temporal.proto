@@ -1,0 +1,570 @@
+syntax = "proto3";
+
+package orchestrator;
+
+import "gopay_app.proto";
+import "google/protobuf/struct.proto";
+
+option go_package = "./;pb";
+
+message EnsureLogonRequest {
+  string job_id = 1;
+  string account_id = 2;
+}
+
+message EnsureLogonResponse {
+  bool ready = 1;
+  string stage = 2;
+  string phone = 3;
+  gopay_app.StatusResponse status_before = 4;
+  gopay_app.StatusResponse status_after = 5;
+  bool already_ready = 6;
+  bool change_phone_complete = 7;
+  bool deactivate_complete = 8;
+  bool logon_complete = 9;
+  bool account_token_ready = 10;
+  string error_message = 11;
+  bool signup_complete = 12;
+  bool signup_pin_complete = 13;
+}
+
+message RegisterActivityOutput {
+  string session_token = 1;
+  string access_token = 2;
+  string device_id = 3;
+  bool plus_trial_eligible = 4;
+  bool plus_trial_checked = 5;
+  string checkout_url = 6;
+  google.protobuf.Struct data = 7;
+}
+
+message BrowserAuthStartInput {
+  string job_id = 1;
+  string account_id = 2;
+  string mode = 3;
+}
+
+message BrowserAuthStartOutput {
+  string account_id = 1;
+  string flow_id = 2;
+  string email = 3;
+  bool otp_required = 4;
+  int64 otp_issued_after_unix = 5;
+  int32 otp_timeout_seconds = 6;
+  RegisterActivityOutput result = 7;
+  google.protobuf.Struct data = 8;
+}
+
+message BrowserAuthCompleteInput {
+  string job_id = 1;
+  string account_id = 2;
+  string flow_id = 3;
+  string mode = 4;
+  string otp_param = 5;
+  string submitted_at_param = 6;
+  int64 otp_issued_after_unix = 7;
+  string otp_source = 8;
+}
+
+message BrowserAuthCancelInput {
+  string flow_id = 1;
+  string mode = 2;
+}
+
+message OTPWaitInput {
+  string job_id = 1;
+  string step_name = 2;
+  oneof target {
+    OTPWaitEmailTarget email = 3;
+    OTPWaitPaymentTarget payment = 4;
+    OTPWaitSMSTarget sms = 5;
+  }
+  int32 timeout_seconds = 8;
+  int64 issued_after_unix = 9;
+  string otp_param = 10;
+  string submitted_at_param = 11;
+}
+
+message OTPWaitEmailTarget {
+  string email = 1;
+}
+
+message OTPWaitPaymentTarget {
+  string source = 1;
+  string purpose = 2;
+}
+
+message OTPWaitSMSTarget {
+  string activation_id = 1;
+}
+
+message OTPWaitOutput {
+  bool found = 1;
+  string source = 2;
+  string code = 3;
+  string error_message = 4;
+  google.protobuf.Struct data = 5;
+  string activation_id = 6;
+}
+
+message ManualOTPSignal {
+  string kind = 1;
+}
+
+message AccountSpec {
+  string account_id = 1;
+  string email = 2;
+  string password = 3;
+}
+
+message CreateJobInput {
+  string job_id = 1;
+  string account_id = 2;
+  string action = 3;
+  map<string, string> params = 4;
+}
+
+message EnsureAccountInput {
+  AccountSpec account = 1;
+}
+
+message AccountRef {
+  string account_id = 1;
+  bool plus_trial_known = 2;
+  bool plus_trial_eligible = 3;
+  bool plus_active = 4;
+  string tier = 5;
+}
+
+message ResolveAccountInput {
+  string account_id = 1;
+  string source_job_id = 2;
+}
+
+message PersistRegisteredInput {
+  string account_id = 1;
+  string session_token = 2;
+  string access_token = 3;
+  bool plus_trial_eligible = 4;
+  bool plus_trial_checked = 5;
+}
+
+message PersistActivatedInput {
+  string account_id = 1;
+  string session_token = 2;
+  string access_token = 3;
+  string charge_ref = 4;
+  bool plus_trial_eligible = 5;
+  bool plus_trial_checked = 6;
+  bool plus_active = 7;
+}
+
+message JobFailureInput {
+  string job_id = 1;
+  string step_name = 2;
+  string status = 3;
+  bool recoverable = 4;
+  bool retryable = 5;
+  string error_message = 6;
+  google.protobuf.Struct result = 7;
+}
+
+message JobSuccessInput {
+  string job_id = 1;
+  google.protobuf.Struct result = 2;
+}
+
+message RegisteredMailboxResult {
+  string email_address = 1;
+  string status = 2;
+}
+
+message ProbePlusTrialActivityInput {
+  string job_id = 1;
+  string account_id = 2;
+}
+
+message ProbeTierActivityInput {
+  string job_id = 1;
+  string account_id = 2;
+}
+
+message ProbePlusTrialActivityOutput {
+  bool success = 1;
+  bool checked = 2;
+  bool plus_trial_eligible = 3;
+  bool plus_active = 4;
+  int64 amount = 5;
+  string currency = 6;
+  string source = 7;
+  string plan_type = 8;
+  string checkout_url = 9;
+  string checkout_session_id = 10;
+  string error_message = 11;
+  google.protobuf.Struct data = 12;
+}
+
+message ProbeTierActivityOutput {
+  bool success = 1;
+  bool checked = 2;
+  string tier = 3;
+  bool plus_active = 4;
+  string source = 5;
+  string error_message = 6;
+  google.protobuf.Struct data = 7;
+}
+
+message LoginSessionActivityOutput {
+  string session_token = 1;
+  string access_token = 2;
+  string device_id = 3;
+  google.protobuf.Struct data = 4;
+}
+
+message MailboxRegistrationActivityInput {
+  string job_id = 1;
+  bool enabled = 2;
+  bool import_only = 3;
+}
+
+message MailboxRegistrationActivityOutput {
+  bool success = 1;
+  int32 exit_code = 2;
+  string error_message = 3;
+  repeated RegisteredMailboxResult mailboxes = 4;
+  google.protobuf.Struct data = 5;
+}
+
+message MailboxOAuthActivityInput {
+  string job_id = 1;
+  string email_address = 2;
+  bool only_missing = 3;
+  int32 limit = 4;
+}
+
+message MailboxOAuthActivityOutput {
+  bool success = 1;
+  int32 processed = 2;
+  int32 succeeded = 3;
+  int32 failed = 4;
+  string error_message = 5;
+  google.protobuf.Struct data = 6;
+}
+
+message RegisterAccountWorkflowInput {
+  string job_id = 1;
+  AccountSpec account = 2;
+}
+
+message RegisterAccountWorkflowResult {
+  string job_id = 1;
+  string session_token = 2;
+  string access_token = 3;
+  bool plus_trial_eligible = 4;
+  string checkout_url = 5;
+  string error_message = 6;
+}
+
+message ActivateAccountWorkflowInput {
+  string job_id = 1;
+  string account_id = 2;
+  string source_job_id = 3;
+  string action = 4;
+}
+
+message ActivateAccountWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  string charge_ref = 4;
+  string snap_token = 5;
+}
+
+message AutoPayWorkflowInput {
+  string job_id = 1;
+  string account_id = 2;
+  string source_job_id = 3;
+}
+
+message AutoPayWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  string charge_ref = 4;
+  string snap_token = 5;
+}
+
+message GoPayAppWorkflowInput {
+  string job_id = 1;
+}
+
+message GoPayAppWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  string activation_id = 4;
+  bool account_token_ready = 5;
+  bool change_phone_complete = 6;
+  bool deactivate_complete = 7;
+  bool signup_complete = 8;
+  bool signup_pin_complete = 9;
+}
+
+message ProbeAccountWorkflowInput {
+  string job_id = 1;
+  string account_id = 2;
+}
+
+message LoginSessionWorkflowInput {
+  string job_id = 1;
+  string account_id = 2;
+}
+
+message LoginSessionWorkflowResult {
+  string job_id = 1;
+  string session_token = 2;
+  string access_token = 3;
+  string error_message = 4;
+}
+
+message ProbeAccountWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  bool plus_trial_checked = 3;
+  bool plus_trial_eligible = 4;
+  bool tier_checked = 5;
+  string tier = 6;
+  bool plus_active = 7;
+  int64 amount = 8;
+  string currency = 9;
+  string source = 10;
+  string plan_type = 11;
+  string checkout_url = 12;
+  string error_message = 13;
+}
+
+message RegisterAndActivateWorkflowInput {
+  string job_id = 1;
+  AccountSpec account = 2;
+}
+
+message RegisterAndActivateWorkflowResult {
+  string job_id = 1;
+  string session_token = 2;
+  string access_token = 3;
+  bool plus_trial_eligible = 4;
+  string checkout_url = 5;
+  bool activation_success = 6;
+  string error_message = 7;
+  string charge_ref = 8;
+  string snap_token = 9;
+}
+
+message RegisterMailboxWorkflowInput {
+  string job_id = 1;
+  bool import_only = 2;
+  bool auto_oauth = 3;
+}
+
+message RegisterMailboxWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  int32 exit_code = 3;
+  string error_message = 4;
+  repeated RegisteredMailboxResult mailboxes = 5;
+}
+
+message MailboxOAuthWorkflowInput {
+  string job_id = 1;
+  string email_address = 2;
+  bool only_missing = 3;
+  int32 limit = 4;
+}
+
+message MailboxOAuthWorkflowResult {
+  string job_id = 1;
+  bool success = 2;
+  int32 processed = 3;
+  int32 succeeded = 4;
+  int32 failed = 5;
+  string error_message = 6;
+}
+
+message GoPayActivityInput {
+  string job_id = 1;
+  string account_id = 2;
+  string session_token = 3;
+  string access_token = 4;
+  bool use_account_token = 5;
+  string tokenization = 6;
+  string checkout_url = 7;
+  string checkout_session_id = 8;
+}
+
+message GoPayActivityOutput {
+  string charge_ref = 1;
+  string snap_token = 2;
+  bool plus_trial_eligible = 3;
+  bool plus_trial_checked = 4;
+  bool plus_active = 5;
+  google.protobuf.Struct data = 6;
+}
+
+message GoPayPaymentStartOutput {
+  string flow_id = 1;
+  int64 issued_after_unix = 2;
+  int32 otp_timeout_seconds = 3;
+  bool use_account_token = 4;
+  google.protobuf.Struct data = 5;
+}
+
+message GoPayPaymentCompleteInput {
+  string job_id = 1;
+  string account_id = 2;
+  string flow_id = 3;
+  string otp_param = 4;
+  string submitted_at_param = 5;
+  int64 otp_issued_after_unix = 6;
+  string otp_source = 7;
+  bool use_account_token = 8;
+  google.protobuf.Struct data = 9;
+}
+
+message GoPayPaymentCancelInput {
+  string flow_id = 1;
+}
+
+message GoPayAppStepInput {
+  string job_id = 1;
+  string activation_id = 2;
+}
+
+message GoPayAppStepOutput {
+  string activation_id = 1;
+  bool ready = 2;
+  string stage = 3;
+  string phone = 4;
+  bool account_token_ready = 5;
+  bool change_phone_complete = 6;
+  bool deactivate_complete = 7;
+  bool signup_complete = 8;
+  bool signup_pin_complete = 9;
+  google.protobuf.Struct data = 10;
+}
+
+message GoPayAppChangePhoneStartInput {
+  string job_id = 1;
+  int32 failure_count = 2;
+}
+
+message GoPayAppChangePhoneStartOutput {
+  string activation_id = 1;
+  string phone = 2;
+  int32 failure_count = 3;
+  int32 max_failures = 4;
+  int32 otp_timeout_seconds = 5;
+  int32 otp_retry_attempts = 6;
+  google.protobuf.Struct data = 7;
+}
+
+message GoPayAppChangePhoneRetryInput {
+  string job_id = 1;
+  string activation_id = 2;
+  int32 otp_attempt = 3;
+}
+
+message GoPayAppChangePhoneRetryOutput {
+  string activation_id = 1;
+  bool otp_sent = 2;
+  string error_message = 3;
+  google.protobuf.Struct data = 4;
+}
+
+message GoPayAppSMSActivationInput {
+  string job_id = 1;
+  string activation_id = 2;
+  int32 failure_count = 3;
+  string reason = 4;
+}
+
+message GoPayAppSMSActivationOutput {
+  string activation_id = 1;
+  int32 failure_count = 2;
+  int32 max_failures = 3;
+  string error_message = 4;
+  google.protobuf.Struct data = 5;
+}
+
+message GoPayAppChangePhoneCompleteInput {
+  string job_id = 1;
+  string activation_id = 2;
+  string code = 3;
+  int32 failure_count = 4;
+}
+
+message GoPayAppChangePhoneCompleteOutput {
+  string activation_id = 1;
+  bool change_phone_complete = 2;
+  bool retryable_failure = 3;
+  int32 failure_count = 4;
+  int32 max_failures = 5;
+  string error_message = 6;
+  string stage = 7;
+  string phone = 8;
+  google.protobuf.Struct data = 9;
+}
+
+message GoPayAppDeactivateStartInput {
+  string job_id = 1;
+  string activation_id = 2;
+}
+
+message GoPayAppDeactivateStartOutput {
+  string activation_id = 1;
+  bool otp_required = 2;
+  int32 timeout_seconds = 3;
+  google.protobuf.Struct data = 4;
+}
+
+message GoPayAppDeactivateCompleteInput {
+  string job_id = 1;
+  string activation_id = 2;
+  string code = 3;
+}
+
+message GoPayAppDeactivateCompleteOutput {
+  string activation_id = 1;
+  bool deactivate_complete = 2;
+  google.protobuf.Struct data = 3;
+}
+
+message GoPayAppOTPStartInput {
+  string job_id = 1;
+  string operation = 2;
+  string step_name = 3;
+}
+
+message GoPayAppOTPOutput {
+  string operation = 1;
+  bool otp_required = 2;
+  int64 issued_after_unix = 3;
+  int32 timeout_seconds = 4;
+  bool ready = 5;
+  bool account_token_ready = 6;
+  bool signup_complete = 7;
+  bool signup_pin_complete = 8;
+  bool pin_setup_required = 9;
+  string stage = 10;
+  string phone = 11;
+  google.protobuf.Struct data = 12;
+}
+
+message GoPayAppOTPCompleteInput {
+  string job_id = 1;
+  string operation = 2;
+  string otp_param = 3;
+  string submitted_at_param = 4;
+  int64 issued_after_unix = 5;
+  string otp_source = 6;
+  google.protobuf.Struct data = 7;
+}

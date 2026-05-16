@@ -28,13 +28,6 @@ type Account struct {
 	UpdatedAt         int64 `gorm:"autoUpdateTime"`
 }
 
-type GoPayCycleState struct {
-	StateKey  string `gorm:"primaryKey"`
-	StateJSON string `gorm:"type:jsonb;not null;default:'{}'"`
-	CreatedAt int64  `gorm:"autoCreateTime"`
-	UpdatedAt int64  `gorm:"autoUpdateTime"`
-}
-
 func InitDB() *gorm.DB {
 	dsn := strings.TrimSpace(os.Getenv("PG_DSN"))
 	if dsn == "" {
@@ -45,7 +38,7 @@ func InitDB() *gorm.DB {
 		log.Fatalf("failed to connect to PostgreSQL database: %v", err)
 	}
 
-	db.AutoMigrate(&Account{}, &GoPayCycleState{})
+	db.AutoMigrate(&Account{})
 	if err := db.Exec("ALTER TABLE accounts DROP COLUMN IF EXISTS proxy_url").Error; err != nil {
 		log.Printf("failed to drop legacy proxy_url column: %v", err)
 	}

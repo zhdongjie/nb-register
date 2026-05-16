@@ -14,8 +14,10 @@
 服务端地址填：
 
 ```text
-http://192.168.0.115:8081/webhook/otp
+http://192.168.0.115:8081/local/gopay
 ```
+
+Telegram 用户来源使用 `http://192.168.0.115:8081/tg:<user_id>/gopay`。
 
 ## 构建
 
@@ -27,7 +29,7 @@ cd whatsapp-forwarder
 也可以在构建时写入默认 webhook：
 
 ```bash
-./gradlew assembleDebug -PdefaultWebhookUrl=http://192.168.0.115:8081/webhook/otp
+./gradlew assembleDebug -PdefaultWebhookUrl=http://192.168.0.115:8081/local/gopay
 ```
 
 APK 输出：

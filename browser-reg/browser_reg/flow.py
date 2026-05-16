@@ -119,7 +119,7 @@ def browser_accept_language() -> str:
 
 
 def browser_timezone() -> str:
-    return _env_str("BROWSER_REG_TIMEZONE", "America/New_York")
+    return os.environ.get("BROWSER_REG_TIMEZONE", "").strip()
 
 
 def browser_window_size() -> tuple[int, int]:
@@ -256,6 +256,36 @@ def _trial_probe_currency(info: dict) -> str:
         or checkout_data.get("currency")
         or ""
     ).upper()
+
+
+def _apply_plus_trial_probe_result(result: dict, trial_info: dict) -> None:
+    checkout_url = trial_info.get("url", "") or ""
+    checkout_session_id = str(trial_info.get("checkout_session_id") or "")
+    result["checkout_url"] = checkout_url
+    result["plus_trial"] = False
+
+    checkout_status = int(trial_info.get("status") or 0)
+    stripe_init_status = int(trial_info.get("stripe_init_status") or 0)
+    init_data = trial_info.get("stripe_init") if isinstance(trial_info, dict) else {}
+    if not isinstance(init_data, dict):
+        init_data = {}
+
+    if not (checkout_session_id and 200 <= checkout_status < 400 and 200 <= stripe_init_status < 400):
+        result["plus_trial_checked"] = False
+        result["plus_trial_source"] = str(trial_info.get("source") or "checkout_probe_error")
+        return
+
+    amount, source = _select_checkout_amount(init_data)
+    if amount is None:
+        result["plus_trial_checked"] = False
+        result["plus_trial_source"] = source
+        return
+
+    result["plus_trial_checked"] = True
+    result["plus_trial_amount"] = int(amount)
+    result["plus_trial_currency"] = _trial_probe_currency(trial_info)
+    result["plus_trial_source"] = source
+    result["plus_trial"] = amount == 0
 
 
 def cleanup_stale_browser_profiles(max_age_seconds: float = 4 * 3600) -> int:
@@ -521,6 +551,126 @@ def browser_register(
             logger.warning(f"[browser-reg] {label} JS click failed: {sanitize_text(e)}")
             return False
 
+    email_entry_selector = (
+        'input[type="email"], input[name*="email" i], input[autocomplete="email"], '
+        'input[placeholder*="email" i], input[aria-label*="email" i], input[name="username"]'
+    )
+
+    def _input_value(element) -> str:
+        try:
+            value = element.evaluate("el => el.value || ''")
+            return value.strip() if isinstance(value, str) else ""
+        except Exception:
+            return ""
+
+    def _find_email_input():
+        for sel in [
+            'input[type="email"]:visible',
+            'input[name*="email" i]:visible',
+            'input[autocomplete="email"]:visible',
+            'input[placeholder*="email" i]:visible',
+            'input[aria-label*="email" i]:visible',
+            'input[name="username"]:visible',
+        ]:
+            try:
+                el = _query_selector(sel)
+                if el and el.is_visible():
+                    return el
+            except Exception:
+                continue
+        return None
+
+    def _fill_email_input() -> bool:
+        target = email.strip()
+        for attempt in range(4):
+            check_cancel()
+            el = _find_email_input()
+            if not el:
+                sleep(0.5)
+                continue
+            if not _fill_input_without_pointer(el, email):
+                sleep(0.5)
+                continue
+            sleep(0.2)
+            current = _input_value(el)
+            if current == target:
+                return True
+            refreshed = _find_email_input()
+            if refreshed and _input_value(refreshed) == target:
+                return True
+            logger.info("[browser-reg] Email field did not retain value, retry %s/4", attempt + 1)
+            sleep(0.5)
+        return False
+
+    def _click_email_continue(label: str) -> bool:
+        for sel in [
+            'input[type="submit"][value="Continue"]',
+            'input[type="submit"][value="Next"]',
+        ]:
+            try:
+                b = _query_selector(sel)
+                if b and b.is_visible() and _safe_click(b, label):
+                    logger.info(f"[browser-reg] {label}: {sel}")
+                    return True
+            except Exception:
+                continue
+
+        try:
+            clicked = _page_evaluate('''() => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0
+                        && rect.height > 0
+                        && style.visibility !== 'hidden'
+                        && style.display !== 'none';
+                };
+                const candidates = document.querySelectorAll(
+                    'button, input[type="submit"], a, div[role="button"]'
+                );
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || el.value || '').trim();
+                    const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                    if (!disabled && visible(el) && /^(continue|next)$/i.test(text)) {
+                        el.click();
+                        return true;
+                    }
+                }
+
+                const email = document.querySelector(
+                    'input[type="email"], input[name*="email" i], input[autocomplete="email"], ' +
+                    'input[placeholder*="email" i], input[aria-label*="email" i], input[name="username"]'
+                );
+                if (email && email.form) {
+                    if (email.form.requestSubmit) {
+                        email.form.requestSubmit();
+                    } else {
+                        email.form.submit();
+                    }
+                    return true;
+                }
+                return false;
+            }''')
+            if clicked:
+                logger.info(f"[browser-reg] {label}: JS form submit")
+                return True
+        except Exception as e:
+            logger.info(f"[browser-reg] {label} JS submit failed: {sanitize_text(e)}")
+
+        try:
+            _keyboard_press("Enter")
+            logger.info(f"[browser-reg] {label}: keyboard Enter")
+            return True
+        except Exception as e:
+            logger.info(f"[browser-reg] {label} keyboard submit failed: {sanitize_text(e)}")
+            return False
+
+    def _submit_email_entry(label: str) -> bool:
+        if not _fill_email_input():
+            return False
+        sleep(random.uniform(0.2, 0.5))
+        return _click_email_continue(label)
+
     try:
         import platform as _platform
         _debug_mode = _env_bool("BROWSER_REG_DEBUG", False)
@@ -533,25 +683,33 @@ def browser_register(
         _block_images = _env_bool("BROWSER_REG_BLOCK_IMAGES", False)
         if _debug_mode:
             logger.info("[browser-reg] Debug mode enabled: headless=False")
-            logger.info("[browser-reg] Language override: locale=%s languages=%s timezone=%s", _locale, _languages, _timezone)
+            logger.info(
+                "[browser-reg] Language override: locale=%s languages=%s timezone=%s",
+                _locale,
+                _languages,
+                _timezone or "geoip",
+            )
 
         check_cancel()
-        with Camoufox(
-            headless=_headless,
-            humanize=True,
-            persistent_context=True,
-            user_data_dir=tmp_profile,
-            screen=Screen(max_width=_window_width, max_height=_window_height),
-            window=(_window_width, _window_height),
-            block_images=_block_images,
-            proxy=cf_proxy,
-            geoip=_geoip_enabled,
-            locale=_languages,
-            timezone_id=_timezone,
-            extra_http_headers={"Accept-Language": browser_accept_language()},
-            firefox_user_prefs=browser_firefox_user_prefs(),
-            env=browser_process_env(),
-        ) as ctx:
+        camoufox_options = {
+            "headless": _headless,
+            "humanize": True,
+            "persistent_context": True,
+            "user_data_dir": tmp_profile,
+            "screen": Screen(max_width=_window_width, max_height=_window_height),
+            "window": (_window_width, _window_height),
+            "block_images": _block_images,
+            "proxy": cf_proxy,
+            "geoip": _geoip_enabled,
+            "locale": _languages,
+            "extra_http_headers": {"Accept-Language": browser_accept_language()},
+            "firefox_user_prefs": browser_firefox_user_prefs(),
+            "env": browser_process_env(),
+        }
+        if _timezone:
+            camoufox_options["timezone_id"] = _timezone
+
+        with Camoufox(**camoufox_options) as ctx:
             apply_browser_language_overrides(ctx)
             check_cancel()
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -677,7 +835,7 @@ def browser_register(
                 sleep(1)
                 try:
                     cur_url = _page_url()
-                    if "auth.openai.com" in cur_url or _query_selector('input[type="email"]'):
+                    if "auth.openai.com" in cur_url or _find_email_input():
                         break
                 except Exception:
                     # Page may have been closed; check for new pages
@@ -701,34 +859,13 @@ def browser_register(
 
             # --- [2] Fill email ---
             logger.info("[browser-reg] Filling email ...")
-            _wait_for_selector('input[type="email"], input[name="email"]', timeout=30000)
-            for _try in range(4):
-                try:
-                    ei = (_query_selector('input[type="email"]')
-                          or _query_selector('input[name="email"]'))
-                    if not ei:
-                        sleep(0.5)
-                        continue
-                    ei.click(timeout=5000)
-                    sleep(0.3)
-                    ei2 = (_query_selector('input[type="email"]')
-                           or _query_selector('input[name="email"]'))
-                    (ei2 or ei).fill(email)
-                    break
-                except Exception as e:
-                    if "not attached" in str(e).lower() or "detached" in str(e).lower():
-                        logger.info(f"[browser-reg] Email input detached, retry {_try+1}/4")
-                        sleep(0.5)
-                        continue
-                    raise
-            sleep(random.uniform(0.5, 1.2))
-
-            for sel in ['button[type="submit"]', 'button:has-text("Continue")', 'button:has-text("Next")']:
-                b = _query_selector(sel)
-                if b and b.is_visible():
-                    if _safe_click(b, f"Email continue {sel}"):
-                        logger.info(f"[browser-reg] Email continue: {sel}")
-                        break
+            try:
+                _wait_for_selector(email_entry_selector, state="visible", timeout=30000)
+            except Exception:
+                pass
+            if not _submit_email_entry("Email continue"):
+                _page_screenshot(path=f"{screenshot_dir}/email_entry_missing.png")
+                raise RuntimeError("Email input not found or could not be submitted")
             sleep(0.5)
 
             # --- [3] Email-verification page → switch to password flow ---
@@ -802,6 +939,7 @@ def browser_register(
                 'button:has-text("Password"), '
                 'a:has-text("Password")'
             )
+            auth_step_or_email_selector = f"{password_or_switch_selector}, {email_entry_selector}"
             # These are upper bounds only. wait_for_selector returns as soon as
             # the element is visible, so the flow still clicks immediately when
             # "Continue with password" appears.
@@ -811,16 +949,36 @@ def browser_register(
 
             # Click "Continue with password" as soon as it appears.
             if not _password_input_ready():
-                try:
-                    _wait_for_selector(
-                        password_or_switch_selector,
-                        state="visible",
-                        timeout=password_switch_timeout_ms,
-                    )
-                except Exception:
-                    pass
+                switched_to_password = False
+                email_resubmits = 0
+                for attempt in range(3):
+                    try:
+                        _wait_for_selector(
+                            auth_step_or_email_selector,
+                            state="visible",
+                            timeout=password_switch_timeout_ms if attempt == 0 else 12000,
+                        )
+                    except Exception:
+                        pass
+                    check_cancel()
+                    if _password_input_ready():
+                        break
+                    if _click_password_flow():
+                        switched_to_password = True
+                        break
+                    if email_resubmits < 2 and _find_email_input():
+                        email_resubmits += 1
+                        logger.info(
+                            "[browser-reg] Still on email entry after submit, retrying %s/2",
+                            email_resubmits,
+                        )
+                        _page_screenshot(path=f"{screenshot_dir}/email_entry_retry_{email_resubmits}.png")
+                        if _submit_email_entry(f"Email continue retry {email_resubmits}"):
+                            sleep(1.5)
+                            continue
+                    break
                 check_cancel()
-                if not _password_input_ready() and not _click_password_flow():
+                if not _password_input_ready() and not switched_to_password:
                     _page_screenshot(path=f"{screenshot_dir}/no_password_link.png")
                     raise RuntimeError("Continue with password button not found")
                 if not _password_input_ready():
@@ -1179,8 +1337,7 @@ def browser_register(
             # --- [10] Optional Plus Trial Eligibility Check ---
             if result["access_token"] and _env_bool("BROWSER_CHECK_PLUS_TRIAL", False):
                 try:
-                    stripe_pk = (os.environ.get("STRIPE_PUBLISHABLE_KEY") or DEFAULT_STRIPE_PK).strip()
-                    trial_info = _page_evaluate('''async ({token, stripePk, deviceId, browserLocale, browserTimezone}) => {
+                    trial_info = _page_evaluate('''async ({token, deviceId, stripePk}) => {
                         try {
                             const resp = await fetch('/backend-api/payments/checkout', {
                                 method: 'POST',
@@ -1189,23 +1346,23 @@ def browser_register(
                                     'Authorization': 'Bearer ' + token,
                                     'Content-Type': 'application/json',
                                     'oai-device-id': deviceId || '',
-                                    'oai-language': 'en-US',
-                                    'x-openai-target-path': '/backend-api/payments/checkout',
-                                    'x-openai-target-route': '/backend-api/payments/checkout'
+                                    'oai-language': 'en-US'
                                 },
                                 body: JSON.stringify({
                                     entry_point: 'all_plans_pricing_modal',
                                     plan_name: 'chatgptplusplan',
                                     billing_details: { country: 'ID', currency: 'IDR' },
+                                    checkout_ui_mode: 'hosted',
+                                    cancel_url: 'https://chatgpt.com/#pricing',
                                     promo_campaign: {
                                         promo_campaign_id: 'plus-1-month-free',
                                         is_coupon_from_query_param: false
-                                    },
-                                    checkout_ui_mode: 'hosted',
-                                    cancel_url: 'https://chatgpt.com/#pricing'
+                                    }
                                 })
                             });
-                            const data = await resp.json().catch(() => ({}));
+                            const text = await resp.text();
+                            let data = {};
+                            try { data = text ? JSON.parse(text) : {}; } catch (_) {}
                             const rawUrl = data?.url || data?.stripe_hosted_url || data?.checkout_url || '';
                             let checkoutSessionId = data?.checkout_session_id || data?.session_id || data?.id || '';
                             if (!checkoutSessionId && rawUrl) {
@@ -1214,35 +1371,32 @@ def browser_register(
                             }
                             const processorEntity = data?.processor_entity || data?.processor || 'openai_llc';
                             const checkoutUrl = rawUrl || (checkoutSessionId ? `https://chatgpt.com/checkout/${processorEntity}/${checkoutSessionId}` : '');
-                            let stripeStatus = 0;
                             let stripeInit = {};
-                            let stripeError = '';
-                            if (checkoutSessionId) {
-                                const stripeJsId = (globalThis.crypto && crypto.randomUUID)
-                                    ? crypto.randomUUID()
-                                    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-                                const body = new URLSearchParams({
-                                    browser_locale: browserLocale,
-                                    browser_timezone: browserTimezone,
-                                    'elements_session_client[client_betas][0]': 'custom_checkout_server_updates_1',
-                                    'elements_session_client[client_betas][1]': 'custom_checkout_manual_approval_1',
-                                    'elements_session_client[elements_init_source]': 'custom_checkout',
-                                    'elements_session_client[referrer_host]': 'chatgpt.com',
-                                    'elements_session_client[stripe_js_id]': stripeJsId,
-                                    'elements_session_client[locale]': 'en',
-                                    'elements_session_client[is_aggregation_expected]': 'false',
-                                    'elements_options_client[stripe_js_locale]': 'auto',
-                                    key: stripePk
-                                });
+                            let stripeInitStatus = 0;
+                            let stripeInitError = '';
+                            if (resp.ok && checkoutSessionId) {
+                                const form = new URLSearchParams();
+                                form.set('browser_locale', 'en-US');
+                                form.set('browser_timezone', 'Asia/Shanghai');
+                                form.set('elements_session_client[client_betas][0]', 'custom_checkout_server_updates_1');
+                                form.set('elements_session_client[client_betas][1]', 'custom_checkout_manual_approval_1');
+                                form.set('elements_session_client[elements_init_source]', 'custom_checkout');
+                                form.set('elements_session_client[referrer_host]', 'chatgpt.com');
+                                form.set('elements_session_client[stripe_js_id]', (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()));
+                                form.set('elements_session_client[locale]', 'en');
+                                form.set('elements_session_client[is_aggregation_expected]', 'false');
+                                form.set('elements_options_client[stripe_js_locale]', 'auto');
+                                form.set('key', stripePk);
                                 const initResp = await fetch(`https://api.stripe.com/v1/payment_pages/${checkoutSessionId}/init`, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                                    body
+                                    body: form.toString()
                                 });
-                                stripeStatus = initResp.status;
-                                stripeInit = await initResp.json().catch(() => ({}));
+                                stripeInitStatus = initResp.status;
+                                const initText = await initResp.text();
+                                try { stripeInit = initText ? JSON.parse(initText) : {}; } catch (_) {}
                                 if (!initResp.ok) {
-                                    stripeError = JSON.stringify(stripeInit).slice(0, 300);
+                                    stripeInitError = stripeInit?.error?.message || stripeInit?.message || initText || `stripe init status ${initResp.status}`;
                                 }
                             }
                             return {
@@ -1250,76 +1404,42 @@ def browser_register(
                                 url: checkoutUrl,
                                 checkout_session_id: checkoutSessionId,
                                 processor_entity: processorEntity,
-                                checkout_data: {
-                                    currency: data?.currency || data?.billing_details?.currency || '',
-                                    amount_due: data?.amount_due,
-                                    amount_total: data?.amount_total,
-                                    total_amount: data?.total_amount,
-                                    total: data?.total
-                                },
-                                stripe_status: stripeStatus,
-                                stripe_error: stripeError,
-                                stripe_init: {
-                                    currency: stripeInit?.currency || stripeInit?.invoice?.currency || '',
-                                    total_summary: stripeInit?.total_summary || null,
-                                    invoice: stripeInit?.invoice || null,
-                                    checkout_session: stripeInit?.checkout_session || null,
-                                    subscription: stripeInit?.subscription || null,
-                                    amount_due: stripeInit?.amount_due,
-                                    amount_total: stripeInit?.amount_total,
-                                    total_amount: stripeInit?.total_amount,
-                                    amount_remaining: stripeInit?.amount_remaining,
-                                    total: stripeInit?.total
-                                }
+                                checkout_data: data,
+                                stripe_init_status: stripeInitStatus,
+                                stripe_init: stripeInit,
+                                source: stripeInitStatus ? 'stripe_init' : 'checkout_create',
+                                error: resp.ok ? stripeInitError : (data?.error || data?.message || text || `checkout status ${resp.status}`)
                             };
                         } catch(e) { return { status: -1, url: null, error: String(e && e.message || e) }; }
                     }''', {
                         "token": result["access_token"],
-                        "stripePk": stripe_pk,
                         "deviceId": result["device_id"],
-                        "browserLocale": browser_locale(),
-                        "browserTimezone": browser_timezone(),
+                        "stripePk": DEFAULT_STRIPE_PK,
                     })
-                    checkout_url = trial_info.get("url", "") or ""
-                    result["checkout_url"] = checkout_url
-                    amount, source = _select_checkout_amount(trial_info.get("stripe_init") or {})
-                    if amount is None:
-                        checkout_amount, checkout_source = _select_checkout_amount(trial_info.get("checkout_data") or {})
-                        if checkout_amount is not None:
-                            amount, source = checkout_amount, f"checkout_data.{checkout_source}"
-                    if amount is None:
-                        probe_error = sanitize_text(
-                            trial_info.get("error") or trial_info.get("stripe_error") or ""
+                    _apply_plus_trial_probe_result(result, trial_info)
+                    checkout_url = result["checkout_url"]
+                    checkout_session_id = str(trial_info.get("checkout_session_id") or "")
+                    checkout_status = int(trial_info.get("status") or 0)
+                    stripe_init_status = int(trial_info.get("stripe_init_status") or 0)
+                    if result["plus_trial_checked"]:
+                        logger.info(
+                            "[browser-reg] Plus trial checkout checked "
+                            f"eligible={result['plus_trial']} "
+                            f"amount={result['plus_trial_amount']} "
+                            f"currency={result['plus_trial_currency']} "
+                            f"source={result['plus_trial_source']} "
+                            f"checkout_session_id={'yes' if checkout_session_id else 'no'} "
+                            f"url={'yes' if checkout_url else 'no'}"
                         )
-                        probe_message = (
-                            "[browser-reg] Plus trial probe did not expose amount "
+                    else:
+                        probe_error = sanitize_text(trial_info.get("error") or "")
+                        logger.warning(
+                            "[browser-reg] Plus trial checkout probe failed "
                             f"(checkout_status={trial_info.get('status')}, "
-                            f"stripe_status={trial_info.get('stripe_status')}, "
+                            f"stripe_init_status={stripe_init_status}, "
+                            f"checkout_session_id={'yes' if checkout_session_id else 'no'}, "
                             f"url={'yes' if checkout_url else 'no'}, "
                             f"error={probe_error})"
-                        )
-                        if (
-                            trial_info.get("stripe_status") == 403
-                            and "invalid_request_http_origin" in probe_error
-                            and checkout_url
-                        ):
-                            logger.info(
-                                probe_message
-                                + "; Stripe init is blocked by browser Origin, "
-                                + "GoPay payment flow will validate amount"
-                            )
-                        else:
-                            logger.warning(probe_message)
-                    else:
-                        result["plus_trial_checked"] = True
-                        result["plus_trial_amount"] = amount
-                        result["plus_trial_currency"] = _trial_probe_currency(trial_info)
-                        result["plus_trial_source"] = source
-                        result["plus_trial"] = amount == 0
-                        logger.info(
-                            f"[browser-reg] Plus trial eligible={result['plus_trial']} "
-                            f"amount={amount} {result['plus_trial_currency'] or '?'} "
-                            f"source={source} url={'yes' if checkout_url else 'no'}"
                         )
                 except Exception as e:
                     logger.warning(f"[browser-reg] Plus trial check failed: {sanitize_text(e)}")

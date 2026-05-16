@@ -1,0 +1,513 @@
+global:
+  imageRegistry: ""
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+configEnv:
+  LOG_LEVEL: INFO
+
+  BROWSER_CHECK_PLUS_TRIAL: "false"
+  CAMOUFOX_GEOIP: "true"
+  BROWSER_REG_BLOCK_IMAGES: "false"
+  BROWSER_REG_WINDOW_WIDTH: "1365"
+  BROWSER_REG_WINDOW_HEIGHT: "768"
+
+  OUTLOOK_REGISTER_ENABLED: "false"
+  OUTLOOK_REGISTER_PROXY_POOL: ""
+  OUTLOOK_REGISTER_PROXY_FILE: ""
+  OUTLOOK_REGISTER_BROWSER: patchright
+  OUTLOOK_REGISTER_EMAIL_SUFFIX: "@outlook.com"
+  OUTLOOK_REGISTER_CONCURRENT_FLOWS: "1"
+  OUTLOOK_REGISTER_MAX_TASKS: "1"
+  OUTLOOK_REGISTER_BOT_PROTECTION_WAIT: "0"
+  OUTLOOK_REGISTER_MAX_CAPTCHA_RETRIES: "10"
+  OUTLOOK_REGISTER_MANUAL_CAPTCHA: "false"
+  OUTLOOK_REGISTER_MANUAL_CAPTCHA_TIMEOUT_SECONDS: "300"
+  OUTLOOK_REGISTER_ENABLE_OAUTH2: "true"
+  OUTLOOK_REGISTER_OAUTH_CLIENT_ID: ""
+  OUTLOOK_REGISTER_OAUTH_REDIRECT_URL: ""
+  OUTLOOK_REGISTER_OAUTH_SCOPES: "offline_access https://graph.microsoft.com/Mail.Read"
+  OUTLOOK_REGISTER_OAUTH_PROOF_EMAIL_FILE: ""
+  OUTLOOK_REGISTER_OAUTH_TIMEOUT_SECONDS: "90"
+  OUTLOOK_REGISTER_INTERVAL_SECONDS: "0"
+  OUTLOOK_REGISTER_RUN_TIMEOUT_SECONDS: "900"
+  OUTLOOK_REGISTER_LOCK_WAIT_SECONDS: "0"
+  MAILBOX_REGISTER_TIMEOUT_SECONDS: "1800"
+
+  OUTLOOK_OAUTH_CLIENT_ID: ""
+  OUTLOOK_OAUTH_SCOPE: "https://graph.microsoft.com/Mail.Read"
+  OUTLOOK_POLL_INTERVAL_SECONDS: "5"
+  OUTLOOK_MESSAGE_LIMIT: "25"
+  OUTLOOK_HTTP_TIMEOUT_SECONDS: "20"
+  OUTLOOK_ALIAS_RANDOM_LENGTH: "6"
+  OUTLOOK_GRAPH_MESSAGES_URL: ""
+
+  GOPAY_COUNTRY_CODE: "62"
+  GOPAY_OTP_TIMEOUT_SECONDS: "60"
+  GOPAY_LOGIN_OTP_TIMEOUT_SECONDS: "180"
+  GOPAY_CHANGE_PHONE_DISABLED: "false"
+  GOPAY_CHANGE_PHONE_MAX_FAILURES: "3"
+  GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS: "120"
+  GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS: "1"
+  GOPAY_CHANGE_PHONE_GET_NUMBER_RETRY_SECONDS: "5"
+  GOPAY_CHANGE_PHONE_SMS_CANCEL_TIMEOUT_SECONDS: "130"
+  GOPAY_CHANGE_PHONE_SMS_CANCEL_RETRY_SECONDS: "10"
+  GOPAY_REQUIRED_BALANCE_RP: "1"
+
+  OTP_RELAY_TTL_SECONDS: "600"
+  OTP_RELAY_MAX_ITEMS: "100"
+
+  HEROSMS_SERVICE: ni
+  HEROSMS_COUNTRY: "6"
+  HEROSMS_COUNTRY_CALLING_CODE: "62"
+  HEROSMS_MAX_PRICE: "0.05"
+
+  TEMPORAL_DEV_SERVER: "false"
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: nb-register-orchestrator
+  REGISTRATION_OTP_TIMEOUT_SECONDS: "180"
+
+secrets:
+  create: true
+  name: ""
+  stringData:
+    POSTGRES_PASSWORD: nb_register
+
+    REGISTER_PROXY_URL: "socks5://proxy.internal:10813"
+    OUTLOOK_REGISTER_PROXY: ""
+    OUTLOOK_REGISTER_OAUTH_PROOF_EMAIL: ""
+
+    GOPAY_PHONE_NUMBER: ""
+    GOPAY_PIN: ""
+    GOPAY_PROXY_URL: "http://proxy.internal:10809"
+    GOPAY_SIGNUP_AUTH_UUID: ""
+    GOPAY_CHECKOUT_PROXY_URL: ""
+    GOPAY_PAYMENT_PROXY_URL: ""
+    GOPAY_HMAC_KEY: ""
+    GOPAY_X_E2: ""
+    GOTO_CLIENT_SECRET: ""
+    GOTO_SSO_CLIENT_SECRET: ""
+
+    HEROSMS_API_KEY: ""
+    SMS_PROXY: ""
+
+postgres:
+  enabled: true
+  image:
+    repository: docker.m.daocloud.io/library/postgres
+    tag: 15-alpine
+  auth:
+    user: nb_register
+    database: nb_register
+  service:
+    port: 5432
+  sslMode: disable
+  external:
+    host: ""
+    port: 5432
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+  resources: {}
+
+temporal:
+  enabled: true
+  image:
+    repository: docker.m.daocloud.io/temporalio/auto-setup
+    tag: 1.29.2
+  service:
+    port: 7233
+  database: temporal
+  visibilityDatabase: temporal_visibility
+  resources: {}
+
+gopayPaymentConfig:
+  secretName: ""
+  mountPath: /app/gopay-flow/config.json
+  config:
+    auth:
+      session_token: ""
+    gopay:
+      country_code: "62"
+      phone_number: ""
+      pin: ""
+      tokenization: "true"
+      browser_locale: zh-CN
+      pin_locale: id
+    proxies:
+      checkout: ""
+      payment: ""
+
+ingress:
+  dashboard:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: nb-register.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  webhook:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: nb-register-webhook.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+workloads:
+  account-db:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/account-db
+      tag: latest
+    postgresEnv: true
+    env:
+      LISTEN_ADDR: ":50051"
+      PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    resources: {}
+
+  outlook-imap-service:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/outlook-imap-service
+      tag: latest
+    postgresEnv: true
+    env:
+      LISTEN_ADDR: ":50051"
+      PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    resources: {}
+
+  outlook-register-service:
+    enabled: true
+    replicas: 1
+    strategyType: Recreate
+    image:
+      repository: nb-register/outlook-register-service
+      tag: latest
+    env:
+      LISTEN_ADDR: ":50051"
+    secretEnv:
+      - name: OUTLOOK_REGISTER_PROXY
+        key: OUTLOOK_REGISTER_PROXY
+      - name: OUTLOOK_REGISTER_OAUTH_PROOF_EMAIL
+        key: OUTLOOK_REGISTER_OAUTH_PROOF_EMAIL
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    volumeMounts:
+      - name: shm
+        mountPath: /dev/shm
+    volumes:
+      - name: shm
+        type: emptyDir
+        medium: Memory
+        sizeLimit: 2Gi
+    resources: {}
+
+  browser-reg:
+    enabled: true
+    replicas: 1
+    strategyType: Recreate
+    image:
+      repository: nb-register/browser-reg
+      tag: latest
+    env:
+      GRPC_PORT: "50051"
+      EMAIL_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-imap-service") }}:50051'
+    secretEnv:
+      - name: PROXY_URL
+        key: REGISTER_PROXY_URL
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    volumeMounts:
+      - name: screenshots
+        mountPath: /tmp/screenshots
+      - name: shm
+        mountPath: /dev/shm
+    volumes:
+      - name: screenshots
+        type: emptyDir
+      - name: shm
+        type: emptyDir
+        medium: Memory
+        sizeLimit: 2Gi
+    resources:
+      limits:
+        memory: 4Gi
+
+  gopay-app:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/gopay-app
+      tag: latest
+    postgresEnv: true
+    env:
+      GOPAY_APP_PORT: "50051"
+      PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    secretEnv:
+      - name: GOPAY_PIN
+        key: GOPAY_PIN
+      - name: GOPAY_PHONE
+        key: GOPAY_PHONE_NUMBER
+      - name: GOPAY_PROXY
+        key: GOPAY_PROXY_URL
+      - name: GOPAY_SIGNUP_AUTH_UUID
+        key: GOPAY_SIGNUP_AUTH_UUID
+      - name: GOPAY_HMAC_KEY
+        key: GOPAY_HMAC_KEY
+      - name: GOPAY_X_E2
+        key: GOPAY_X_E2
+      - name: GOTO_CLIENT_SECRET
+        key: GOTO_CLIENT_SECRET
+      - name: GOTO_SSO_CLIENT_SECRET
+        key: GOTO_SSO_CLIENT_SECRET
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    resources: {}
+
+  gopay-payment:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/gopay-payment
+      tag: latest
+    secretEnv:
+      - name: GOPAY_PHONE_NUMBER
+        key: GOPAY_PHONE_NUMBER
+      - name: GOPAY_PIN
+        key: GOPAY_PIN
+      - name: GOPAY_CHECKOUT_PROXY_URL
+        key: GOPAY_CHECKOUT_PROXY_URL
+      - name: GOPAY_PAYMENT_PROXY_URL
+        key: GOPAY_PAYMENT_PROXY_URL
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    volumeMounts:
+      - name: gopay-config
+        mountPath: /app/gopay-flow/config.json
+        subPath: config.json
+        readOnly: true
+    volumes:
+      - name: gopay-config
+        type: secret
+        secretName: '{{ include "nb-register.gopayConfigSecretName" . }}'
+        items:
+          - key: config.json
+            path: config.json
+    resources: {}
+
+  herosms-sms-service:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/herosms-sms-service
+      tag: latest
+    postgresEnv: true
+    env:
+      SMS_PORT: "50051"
+      PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    secretEnv:
+      - name: HEROSMS_API_KEY
+        key: HEROSMS_API_KEY
+      - name: SMS_PROXY
+        key: SMS_PROXY
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    resources: {}
+
+  whatsapp-otp-relay:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/whatsapp-otp-relay
+      tag: latest
+    env:
+      OTP_RELAY_GRPC_LISTEN: ":50051"
+      OTP_RELAY_HTTP_LISTEN: "0.0.0.0:8081"
+    ports:
+      - name: grpc
+        containerPort: 50051
+      - name: http
+        containerPort: 8081
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+        - name: http
+          port: 8081
+          targetPort: http
+    probes:
+      httpGet:
+        path: /health
+        port: http
+    resources: {}
+
+  orchestrator:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/orchestrator
+      tag: latest
+    postgresEnv: true
+    env:
+      LISTEN_ADDR: ":50051"
+      BROWSER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "browser-reg") }}:50051'
+      PAYMENT_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "gopay-payment") }}:50051'
+      GOPAY_APP_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "gopay-app") }}:50051'
+      CODE_RECEIVER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "herosms-sms-service") }}:50051'
+      ACCOUNT_DB_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "account-db") }}:50051'
+      EMAIL_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-imap-service") }}:50051'
+      MAILBOX_REGISTER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-register-service") }}:50051'
+      OTP_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "whatsapp-otp-relay") }}:50051'
+      GOPAY_OTP_SERVICE_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "whatsapp-otp-relay") }}:50051'
+      TEMPORAL_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "temporal") }}:7233'
+      ORCHESTRATOR_PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    secretEnv:
+      - name: GOPAY_PHONE_NUMBER
+        key: GOPAY_PHONE_NUMBER
+      - name: GOPAY_PIN
+        key: GOPAY_PIN
+    ports:
+      - name: grpc
+        containerPort: 50051
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: grpc
+          port: 50051
+          targetPort: grpc
+    probes:
+      tcpSocketPort: grpc
+    resources: {}
+
+  dashboard:
+    enabled: true
+    replicas: 1
+    image:
+      repository: nb-register/dashboard
+      tag: latest
+    postgresEnv: true
+    env:
+      LISTEN_ADDR: ":8080"
+      ACCOUNT_DB_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "account-db") }}:50051'
+      ORCHESTRATOR_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "orchestrator") }}:50051'
+      PAYMENT_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "gopay-payment") }}:50051'
+      EMAIL_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-imap-service") }}:50051'
+      MAILBOX_REGISTER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-register-service") }}:50051'
+      ORCHESTRATOR_PG_DSN: '{{ include "nb-register.pgDsn" . }}'
+    ports:
+      - name: http
+        containerPort: 8080
+    service:
+      enabled: true
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 8080
+          targetPort: http
+    probes:
+      httpGet:
+        path: /api/health
+        port: http
+    resources: {}

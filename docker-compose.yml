@@ -95,8 +95,6 @@ services:
       - OUTLOOK_REGISTER_RUN_TIMEOUT_SECONDS=${OUTLOOK_REGISTER_RUN_TIMEOUT_SECONDS:-900}
       - OUTLOOK_REGISTER_LOCK_WAIT_SECONDS=${OUTLOOK_REGISTER_LOCK_WAIT_SECONDS:-0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    volumes:
-      - ./outlook-register-service/register-results:/app/Results
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: "2gb"
@@ -128,8 +126,11 @@ services:
       - LISTEN_ADDR=:50051
       - BROWSER_ADDR=${BROWSER_ADDR:-browser-reg:50051}
       - PAYMENT_ADDR=${PAYMENT_ADDR:-gopay-payment:50051}
-      - GOPAY_CYCLE_ADDR=${GOPAY_CYCLE_ADDR:-gopay-cycle:50051}
-      - SMS_SERVICE_ADDR=${SMS_SERVICE_ADDR:-sms-service:50051}
+      - GOPAY_APP_ADDR=${GOPAY_APP_ADDR:-gopay-app:50051}
+      - GOPAY_COUNTRY_CODE=${GOPAY_COUNTRY_CODE:-62}
+      - GOPAY_PHONE_NUMBER=${GOPAY_PHONE_NUMBER}
+      - GOPAY_PIN=${GOPAY_PIN}
+      - CODE_RECEIVER_ADDR=${CODE_RECEIVER_ADDR:-herosms-sms-service:50051}
       - ACCOUNT_DB_ADDR=account-db:50051
       - EMAIL_ADDR=outlook-imap-service:50051
       - MAILBOX_REGISTER_ADDR=outlook-register-service:50051
@@ -154,10 +155,12 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - account-db
+      - gopay-app
       - gopay-payment
       - whatsapp-otp-relay
       - outlook-imap-service
       - outlook-register-service
+      - herosms-sms-service
       - postgres
       - temporal
     restart: always
@@ -174,14 +177,10 @@ services:
       - GOPAY_PIN=${GOPAY_PIN}
       - GOPAY_CHECKOUT_PROXY_URL=${GOPAY_CHECKOUT_PROXY_URL}
       - GOPAY_PAYMENT_PROXY_URL=${GOPAY_PAYMENT_PROXY_URL}
-      - GOPAY_CYCLE_ADDR=${GOPAY_CYCLE_ADDR:-gopay-cycle:50051}
-      - ACCOUNT_DB_ADDR=account-db:50051
     volumes:
       - ./gopay-payment/gopay-flow/config.json:/app/gopay-flow/config.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      - account-db
     restart: always
 
   whatsapp-otp-relay:
@@ -198,12 +197,12 @@ services:
       - OTP_RELAY_MAX_ITEMS=${OTP_RELAY_MAX_ITEMS:-100}
     restart: always
 
-  gopay-cycle:
+  gopay-app:
     build:
-      context: ./gopay-cycle
+      context: ./gopay-app
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:${GOPAY_CYCLE_PORT:-50060}:50051"
+      - "127.0.0.1:${GOPAY_APP_PORT:-50060}:50051"
     environment:
       - GOPAY_PIN=${GOPAY_PIN}
       - GOPAY_PHONE=${GOPAY_PHONE_NUMBER}
@@ -214,26 +213,30 @@ services:
       - GOTO_CLIENT_SECRET=${GOTO_CLIENT_SECRET}
       - GOTO_SSO_CLIENT_SECRET=${GOTO_SSO_CLIENT_SECRET}
       - GOPAY_LOGIN_OTP_TIMEOUT_SECONDS=${GOPAY_LOGIN_OTP_TIMEOUT_SECONDS:-180}
-      - CYCLE_PORT=50051
-      - SMS_SERVICE_ADDR=sms-service:50051
+      - GOPAY_APP_PORT=50051
+      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_started
     restart: always
 
   checkphone-tgbot:
     profiles:
       - tgbot
     build:
-      context: ./checkphone-tgbot
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: checkphone-tgbot/Dockerfile
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_ALLOWED_CHAT_IDS=${TELEGRAM_ALLOWED_CHAT_IDS:-}
-      - TELEGRAM_OWNER_CHAT_IDS=${TELEGRAM_OWNER_CHAT_IDS:-}
       - TELEGRAM_DROP_PENDING_UPDATES=${TELEGRAM_DROP_PENDING_UPDATES:-true}
       - TELEGRAM_POLL_TIMEOUT_SECONDS=${TELEGRAM_POLL_TIMEOUT_SECONDS:-30}
       - TELEGRAM_POLL_LIMIT=${TELEGRAM_POLL_LIMIT:-20}
       - TELEGRAM_PROXY=${TELEGRAM_PROXY:-}
+      - ORCHESTRATOR_ADDR=${ORCHESTRATOR_ADDR:-orchestrator:50051}
+      - ORCHESTRATOR_GOPAY_TIMEOUT_SECONDS=${ORCHESTRATOR_GOPAY_TIMEOUT_SECONDS:-120}
       - GOPAY_COUNTRY_CODE=${GOPAY_COUNTRY_CODE:-62}
       - GOPAY_PROXY=${GOPAY_PROXY_URL:-http://host.docker.internal:10809}
       - GOPAY_HMAC_KEY=${GOPAY_HMAC_KEY}
@@ -243,19 +246,18 @@ services:
       - GOPAY_LOGIN_FP_RETRIES=${GOPAY_LOGIN_FP_RETRIES:-8}
       - GOPAY_LOGIN_OTP_TIMEOUT_SECONDS=${GOPAY_LOGIN_OTP_TIMEOUT_SECONDS:-180}
       - GOPAY_REQUIRED_BALANCE_RP=${GOPAY_REQUIRED_BALANCE_RP:-1}
-      - GOPAY_TGBOT_STATE_FILE=/data/gopay_login_state.json
-    volumes:
-      - checkphone-tgbot-data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - orchestrator
     restart: always
 
-  sms-service:
+  herosms-sms-service:
     build:
-      context: ./sms-service
+      context: ./herosms-sms-service
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:${SMS_SERVICE_PORT:-50061}:50051"
+      - "127.0.0.1:${HEROSMS_SMS_SERVICE_PORT:-50061}:50051"
     environment:
       - HEROSMS_API_KEY=${HEROSMS_API_KEY:-}
       - HEROSMS_SERVICE=${HEROSMS_SERVICE:-ni}
@@ -263,10 +265,13 @@ services:
       - HEROSMS_COUNTRY_CALLING_CODE=${HEROSMS_COUNTRY_CALLING_CODE:-62}
       - HEROSMS_MAX_PRICE=${HEROSMS_MAX_PRICE:-0.05}
       - SMS_PROXY=${SMS_PROXY:-}
-      - SMS_CANCEL_MIN_AGE_SECONDS=${SMS_CANCEL_MIN_AGE_SECONDS:-120}
       - SMS_PORT=50051
+      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_started
     restart: always
 
   dashboard:
@@ -279,6 +284,7 @@ services:
       - LISTEN_ADDR=:8080
       - ACCOUNT_DB_ADDR=account-db:50051
       - ORCHESTRATOR_ADDR=orchestrator:50051
+      - PAYMENT_ADDR=gopay-payment:50051
       - EMAIL_ADDR=outlook-imap-service:50051
       - MAILBOX_REGISTER_ADDR=outlook-register-service:50051
       - ORCHESTRATOR_PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
@@ -286,6 +292,7 @@ services:
     depends_on:
       - account-db
       - orchestrator
+      - gopay-payment
       - outlook-imap-service
       - outlook-register-service
       - postgres
@@ -315,4 +322,3 @@ services:
 
 volumes:
   pgdata:
-  checkphone-tgbot-data:

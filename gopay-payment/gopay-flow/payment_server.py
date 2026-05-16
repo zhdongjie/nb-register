@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
-import os
 import threading
 import uuid
 from concurrent import futures
@@ -15,10 +14,6 @@ from typing import Any
 
 import grpc
 
-import account_db_pb2
-import account_db_pb2_grpc
-import gopay_cycle_pb2
-import gopay_cycle_pb2_grpc
 import payment_pb2
 import payment_pb2_grpc
 from gopay import (
@@ -90,7 +85,7 @@ def _requires_manual_payment_confirmation(flow: "PendingFlow") -> bool:
 class PendingFlow:
     charger: GoPayCharger
     state: dict[str, Any]
-    use_cycle_token: bool = False
+    use_account_token: bool = False
 
     def close(self) -> None:
         self.charger.close()
@@ -101,10 +96,10 @@ class FlowStore:
         self._lock = threading.Lock()
         self._flows: dict[str, PendingFlow] = {}
 
-    def put(self, charger: GoPayCharger, state: dict[str, Any], use_cycle_token: bool = False) -> str:
+    def put(self, charger: GoPayCharger, state: dict[str, Any], use_account_token: bool = False) -> str:
         flow_id = uuid.uuid4().hex
         with self._lock:
-            self._flows[flow_id] = PendingFlow(charger=charger, state=state, use_cycle_token=use_cycle_token)
+            self._flows[flow_id] = PendingFlow(charger=charger, state=state, use_account_token=use_account_token)
         return flow_id
 
     def get(self, flow_id: str) -> PendingFlow | None:
@@ -127,64 +122,9 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
     def __init__(self, cfg: dict[str, Any]):
         self._cfg = cfg
         self._flows = FlowStore()
-        self._cycle_addr = os.environ.get("GOPAY_CYCLE_ADDR", "gopay-cycle:50051").strip()
-        self._account_db_addr = os.environ.get("ACCOUNT_DB_ADDR", "account-db:50051").strip()
-        self._cycle_state_key = os.environ.get("GOPAY_CYCLE_STATE_KEY", "default").strip() or "default"
 
     def close(self) -> None:
         self._flows.close()
-
-    def _ready_cycle_access_token(self) -> tuple[str, str]:
-        if not self._cycle_addr:
-            raise GoPayError("GOPAY_CYCLE_ADDR is required when use_cycle_token=true")
-        channel = grpc.insecure_channel(self._cycle_addr)
-        try:
-            state_json = self._load_cycle_state()
-            resp = gopay_cycle_pb2_grpc.GopayCycleServiceStub(channel).GetReadyAccessToken(
-                gopay_cycle_pb2.GetReadyAccessTokenRequest(state_json=state_json),
-                timeout=10,
-            )
-            self._save_cycle_state(getattr(resp, "state_json", ""))
-        finally:
-            channel.close()
-        if not resp or not resp.success or not (resp.access_token or "").strip():
-            message = resp.error_message if resp else "empty gopay-cycle response"
-            raise GoPayError(f"cycle token not ready: {message}")
-        return resp.access_token.strip(), str(resp.phone or "")
-
-    def _load_cycle_state(self) -> str:
-        if not self._account_db_addr:
-            raise GoPayError("ACCOUNT_DB_ADDR is required for cycle state")
-        channel = grpc.insecure_channel(self._account_db_addr)
-        try:
-            resp = account_db_pb2_grpc.AccountDatabaseServiceStub(channel).GetGoPayCycleState(
-                account_db_pb2.GetGoPayCycleStateRequest(state_key=self._cycle_state_key),
-                timeout=10,
-            )
-        finally:
-            channel.close()
-        state_json = (resp.state.state_json if resp and resp.state else "").strip()
-        return state_json or "{}"
-
-    def _save_cycle_state(self, state_json: str) -> None:
-        state_json = (state_json or "").strip()
-        if not state_json:
-            return
-        if not self._account_db_addr:
-            raise GoPayError("ACCOUNT_DB_ADDR is required for cycle state")
-        channel = grpc.insecure_channel(self._account_db_addr)
-        try:
-            account_db_pb2_grpc.AccountDatabaseServiceStub(channel).UpsertGoPayCycleState(
-                account_db_pb2.UpsertGoPayCycleStateRequest(
-                    state=account_db_pb2.GoPayCycleState(
-                        state_key=self._cycle_state_key,
-                        state_json=state_json,
-                    )
-                ),
-                timeout=10,
-            )
-        finally:
-            channel.close()
 
     def ProbeTier(self, request, context):
         session_token = (request.session_token or "").strip()
@@ -303,6 +243,7 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
                 currency=str(result.get("currency") or ""),
                 source=str(result.get("source") or ""),
                 checkout_url=str(result.get("checkout_url") or ""),
+                checkout_session_id=str(result.get("checkout_session_id") or ""),
                 plus_active=bool(session_probe and session_probe.get("plus_active")),
                 plan_type=str((session_probe or {}).get("tier") or (session_probe or {}).get("plan_type") or ""),
             )
@@ -316,22 +257,96 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             if cs_session is not None:
                 _close_session(cs_session)
 
+    def CreateCheckoutLink(self, request, context):
+        session_token = (request.session_token or "").strip()
+        access_token = (getattr(request, "access_token", "") or "").strip()
+        if session_token and not access_token and _looks_access_token(session_token):
+            access_token = session_token
+            session_token = ""
+        if access_token:
+            session_token = ""
+
+        if not (session_token or access_token):
+            return payment_pb2.CreateCheckoutLinkResponse(
+                success=False,
+                error_message="session_token or access_token is required",
+            )
+
+        charger = None
+        cs_session = None
+        try:
+            cfg = copy.deepcopy(self._cfg)
+            fresh_checkout = cfg.get("fresh_checkout") or {}
+            auth_cfg = dict(fresh_checkout.get("auth") or {})
+            auth_cfg.pop("cookie_header", None)
+            auth_cfg.pop("session_token", None)
+            auth_cfg.pop("access_token", None)
+            if session_token:
+                auth_cfg["session_token"] = session_token
+            if access_token:
+                auth_cfg["access_token"] = access_token
+
+            checkout_proxy = resolve_checkout_proxy(cfg)
+            cs_session = _build_chatgpt_session(auth_cfg, proxy=checkout_proxy)
+            charger = GoPayCharger(
+                cs_session,
+                {"country_code": "0", "phone_number": "0", "pin": "0"},
+                otp_provider=lambda: (_ for _ in ()).throw(OTPCancelled("OTP not used by checkout link")),
+                checkout_proxy=checkout_proxy,
+                payment_proxy=checkout_proxy,
+                runtime_cfg=dict(cfg.get("runtime") or {}),
+                checkout_cfg=dict((cfg.get("fresh_checkout") or {}).get("plan") or {}),
+                log=logger.info,
+            )
+
+            logger.info("[payment] CreateCheckoutLink start")
+            checkout_session_id = charger._chatgpt_create_checkout()
+            checkout_url = charger.checkout_url or f"https://checkout.stripe.com/c/pay/{checkout_session_id}"
+            logger.info(
+                "[payment] CreateCheckoutLink created session_present=%s url_present=%s",
+                bool(checkout_session_id),
+                bool(checkout_url),
+            )
+            return payment_pb2.CreateCheckoutLinkResponse(
+                success=True,
+                checkout_url=str(checkout_url or ""),
+                checkout_session_id=str(checkout_session_id or ""),
+            )
+        except GoPayError as exc:
+            logger.error("[payment] CreateCheckoutLink failed: %s", exc)
+            return payment_pb2.CreateCheckoutLinkResponse(success=False, error_message=str(exc)[:500])
+        except Exception as exc:
+            logger.exception("[payment] CreateCheckoutLink crashed")
+            return payment_pb2.CreateCheckoutLinkResponse(success=False, error_message=str(exc)[:500])
+        finally:
+            if charger is not None:
+                charger.close()
+            elif cs_session is not None:
+                _close_session(cs_session)
+
     def StartGoPay(self, request, context):
         session_token = (request.session_token or "").strip()
         access_token = (getattr(request, "access_token", "") or "").strip()
-        use_cycle_token = bool(getattr(request, "use_cycle_token", False))
+        use_account_token = bool(getattr(request, "use_account_token", False))
         tokenization = (getattr(request, "tokenization", "") or "").strip()
-        cycle_phone = ""
-        if use_cycle_token:
-            try:
-                _, cycle_phone = self._ready_cycle_access_token()
-                logger.info("[payment] Using internal gopay-cycle token phone=%s", cycle_phone)
-            except Exception as exc:
-                logger.error("[payment] cycle token unavailable: %s", exc)
-                return payment_pb2.StartGoPayResponse(success=False, error_message=str(exc)[:500])
-        elif session_token and not access_token and _looks_access_token(session_token):
+        checkout_url = (getattr(request, "checkout_url", "") or "").strip()
+        checkout_session_id = (getattr(request, "checkout_session_id", "") or "").strip()
+        gopay_phone = (getattr(request, "gopay_phone", "") or "").strip()
+        if session_token and not access_token and _looks_access_token(session_token):
             access_token = session_token
             session_token = ""
+        if access_token:
+            session_token = ""
+        if use_account_token and not access_token:
+            return payment_pb2.StartGoPayResponse(
+                success=False,
+                error_message="access_token is required when use_account_token=true",
+            )
+        if use_account_token and not gopay_phone:
+            return payment_pb2.StartGoPayResponse(
+                success=False,
+                error_message="gopay_phone is required when use_account_token=true",
+            )
 
         if not (session_token or access_token):
             return payment_pb2.StartGoPayResponse(
@@ -358,8 +373,8 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             cs_session = _build_chatgpt_session(auth_cfg, proxy=checkout_proxy)
 
             gopay_cfg = resolve_gopay_cfg(cfg)
-            if use_cycle_token and cycle_phone:
-                gopay_cfg["phone_number"] = cycle_phone
+            if gopay_phone:
+                gopay_cfg["phone_number"] = gopay_phone
             if tokenization:
                 gopay_cfg["tokenization"] = tokenization
             gopay_cfg = validate_gopay_cfg(gopay_cfg)
@@ -383,9 +398,17 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
                 log=logger.info,
             )
 
-            logger.info("[payment] StartGoPay start")
-            state = charger.start_until_otp(stripe_pk=stripe_pk, billing=_billing_from_config(cfg))
-            flow_id = self._flows.put(charger, state, use_cycle_token=use_cycle_token)
+            logger.info(
+                "[payment] StartGoPay start reuse_checkout=%s",
+                bool(checkout_session_id or checkout_url),
+            )
+            state = charger.start_until_otp(
+                stripe_pk=stripe_pk,
+                billing=_billing_from_config(cfg),
+                checkout_session_id=checkout_session_id,
+                checkout_url=checkout_url,
+            )
+            flow_id = self._flows.put(charger, state, use_account_token=use_account_token)
             charger = None
             cs_session = None
             logger.info("[payment] StartGoPay waiting_otp flow=%s", flow_id[:8])
@@ -395,6 +418,8 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
                 snap_token=str(state.get("snap_token") or ""),
                 issued_after_unix=int(state.get("issued_after_unix") or 0),
                 expires_at_unix=0,
+                checkout_url=str(state.get("checkout_url") or ""),
+                checkout_session_id=str(state.get("cs_id") or ""),
             )
         except GoPayError as exc:
             logger.error("[payment] StartGoPay failed: %s", exc)
@@ -439,11 +464,6 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             result = flow.charger.complete_after_otp(flow.state, request.otp)
             state = str(result.get("state") or "")
             success = state == "succeeded"
-            if success and flow.use_cycle_token:
-                try:
-                    self._unlink_cycle_token()
-                except Exception as exc:
-                    logger.error("[payment] cycle unlink failed after payment success: %s", exc)
             return payment_pb2.GoPayResponse(
                 success=success,
                 error_message="" if success else f"payment state={state or 'unknown'}",
@@ -479,11 +499,6 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             result = flow.charger.complete_after_manual_confirmation(flow.state)
             state = str(result.get("state") or "")
             success = state == "succeeded"
-            if success and flow.use_cycle_token:
-                try:
-                    self._unlink_cycle_token()
-                except Exception as exc:
-                    logger.error("[payment] cycle unlink failed after payment success: %s", exc)
             return payment_pb2.GoPayResponse(
                 success=success,
                 error_message="" if success else f"payment state={state or 'unknown'}",
@@ -502,24 +517,6 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             return payment_pb2.GoPayResponse(success=False, error_message=str(exc)[:500])
         finally:
             flow.close()
-
-    def _unlink_cycle_token(self) -> None:
-        if not self._cycle_addr:
-            raise GoPayError("GOPAY_CYCLE_ADDR is required for cycle unlink")
-        channel = grpc.insecure_channel(self._cycle_addr)
-        try:
-            state_json = self._load_cycle_state()
-            resp = gopay_cycle_pb2_grpc.GopayCycleServiceStub(channel).Unlink(
-                gopay_cycle_pb2.UnlinkRequest(state_json=state_json),
-                timeout=15,
-            )
-            self._save_cycle_state(getattr(resp, "state_json", ""))
-        finally:
-            channel.close()
-        if not resp or not resp.success:
-            message = resp.error_message if resp else "empty gopay-cycle response"
-            raise GoPayError(message)
-        logger.info("[payment] cycle token unlinked count=%s", resp.unlinked_count)
 
     def CancelGoPay(self, request, context):
         if not request.flow_id:

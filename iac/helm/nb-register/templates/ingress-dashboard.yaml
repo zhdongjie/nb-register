@@ -1,0 +1,35 @@
+{{- if .Values.ingress.dashboard.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "dashboard") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "dashboard") | nindent 4 }}
+  {{- with .Values.ingress.dashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.dashboard.className }}
+  ingressClassName: {{ .Values.ingress.dashboard.className | quote }}
+  {{- end }}
+  {{- with .Values.ingress.dashboard.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.dashboard.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "nb-register.componentFullname" (dict "root" $ "component" "dashboard") }}
+                port:
+                  number: 8080
+          {{- end }}
+    {{- end }}
+{{- end }}

@@ -8,8 +8,11 @@ message StartGoPayRequest {
   string session_token = 1;
   reserved 2, 3, 4, 5;
   string access_token = 6;
-  bool use_cycle_token = 7;
+  bool use_account_token = 7;
   string tokenization = 8;
+  string checkout_url = 9;
+  string checkout_session_id = 10;
+  string gopay_phone = 11;
 }
 
 message StartGoPayResponse {
@@ -19,6 +22,8 @@ message StartGoPayResponse {
   string snap_token = 4;
   int64 issued_after_unix = 5;
   int64 expires_at_unix = 6;
+  string checkout_url = 7;
+  string checkout_session_id = 8;
 }
 
 message ProbePlusTrialPaymentRequest {
@@ -37,6 +42,19 @@ message ProbePlusTrialPaymentResponse {
   string checkout_url = 8;
   bool plus_active = 9;
   string plan_type = 10;
+  string checkout_session_id = 11;
+}
+
+message CreateCheckoutLinkRequest {
+  string session_token = 1;
+  string access_token = 2;
+}
+
+message CreateCheckoutLinkResponse {
+  bool success = 1;
+  string error_message = 2;
+  string checkout_url = 3;
+  string checkout_session_id = 4;
 }
 
 message ProbeTierPaymentRequest {
@@ -84,6 +102,7 @@ message GoPayResponse {
 
 service PaymentService {
   rpc StartGoPay(StartGoPayRequest) returns (StartGoPayResponse);
+  rpc CreateCheckoutLink(CreateCheckoutLinkRequest) returns (CreateCheckoutLinkResponse);
   rpc ProbePlusTrial(ProbePlusTrialPaymentRequest) returns (ProbePlusTrialPaymentResponse);
   rpc ProbeTier(ProbeTierPaymentRequest) returns (ProbeTierPaymentResponse);
   rpc CompleteGoPay(CompleteGoPayRequest) returns (GoPayResponse);

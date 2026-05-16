@@ -23,16 +23,16 @@ import (
 )
 
 const (
-	defaultAllowedPaths = "/otp,/webhook,/webhook/otp,/gopay/otp"
-	maxPayloadBytes     = 64 * 1024
+	defaultOTPPurpose = "local/gopay"
+	maxPayloadBytes   = 64 * 1024
 )
 
 var (
-	nonDigitRe          = regexp.MustCompile(`[^0-9]+`)
-	keywordBeforeOTPRe  = regexp.MustCompile(`(?is)(?:otp|one[-[:space:]]*time|verification|verify|code|kode|verifikasi|gopay|whatsapp|验证码|驗證碼)[^0-9]{0,80}([0-9]{4,8})`)
-	otpBeforeKeywordRe  = regexp.MustCompile(`(?is)(?:^|[^0-9])([0-9]{4,8})[^0-9]{0,80}(?:otp|one[-[:space:]]*time|verification|verify|code|kode|verifikasi|gopay|whatsapp|验证码|驗證碼)`)
-	bareOTPRe           = regexp.MustCompile(`(?:^|[^0-9])([0-9]{4,8})(?:[^0-9]|$)`)
-	gopayOTPHintStrings = []string{"whatsapp", "gopay", "go pay", "gojek"}
+	nonDigitRe         = regexp.MustCompile(`[^0-9]+`)
+	keywordBeforeOTPRe = regexp.MustCompile(`(?is)(?:otp|one[-[:space:]]*time|verification|verify|code|kode|verifikasi|gopay|whatsapp|验证码|驗證碼)[^0-9]{0,80}([0-9]{4,8})`)
+	otpBeforeKeywordRe = regexp.MustCompile(`(?is)(?:^|[^0-9])([0-9]{4,8})[^0-9]{0,80}(?:otp|one[-[:space:]]*time|verification|verify|code|kode|verifikasi|gopay|whatsapp|验证码|驗證碼)`)
+	bareOTPRe          = regexp.MustCompile(`(?:^|[^0-9])([0-9]{4,8})(?:[^0-9]|$)`)
+	otpRouteSegmentRe  = regexp.MustCompile(`^[A-Za-z0-9:_-]+$`)
 )
 
 type otpItem struct {
@@ -98,7 +98,7 @@ func (s *otpStore) wait(ctx context.Context, purpose string, timeout time.Durati
 	defer cancel()
 	purpose = strings.ToLower(strings.TrimSpace(purpose))
 	if purpose == "" {
-		purpose = "gopay"
+		purpose = defaultOTPPurpose
 	}
 
 	for {
@@ -168,7 +168,7 @@ func (s *otpService) WaitForOtp(ctx context.Context, req *pb.WaitForOtpRequest) 
 	}
 	purpose := strings.TrimSpace(req.GetPurpose())
 	if purpose == "" {
-		purpose = "gopay"
+		purpose = defaultOTPPurpose
 	}
 	log.Printf("[otp-relay] WaitForOtp purpose=%s timeout=%ds issued_after=%d", purpose, timeoutSeconds, req.GetIssuedAfterUnix())
 	item, ok := s.store.wait(ctx, purpose, time.Duration(timeoutSeconds)*time.Second, req.GetIssuedAfterUnix())
@@ -182,7 +182,7 @@ func (s *otpService) WaitForOtp(ctx context.Context, req *pb.WaitForOtpRequest) 
 	return &pb.WaitForOtpResponse{Found: true, Otp: item.OTP, Source: item.Source}, nil
 }
 
-func newHTTPHandler(store *otpStore, allowedPaths map[string]bool) http.Handler {
+func newHTTPHandler(store *otpStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -194,7 +194,8 @@ func newHTTPHandler(store *otpStore, allowedPaths map[string]bool) http.Handler 
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": store.snapshot()})
 			return
 		}
-		if !allowedPaths[path] {
+		purpose, ok := otpPurposeFromPath(path)
+		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "not found"})
 			return
 		}
@@ -202,12 +203,12 @@ func newHTTPHandler(store *otpStore, allowedPaths map[string]bool) http.Handler 
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		handleSubmit(w, r, store)
+		handleSubmit(w, r, store, purpose)
 	})
 	return mux
 }
 
-func handleSubmit(w http.ResponseWriter, r *http.Request, store *otpStore) {
+func handleSubmit(w http.ResponseWriter, r *http.Request, store *otpStore, purpose string) {
 	payload, err := requestPayload(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -220,7 +221,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request, store *otpStore) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": false, "message": "otp not found"})
 		return
 	}
-	if err := store.submit(code, source, payloadPurpose(payload), payloadTS, payloadHint(payload)); err != nil {
+	if err := store.submit(code, source, purpose, payloadTS, payloadHint(payload)); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -367,6 +368,42 @@ func cleanOTPCandidate(value any) string {
 	return ""
 }
 
+func otpPurposeFromPath(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	if !validOTPSourceSegment(parts[0]) {
+		return "", false
+	}
+	for _, part := range parts {
+		if !otpRouteSegmentRe.MatchString(part) {
+			return "", false
+		}
+	}
+	return strings.ToLower(strings.Join(parts, "/")), true
+}
+
+func validOTPSourceSegment(source string) bool {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "local" {
+		return true
+	}
+	if !strings.HasPrefix(source, "tg:") {
+		return false
+	}
+	userID := strings.TrimPrefix(source, "tg:")
+	if userID == "" {
+		return false
+	}
+	for _, r := range userID {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func dictTimestamp(obj map[string]any) int64 {
 	for _, key := range []string{
 		"issued_at_unix",
@@ -440,16 +477,6 @@ func payloadSource(payload any, headers http.Header) string {
 	return strings.TrimSpace(headers.Get("User-Agent"))
 }
 
-func payloadPurpose(payload any) string {
-	if obj, ok := payload.(map[string]any); ok {
-		value := strings.TrimSpace(fmt.Sprint(obj["purpose"]))
-		if value != "" && value != "<nil>" {
-			return strings.ToLower(value)
-		}
-	}
-	return ""
-}
-
 func payloadHint(payload any) string {
 	switch v := payload.(type) {
 	case string:
@@ -469,19 +496,10 @@ func itemMatchesPurpose(item otpItem, purpose string) bool {
 		return true
 	}
 	itemPurpose := strings.ToLower(strings.TrimSpace(item.Purpose))
-	if itemPurpose != "" && itemPurpose != purpose && itemPurpose != "any" {
-		return false
-	}
-	if purpose != "gopay" && purpose != "payment" && purpose != "gopay_payment" {
+	if itemPurpose == "any" {
 		return true
 	}
-	haystack := strings.ToLower(item.Source + " " + item.Hint)
-	for _, hint := range gopayOTPHintStrings {
-		if strings.Contains(haystack, hint) {
-			return true
-		}
-	}
-	return false
+	return itemPurpose == purpose
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
@@ -515,17 +533,6 @@ func envInt(key string, fallback int) int {
 	return n
 }
 
-func allowedPathSet(raw string) map[string]bool {
-	out := map[string]bool{}
-	for _, part := range strings.Split(raw, ",") {
-		path := strings.TrimSpace(part)
-		if path != "" {
-			out[path] = true
-		}
-	}
-	return out
-}
-
 func truncate(value string, max int, fallback string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -541,7 +548,6 @@ func serve() error {
 	store := newOTPStore(envInt("OTP_RELAY_MAX_ITEMS", 100), envInt("OTP_RELAY_TTL_SECONDS", 600))
 	grpcListen := envDefault("OTP_RELAY_GRPC_LISTEN", ":50051")
 	httpListen := envDefault("OTP_RELAY_HTTP_LISTEN", "0.0.0.0:8081")
-	allowedPaths := allowedPathSet(envDefault("OTP_RELAY_ALLOWED_PATHS", defaultAllowedPaths))
 
 	lis, err := net.Listen("tcp", grpcListen)
 	if err != nil {
@@ -552,7 +558,7 @@ func serve() error {
 
 	httpServer := &http.Server{
 		Addr:              httpListen,
-		Handler:           newHTTPHandler(store, allowedPaths),
+		Handler:           newHTTPHandler(store),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

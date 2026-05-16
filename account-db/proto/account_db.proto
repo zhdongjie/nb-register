@@ -66,44 +66,10 @@ message ListAccountsResponse {
   repeated Account accounts = 1;
 }
 
-message GoPayCycleState {
-  string state_key = 1;
-  string state_json = 2;
-  int64 created_at = 3;
-  int64 updated_at = 4;
-}
-
-message GetGoPayCycleStateRequest {
-  string state_key = 1;
-}
-
-message GetGoPayCycleStateResponse {
-  GoPayCycleState state = 1;
-}
-
-message UpsertGoPayCycleStateRequest {
-  GoPayCycleState state = 1;
-}
-
-message UpsertGoPayCycleStateResponse {
-  GoPayCycleState state = 1;
-}
-
-message DeleteGoPayCycleStateRequest {
-  string state_key = 1;
-}
-
-message DeleteGoPayCycleStateResponse {
-  bool ack = 1;
-}
-
 service AccountDatabaseService {
   rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
   rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
   rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
   rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
   rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
-  rpc GetGoPayCycleState(GetGoPayCycleStateRequest) returns (GetGoPayCycleStateResponse);
-  rpc UpsertGoPayCycleState(UpsertGoPayCycleStateRequest) returns (UpsertGoPayCycleStateResponse);
-  rpc DeleteGoPayCycleState(DeleteGoPayCycleStateRequest) returns (DeleteGoPayCycleStateResponse);
 }

@@ -109,6 +109,7 @@ gopay-payment/**/*.pyc
 
 # Scratch
 scratch/
+.temp
 .tmp_*/
 .playwright-cli/
 memdump.bin

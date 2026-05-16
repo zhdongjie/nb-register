@@ -2,7 +2,13 @@
 !gopay-payment/
 !gopay-payment/**
 !proto/
-!proto/gopay_cycle.proto
+!proto/gopay_app.proto
+!proto/email.proto
+!proto/orchestrator.proto
+!checkphone-tgbot/
+!checkphone-tgbot/bot.py
+!checkphone-tgbot/checkphone.py
+!checkphone-tgbot/orchestrator_client.py
 
 .git
 .gitignore

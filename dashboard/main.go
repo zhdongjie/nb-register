@@ -31,6 +31,7 @@ import (
 type server struct {
 	accountClient      pb.AccountDatabaseServiceClient
 	orchestratorClient pb.OrchestratorServiceClient
+	paymentClient      pb.PaymentServiceClient
 	emailClient        pb.EmailServiceClient
 	db                 *sql.DB
 	staticDir          string
@@ -125,6 +126,12 @@ func main() {
 	}
 	defer orchestratorConn.Close()
 
+	paymentConn, err := newGRPCClient(envDefault("PAYMENT_ADDR", "gopay-payment:50051"))
+	if err != nil {
+		log.Fatalf("connect payment: %v", err)
+	}
+	defer paymentConn.Close()
+
 	emailConn, err := newGRPCClient(envDefault("EMAIL_ADDR", "outlook-imap-service:50051"))
 	if err != nil {
 		log.Fatalf("connect email service: %v", err)
@@ -143,6 +150,7 @@ func main() {
 	s := &server{
 		accountClient:      pb.NewAccountDatabaseServiceClient(accountConn),
 		orchestratorClient: pb.NewOrchestratorServiceClient(orchestratorConn),
+		paymentClient:      pb.NewPaymentServiceClient(paymentConn),
 		emailClient:        pb.NewEmailServiceClient(emailConn),
 		db:                 pg,
 		staticDir:          envDefault("STATIC_DIR", "web/dist"),
@@ -164,7 +172,7 @@ func main() {
 	mux.HandleFunc("/api/workflows/autopay", s.handleAutopay)
 	mux.HandleFunc("/api/workflows/login", s.handleLogin)
 	mux.HandleFunc("/api/workflows/probe", s.handleProbeAccount)
-	mux.HandleFunc("/api/workflows/gopay-cycle", s.handleGoPayCycle)
+	mux.HandleFunc("/api/workflows/gopay-app", s.handleGoPayApp)
 	mux.HandleFunc("/api/workflows/register-and-activate", s.handleRegisterAndActivate)
 	mux.HandleFunc("/", s.handleStatic)
 
@@ -433,6 +441,10 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 			s.handleAccountAccessToken(w, r, accountID)
 			return
 		}
+		if len(parts) == 2 && parts[1] == "checkout-link" {
+			s.handleAccountCheckoutLink(w, r, accountID)
+			return
+		}
 		writeError(w, http.StatusNotFound, errors.New("account endpoint not found"))
 		return
 	}
@@ -517,6 +529,52 @@ func (s *server) handleAccountAccessToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, updated.GetAccount())
+}
+
+func (s *server) handleAccountCheckoutLink(w http.ResponseWriter, r *http.Request, accountID string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	accountResp, err := s.accountClient.GetAccount(ctx, &pb.GetAccountRequest{AccountId: accountID})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	account := accountResp.GetAccount()
+	if account == nil {
+		writeError(w, http.StatusNotFound, errors.New("account not found"))
+		return
+	}
+
+	sessionToken := strings.TrimSpace(account.GetSessionToken())
+	accessToken := strings.TrimSpace(account.GetAccessToken())
+	if sessionToken == "" && accessToken == "" {
+		writeError(w, http.StatusBadRequest, errors.New("session_token or access_token is required"))
+		return
+	}
+
+	resp, err := s.paymentClient.CreateCheckoutLink(ctx, &pb.CreateCheckoutLinkRequest{
+		SessionToken: sessionToken,
+		AccessToken:  accessToken,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if !resp.GetSuccess() || resp.GetErrorMessage() != "" {
+		msg := strings.TrimSpace(resp.GetErrorMessage())
+		if msg == "" {
+			msg = "checkout link creation failed"
+		}
+		writeError(w, http.StatusBadGateway, errors.New(msg))
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func fetchChatGPTAccessToken(ctx context.Context, sessionToken string) (string, error) {
@@ -759,26 +817,12 @@ func (s *server) handleJob(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) > 1 {
 		switch parts[1] {
-		case "retry":
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			s.retryJob(w, r, jobID)
-			return
 		case "otp":
 			if r.Method != http.MethodPost {
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
 			}
 			s.submitJobOTP(w, r, jobID)
-			return
-		case "payment-confirm":
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			s.submitPaymentConfirmation(w, r, jobID)
 			return
 		default:
 			writeError(w, http.StatusNotFound, fmt.Errorf("unsupported job action: %s", parts[1]))
@@ -818,84 +862,6 @@ func (s *server) submitJobOTP(w http.ResponseWriter, r *http.Request, jobID stri
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *server) submitPaymentConfirmation(w http.ResponseWriter, r *http.Request, jobID string) {
-	resp, err := s.orchestratorClient.SubmitPaymentConfirmation(r.Context(), &pb.SubmitPaymentConfirmationRequest{
-		JobId: jobID,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if resp.GetErrorMessage() != "" {
-		writeError(w, http.StatusBadRequest, errors.New(resp.GetErrorMessage()))
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *server) retryJob(w http.ResponseWriter, r *http.Request, jobID string) {
-	job, err := s.getJob(r.Context(), jobID)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if !job.Retryable || !strings.HasPrefix(job.Status, "FAILED") {
-		writeError(w, http.StatusConflict, errors.New("only retryable failed jobs can be retried"))
-		return
-	}
-	if job.Action != "GOPAY_CYCLE" && strings.TrimSpace(job.AccountID) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("job account_id is empty"))
-		return
-	}
-
-	switch job.Action {
-	case "REGISTER":
-		resp, err := s.orchestratorClient.RegisterAccount(r.Context(), &pb.RegisterAccountRequest{AccountId: job.AccountID})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	case "ACTIVATE":
-		resp, err := s.orchestratorClient.ActivateAccount(r.Context(), &pb.ActivateAccountRequest{AccountId: job.AccountID})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	case "AUTOPAY":
-		resp, err := s.orchestratorClient.AutopayAccount(r.Context(), &pb.ActivateAccountRequest{AccountId: job.AccountID})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	case "PROBE_ACCOUNT":
-		resp, err := s.orchestratorClient.ProbeAccount(r.Context(), &pb.ProbeAccountRequest{AccountId: job.AccountID})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	case "GOPAY_CYCLE":
-		resp, err := s.orchestratorClient.RunGoPayCycle(r.Context(), &pb.GoPayCycleRequest{})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	case "REGISTER_AND_ACTIVATE":
-		resp, err := s.orchestratorClient.RegisterAndActivateAccount(r.Context(), &pb.RegisterAndActivateAccountRequest{AccountId: job.AccountID})
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	default:
-		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported job action: %s", job.Action))
-	}
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -996,17 +962,17 @@ func (s *server) handleProbeAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, statusCode, resp)
 }
 
-func (s *server) handleGoPayCycle(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleGoPayApp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var req pb.GoPayCycleRequest
+	var req pb.GoPayAppRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	resp, err := s.orchestratorClient.RunGoPayCycle(r.Context(), &req)
+	resp, err := s.orchestratorClient.RunGoPayApp(r.Context(), &req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

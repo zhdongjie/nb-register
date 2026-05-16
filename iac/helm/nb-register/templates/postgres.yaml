@@ -1,0 +1,90 @@
+{{- if .Values.postgres.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "postgres") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: {{ .Values.postgres.service.port }}
+      targetPort: postgres
+  selector:
+    {{- include "nb-register.selectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "postgres") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: {{ include "nb-register.componentFullname" (dict "root" . "component" "postgres") }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nb-register.selectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nb-register.selectorLabels" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nb-register.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ include "nb-register.image" (dict "root" . "image" .Values.postgres.image) | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.auth.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nb-register.appSecretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.auth.database | quote }}
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgres.auth.user | quote }}
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- if not .Values.postgres.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.postgres.persistence.accessModes | nindent 10 }}
+        {{- if .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ .Values.postgres.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size | quote }}
+  {{- end }}
+{{- end }}

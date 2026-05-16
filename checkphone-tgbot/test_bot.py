@@ -1,17 +1,53 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
 
-from bot import TelegramCheckPhoneBot, format_check_response, format_gopay_balance_response, parse_allowed_chat_ids, parse_check_text
+from bot import TelegramCheckPhoneBot, format_check_response, format_gopay_status_response, parse_allowed_chat_ids, parse_check_text
 
 
 class FakeTelegramBot(TelegramCheckPhoneBot):
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault("gopay", FakeGopayClient())
         super().__init__("token", *args, **kwargs)
         self.calls = []
 
     def _telegram(self, method: str, payload: dict, timeout: int = 30, attempts: int = 3) -> dict:
         self.calls.append((method, payload))
         return {"ok": True, "result": True}
+
+
+class FakeGopayClient:
+    def __init__(self):
+        self.calls = []
+        self.auth_start_response = SimpleNamespace(success=True, error_message="", ready=True, otp_sent=False, stage="ready")
+        self.auth_complete_response = SimpleNamespace(success=True, error_message="", ready=True, phone="6281234567890", stage="ready")
+
+    def auth_start(self, state_key, *, phone, country_code, pin):
+        self.calls.append(("auth_start", state_key, phone, country_code, pin))
+        return self.auth_start_response
+
+    def auth_complete(self, state_key, *, otp, pin):
+        self.calls.append(("auth_complete", state_key, otp, pin))
+        return self.auth_complete_response
+
+    def status(self, state_key):
+        self.calls.append(("status", state_key))
+        return SimpleNamespace(
+            success=True,
+            error_message="",
+            status=SimpleNamespace(
+                stage="ready",
+                phone="81234567890",
+                token_present=True,
+                balance_amount=2,
+                balance_currency="IDR",
+                has_min_balance=True,
+                error_message="",
+            ),
+        )
+
+    def clear_state(self, state_key):
+        self.calls.append(("clear_state", state_key))
+        return SimpleNamespace(success=True, error_message="")
 
 
 class TelegramBotParsingTests(unittest.TestCase):
@@ -103,7 +139,7 @@ class TelegramBotParsingTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("请发送要检测的手机号", messages[0])
 
-    def test_private_login_denied_without_owner(self):
+    def test_gopay_login_is_public(self):
         bot = FakeTelegramBot(default_country_code="62")
 
         bot.handle_update({
@@ -116,61 +152,102 @@ class TelegramBotParsingTests(unittest.TestCase):
         })
 
         messages = [payload["text"] for method, payload in bot.calls if method == "sendMessage"]
-        self.assertEqual(messages, ["这个功能未授权。"])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("请发送要登录的 GoPay 手机号", messages[0])
 
-    def test_private_login_prompts_and_checks_balance_for_owner(self):
-        bot = FakeTelegramBot(default_country_code="62", owner_chat_ids={"100"})
+    def test_gopay_login_uses_orchestrator_state_key_per_user(self):
+        gopay = FakeGopayClient()
+        bot = FakeTelegramBot(default_country_code="62", gopay=gopay)
 
-        with patch("bot.gopay_login.start_login", return_value={
-            "success": True,
-            "ready": True,
-            "balance_amount": 2,
-            "balance_currency": "IDR",
-            "required_balance_rp": 1,
-            "has_required_balance": True,
-        }) as start_login:
-            bot.handle_update({
-                "message": {
-                    "message_id": 1,
-                    "chat": {"id": 100},
-                    "from": {"id": 200},
-                    "text": "/login-gopay",
-                },
-            })
-            bot.handle_update({
-                "message": {
-                    "message_id": 2,
-                    "chat": {"id": 100},
-                    "from": {"id": 200},
-                    "text": "6281234567890",
-                },
-            })
-            bot.handle_update({
-                "message": {
-                    "message_id": 3,
-                    "chat": {"id": 100},
-                    "from": {"id": 200},
-                    "text": "123456",
-                },
-            })
+        bot.handle_update({
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "/login-gopay",
+            },
+        })
+        bot.handle_update({
+            "message": {
+                "message_id": 2,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "6281234567890",
+            },
+        })
+        bot.handle_update({
+            "message": {
+                "message_id": 3,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "123456",
+            },
+        })
 
-        start_login.assert_called_once_with("6281234567890", "123456", "+62")
+        self.assertEqual(gopay.calls, [("auth_start", "tg:200", "6281234567890", "+62", "123456")])
         messages = [payload["text"] for method, payload in bot.calls if method == "sendMessage"]
         self.assertIn("请发送要登录的 GoPay 手机号", messages[0])
         self.assertIn("请发送这个 GoPay 账号的 PIN", messages[1])
-        self.assertIn("状态：可用", messages[-1])
+        self.assertIn("GoPay token 已就绪", messages[-1])
 
-    def test_format_gopay_balance_requires_greater_than_threshold(self):
-        text = format_gopay_balance_response({
-            "success": True,
-            "balance_amount": 1,
-            "balance_currency": "IDR",
-            "required_balance_rp": 1,
-            "has_required_balance": False,
+    def test_gopay_login_unregistered_stops_without_signup_or_pin(self):
+        gopay = FakeGopayClient()
+        gopay.auth_start_response = SimpleNamespace(
+            success=False,
+            error_message="账户未注册",
+            ready=False,
+            otp_sent=False,
+            stage="idle",
+        )
+        bot = FakeTelegramBot(default_country_code="62", gopay=gopay)
+
+        bot.handle_update({
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "/login-gopay",
+            },
+        })
+        bot.handle_update({
+            "message": {
+                "message_id": 2,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "6281234567890",
+            },
+        })
+        bot.handle_update({
+            "message": {
+                "message_id": 3,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "123456",
+            },
         })
 
-        self.assertIn("余额不足", text)
-        self.assertIn("> 1 Rp", text)
+        self.assertEqual(gopay.calls, [("auth_start", "tg:200", "6281234567890", "+62", "123456")])
+        messages = [payload["text"] for method, payload in bot.calls if method == "sendMessage"]
+        self.assertIn("登录失败：账户未注册", messages[-1])
+        self.assertNotIn("创建 PIN", "\n".join(messages))
+
+    def test_format_gopay_status(self):
+        text = format_gopay_status_response(SimpleNamespace(
+            success=True,
+            error_message="",
+            status=SimpleNamespace(
+                stage="ready",
+                phone="81234567890",
+                token_present=True,
+                balance_amount=1,
+                balance_currency="IDR",
+                has_min_balance=True,
+                error_message="",
+            ),
+        ))
+
+        self.assertIn("阶段：ready", text)
+        self.assertIn("Token：有", text)
 
 
 if __name__ == "__main__":

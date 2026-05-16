@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net"
 	"os"
@@ -18,8 +17,6 @@ import (
 	"accountdb/db"
 	"accountdb/pb"
 )
-
-const defaultGoPayCycleStateKey = "default"
 
 type accountDatabaseServer struct {
 	pb.UnimplementedAccountDatabaseServiceServer
@@ -119,61 +116,6 @@ func (s *accountDatabaseServer) ListAccounts(ctx context.Context, req *pb.ListAc
 		resp.Accounts = append(resp.Accounts, accountToProto(&accounts[i]))
 	}
 	return resp, nil
-}
-
-func (s *accountDatabaseServer) GetGoPayCycleState(ctx context.Context, req *pb.GetGoPayCycleStateRequest) (*pb.GetGoPayCycleStateResponse, error) {
-	stateKey := normalizeGoPayCycleStateKey(req.GetStateKey())
-	var state db.GoPayCycleState
-	err := s.db.WithContext(ctx).First(&state, "state_key = ?", stateKey).Error
-	if err == gorm.ErrRecordNotFound {
-		return &pb.GetGoPayCycleStateResponse{State: &pb.GoPayCycleState{
-			StateKey:  stateKey,
-			StateJson: "{}",
-		}}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &pb.GetGoPayCycleStateResponse{State: goPayCycleStateToProto(&state)}, nil
-}
-
-func (s *accountDatabaseServer) UpsertGoPayCycleState(ctx context.Context, req *pb.UpsertGoPayCycleStateRequest) (*pb.UpsertGoPayCycleStateResponse, error) {
-	input := req.GetState()
-	stateKey := normalizeGoPayCycleStateKey(input.GetStateKey())
-	stateJSON, err := normalizeGoPayCycleStateJSON(input.GetStateJson())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	state := &db.GoPayCycleState{
-		StateKey:  stateKey,
-		StateJSON: stateJSON,
-	}
-	now := time.Now().Unix()
-	if err := s.db.WithContext(ctx).Exec(
-		`INSERT INTO go_pay_cycle_states (state_key, state_json, created_at, updated_at)
-		 VALUES (?, ?::jsonb, ?, ?)
-		 ON CONFLICT (state_key) DO UPDATE
-		 SET state_json = EXCLUDED.state_json,
-		     updated_at = EXCLUDED.updated_at`,
-		stateKey,
-		stateJSON,
-		now,
-		now,
-	).Error; err != nil {
-		return nil, err
-	}
-	if err := s.db.WithContext(ctx).First(state, "state_key = ?", stateKey).Error; err != nil {
-		return nil, err
-	}
-	return &pb.UpsertGoPayCycleStateResponse{State: goPayCycleStateToProto(state)}, nil
-}
-
-func (s *accountDatabaseServer) DeleteGoPayCycleState(ctx context.Context, req *pb.DeleteGoPayCycleStateRequest) (*pb.DeleteGoPayCycleStateResponse, error) {
-	stateKey := normalizeGoPayCycleStateKey(req.GetStateKey())
-	if err := s.db.WithContext(ctx).Delete(&db.GoPayCycleState{}, "state_key = ?", stateKey).Error; err != nil {
-		return nil, err
-	}
-	return &pb.DeleteGoPayCycleStateResponse{Ack: true}, nil
 }
 
 func (s *accountDatabaseServer) buildAccount(input *pb.Account) (*db.Account, error) {
@@ -315,42 +257,6 @@ func accountToProto(account *db.Account) *pb.Account {
 		PlusActive:        account.PlusActive,
 		Tier:              account.Tier,
 	}
-}
-
-func goPayCycleStateToProto(state *db.GoPayCycleState) *pb.GoPayCycleState {
-	if state == nil {
-		return nil
-	}
-	return &pb.GoPayCycleState{
-		StateKey:  state.StateKey,
-		StateJson: state.StateJSON,
-		CreatedAt: state.CreatedAt,
-		UpdatedAt: state.UpdatedAt,
-	}
-}
-
-func normalizeGoPayCycleStateKey(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return defaultGoPayCycleStateKey
-	}
-	return value
-}
-
-func normalizeGoPayCycleStateJSON(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "{}", nil
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
-		return "", err
-	}
-	encoded, err := json.Marshal(decoded)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
 }
 
 func envDefault(key string, fallback string) string {

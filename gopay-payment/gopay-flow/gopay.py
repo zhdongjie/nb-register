@@ -1345,6 +1345,7 @@ class GoPayCharger:
         plan = self.checkout_cfg
         promo_campaign_id = str(plan.get("promo_campaign_id") or "plus-1-month-free").strip()
         body = {
+            "entry_point": str(plan.get("entry_point") or "all_plans_pricing_modal"),
             "plan_name": str(plan.get("plan_name") or "chatgptplusplan"),
             "billing_details": {
                 "country": str(plan.get("billing_country") or "ID"),
@@ -1365,7 +1366,8 @@ class GoPayCharger:
             "https://chatgpt.com/backend-api/payments/checkout",
             json=body, timeout=DEFAULT_TIMEOUT, proxy=self.checkout_proxy,
         )
-        r.raise_for_status()
+        if getattr(r, "status_code", 0) >= 400:
+            raise GoPayError(f"checkout create failed: status={r.status_code} {_response_excerpt(r)}")
         data = r.json()
         cs_id = _extract_checkout_session_id(data)
         if not cs_id or not str(cs_id).startswith("cs_"):
@@ -2223,10 +2225,28 @@ class GoPayCharger:
         self.log("[gopay] midtrans snap_token=present")
         return self._run_midtrans_and_gopay(snap_token, cs_id, stripe_pk)
 
-    def start_until_otp(self, stripe_pk: str, billing: Optional[dict] = None) -> dict:
+    def start_until_otp(
+        self,
+        stripe_pk: str,
+        billing: Optional[dict] = None,
+        checkout_session_id: str = "",
+        checkout_url: str = "",
+    ) -> dict:
         """Run checkout/linking until GoPay has sent the WhatsApp OTP."""
         billing = billing or {}
-        cs_id = self._chatgpt_create_checkout()
+        checkout_url = str(checkout_url or "").strip()
+        cs_id = str(checkout_session_id or "").strip()
+        if not cs_id and checkout_url:
+            cs_id = _extract_checkout_session_id({"url": checkout_url})
+        if checkout_url and not cs_id:
+            raise GoPayError("checkout_url does not contain checkout_session_id")
+        if cs_id:
+            if not cs_id.startswith("cs_"):
+                raise GoPayError(f"invalid checkout_session_id: {cs_id}")
+            self.checkout_url = checkout_url or f"https://checkout.stripe.com/c/pay/{cs_id}"
+            self.log("[gopay] reusing checkout session from probe")
+        else:
+            cs_id = self._chatgpt_create_checkout()
         pm_id = self._stripe_create_pm(cs_id, stripe_pk, billing)
         confirm_data = self._stripe_confirm(
             cs_id,
@@ -2275,6 +2295,7 @@ class GoPayCharger:
         # self._gopay_resend_otp(reference_id)
         return {
             "cs_id": cs_id,
+            "checkout_url": self.checkout_url,
             "stripe_pk": stripe_pk,
             "snap_token": snap_token,
             "reference_id": reference_id,
@@ -2507,7 +2528,7 @@ def probe_plus_trial_checkout(
     proxy: Optional[str] = None,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Create a trial checkout and inspect Stripe amount without starting GoPay."""
+    """Create a promo trial checkout and read its real Stripe amount."""
     charger = GoPayCharger(
         chatgpt_session,
         {"country_code": "0", "phone_number": "0", "pin": "0"},
@@ -2524,6 +2545,7 @@ def probe_plus_trial_checkout(
         except Exception as exc:
             raise GoPayError(f"checkout create failed: {str(exc)[:500]}") from exc
         checkout_url = charger.checkout_url or f"https://checkout.stripe.com/c/pay/{cs_id}"
+
         try:
             init_data = charger._stripe_init(cs_id, stripe_pk)
         except Exception as exc:
@@ -2540,16 +2562,16 @@ def probe_plus_trial_checkout(
 
         amount, source = _select_checkout_amount(init_data)
         checked = amount is not None
-        error_message = "" if checked else "stripe init did not expose checkout amount"
+        currency = str(init_data.get("currency") or "").upper()
         return {
             "checkout_session_id": cs_id,
             "checkout_url": checkout_url,
             "checked": checked,
-            "plus_trial_eligible": checked and amount == 0,
+            "plus_trial_eligible": bool(checked and amount == 0),
             "amount": int(amount or 0),
-            "currency": str(init_data.get("currency") or "").upper(),
+            "currency": currency,
             "source": source,
-            "error_message": error_message,
+            "error_message": "" if checked else "stripe init did not expose checkout amount",
         }
     finally:
         charger.close()

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"orchestrator/db"
+	"orchestrator/internal/manualinput"
 )
 
 func TestManualOTPParamsForJob(t *testing.T) {
@@ -84,7 +85,7 @@ func TestManualOTPSubmittedAfter(t *testing.T) {
 		paymentOTPParam:            "1234",
 		paymentOTPSubmittedAtParam: "200",
 	})
-	if !manualOTPSubmittedAfter(ctx, fresh, "job-1", paymentOTPParam, paymentOTPSubmittedAtParam, 199) {
+	if !manualinput.OTPSubmittedAfter(ctx, fresh, "job-1", paymentOTPParam, paymentOTPSubmittedAtParam, 199) {
 		t.Fatalf("expected fresh manual OTP to pass")
 	}
 	if _, ok := fresh.values[paymentOTPParam]; !ok {
@@ -95,7 +96,7 @@ func TestManualOTPSubmittedAfter(t *testing.T) {
 		paymentOTPParam:            "1234",
 		paymentOTPSubmittedAtParam: "100",
 	})
-	if manualOTPSubmittedAfter(ctx, stale, "job-1", paymentOTPParam, paymentOTPSubmittedAtParam, 101) {
+	if manualinput.OTPSubmittedAfter(ctx, stale, "job-1", paymentOTPParam, paymentOTPSubmittedAtParam, 101) {
 		t.Fatalf("expected stale manual OTP to be rejected")
 	}
 	if _, ok := stale.values[paymentOTPParam]; ok {
@@ -114,12 +115,12 @@ func newManualOTPParamStore(values map[string]string) *manualOTPParamStore {
 	return &manualOTPParamStore{values: values}
 }
 
-func (s *manualOTPParamStore) getJobParam(ctx context.Context, jobID, key string) (string, bool, error) {
+func (s *manualOTPParamStore) GetParam(ctx context.Context, jobID, key string) (string, bool, error) {
 	value, ok := s.values[key]
 	return value, ok, nil
 }
 
-func (s *manualOTPParamStore) deleteJobParam(ctx context.Context, jobID, key string) error {
+func (s *manualOTPParamStore) DeleteParam(ctx context.Context, jobID, key string) error {
 	delete(s.values, key)
 	return nil
 }

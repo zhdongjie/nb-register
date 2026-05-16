@@ -1,0 +1,72 @@
+{{- if .Values.temporal.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "temporal") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "temporal") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: {{ .Values.temporal.service.port }}
+      targetPort: grpc
+  selector:
+    {{- include "nb-register.selectorLabels" (dict "root" . "component" "temporal") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nb-register.componentFullname" (dict "root" . "component" "temporal") }}
+  labels:
+    {{- include "nb-register.componentLabels" (dict "root" . "component" "temporal") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nb-register.selectorLabels" (dict "root" . "component" "temporal") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nb-register.selectorLabels" (dict "root" . "component" "temporal") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nb-register.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: temporal
+          image: {{ include "nb-register.image" (dict "root" . "image" .Values.temporal.image) | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: 7233
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: {{ include "nb-register.postgresPort" . | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.auth.user | quote }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nb-register.appSecretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_SEEDS
+              value: {{ include "nb-register.postgresHost" . | quote }}
+            - name: DBNAME
+              value: {{ .Values.temporal.database | quote }}
+            - name: VISIBILITY_DBNAME
+              value: {{ .Values.temporal.visibilityDatabase | quote }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+          resources:
+            {{- toYaml .Values.temporal.resources | nindent 12 }}
+{{- end }}

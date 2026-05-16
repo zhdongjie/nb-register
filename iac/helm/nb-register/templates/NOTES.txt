@@ -1,0 +1,15 @@
+NB Register chart rendered.
+
+Validate:
+  helm lint {{ .Chart.Name }} -f values.local.yaml
+  helm template {{ .Release.Name }} {{ .Chart.Name }} --namespace {{ .Release.Namespace }} -f values.local.yaml >/tmp/{{ .Release.Name }}.yaml
+
+Install or upgrade with Helm 4:
+  helm upgrade --install {{ .Release.Name }} {{ .Chart.Name }} \
+    --namespace {{ .Release.Namespace }} \
+    --create-namespace \
+    --rollback-on-failure \
+    --wait=watcher \
+    --wait-for-jobs \
+    --timeout 10m \
+    -f values.local.yaml

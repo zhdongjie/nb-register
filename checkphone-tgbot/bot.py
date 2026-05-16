@@ -8,18 +8,28 @@ from typing import Callable, Optional
 
 import requests
 
-import gopay_login
+import orchestrator_client
 from checkphone import _country_code, _normalize_phone, check_phone_by_login_methods
 
 
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{4,}\d")
 CHECK_COMMAND = "/check-gopay-registered"
 LOGIN_GOPAY_COMMAND = "/login-gopay"
+CHANGE_GOPAY_PHONE_COMMAND = "/change-gopay-phone"
+SIGNUP_GOPAY_COMMAND = "/signup-gopay"
+CREATE_GOPAY_PIN_COMMAND = "/create-gopay-pin"
 GOPAY_STATUS_COMMAND = "/gopay-status"
-CLEAR_GOPAY_LOGIN_COMMAND = "/clear-gopay-login"
-COMMANDS = {"/start", "/help", CHECK_COMMAND}
+CLEAR_GOPAY_STATE_COMMAND = "/clear-gopay-state"
+GOPAY_COMMANDS = {
+    LOGIN_GOPAY_COMMAND,
+    CHANGE_GOPAY_PHONE_COMMAND,
+    SIGNUP_GOPAY_COMMAND,
+    CREATE_GOPAY_PIN_COMMAND,
+    GOPAY_STATUS_COMMAND,
+    CLEAR_GOPAY_STATE_COMMAND,
+}
+COMMANDS = {"/start", "/help", CHECK_COMMAND} | GOPAY_COMMANDS
 CHECK_COMMANDS = {CHECK_COMMAND}
-PRIVATE_COMMANDS = {LOGIN_GOPAY_COMMAND, GOPAY_STATUS_COMMAND, CLEAR_GOPAY_LOGIN_COMMAND}
 PENDING_TTL_SECONDS = int(os.environ.get("TELEGRAM_PENDING_SECONDS", "300"))
 
 
@@ -95,13 +105,16 @@ def usage_text(default_country_code: str) -> str:
     )
 
 
-def owner_usage_text(default_country_code: str) -> str:
+def gopay_usage_text(default_country_code: str) -> str:
     return (
         usage_text(default_country_code)
-        + "\n\n私有 GoPay 登录：\n"
-        f"{LOGIN_GOPAY_COMMAND} - 登录并检查余额是否 > {gopay_login.GOPAY_REQUIRED_BALANCE_RP} Rp\n"
-        f"{GOPAY_STATUS_COMMAND} - 重新检查已保存账号余额\n"
-        f"{CLEAR_GOPAY_LOGIN_COMMAND} - 清空本地登录状态"
+        + "\n\nGoPay 用户流程：\n"
+        f"{LOGIN_GOPAY_COMMAND} - 登录；未注册返回账户未注册\n"
+        f"{CHANGE_GOPAY_PHONE_COMMAND} - 换绑手机号\n"
+        f"{SIGNUP_GOPAY_COMMAND} - 注册账号\n"
+        f"{CREATE_GOPAY_PIN_COMMAND} - 创建 PIN\n"
+        f"{GOPAY_STATUS_COMMAND} - 查看当前 GoPay state\n"
+        f"{CLEAR_GOPAY_STATE_COMMAND} - 清空自己的 GoPay state"
     )
 
 
@@ -132,6 +145,24 @@ def gopay_otp_prompt(method: str = "") -> str:
     return f"已通过 PIN，等待登录 OTP{suffix}。请发送 OTP。"
 
 
+def gopay_change_phone_prompt(default_country_code: str) -> str:
+    cc = _country_code(default_country_code)
+    return (
+        "请发送要换绑的新手机号。\n"
+        "支持格式：628xxxxxxxxxx、8xxxxxxxxxx、+62 8xxxxxxxxxx\n"
+        f"当前默认区号：{cc}"
+    )
+
+
+def gopay_signup_phone_prompt(default_country_code: str) -> str:
+    cc = _country_code(default_country_code)
+    return (
+        "请发送要注册的 GoPay 手机号。\n"
+        "支持格式：628xxxxxxxxxx、8xxxxxxxxxx、+62 8xxxxxxxxxx\n"
+        f"当前默认区号：{cc}"
+    )
+
+
 def format_check_response(phone: str, country_code: str, result: dict) -> str:
     cc = _country_code(country_code)
     normalized = _normalize_phone(phone, cc)
@@ -146,17 +177,58 @@ def format_check_response(phone: str, country_code: str, result: dict) -> str:
     return f"{display_phone}\n状态：检测失败\n错误：{result.get('error') or result.get('error_message') or 'unknown error'}"
 
 
-def format_gopay_balance_response(result: dict) -> str:
-    if not result.get("success"):
-        return f"GoPay 登录/检查失败：{result.get('error') or 'unknown error'}"
-    amount = int(result.get("balance_amount") or 0)
-    currency = result.get("balance_currency") or "IDR"
-    required = int(result.get("required_balance_rp") or gopay_login.GOPAY_REQUIRED_BALANCE_RP)
-    phone = str(result.get("phone") or "").strip()
+def _response_error(resp) -> str:
+    return str(getattr(resp, "error_message", "") or "unknown error")
+
+
+def _response_success(resp) -> bool:
+    return bool(getattr(resp, "success", False))
+
+
+def format_gopay_status_response(resp) -> str:
+    if not _response_success(resp):
+        return f"GoPay state 查询失败：{_response_error(resp)}"
+    status = getattr(resp, "status", None)
+    if status is None:
+        return "GoPay state 查询失败：empty status"
+    lines = [
+        f"阶段：{getattr(status, 'stage', '') or 'idle'}",
+        f"手机号：{getattr(status, 'phone', '') or '-'}",
+        f"Token：{'有' if getattr(status, 'token_present', False) else '无'}",
+    ]
+    amount = int(getattr(status, "balance_amount", 0) or 0)
+    currency = getattr(status, "balance_currency", "") or "IDR"
+    if amount or getattr(status, "has_min_balance", False):
+        lines.append(f"余额：{amount} {currency}")
+    error = str(getattr(status, "error_message", "") or "").strip()
+    if error:
+        lines.append(f"错误：{error}")
+    return "\n".join(lines)
+
+
+def format_gopay_start_response(resp, action: str) -> str:
+    if not _response_success(resp):
+        return f"{action}失败：{_response_error(resp)}"
+    if getattr(resp, "ready", False):
+        return f"{action}完成：GoPay token 已就绪。"
+    if getattr(resp, "otp_sent", False):
+        method = str(getattr(resp, "verification_method", "") or "").strip()
+        suffix = f"（{method}）" if method else ""
+        return f"{action}已发送 OTP{suffix}。请发送 OTP。"
+    return f"{action}已提交，当前阶段：{getattr(resp, 'stage', '') or 'unknown'}"
+
+
+def format_gopay_complete_response(resp, action: str) -> str:
+    if not _response_success(resp):
+        return f"{action}失败：{_response_error(resp)}"
+    phone = str(getattr(resp, "phone", "") or "").strip()
     prefix = f"手机号：{phone}\n" if phone else ""
-    if result.get("has_required_balance"):
-        return f"{prefix}余额：{amount} {currency}\n状态：可用，余额 > {required} Rp"
-    return f"{prefix}余额：{amount} {currency}\n状态：余额不足，需要 > {required} Rp"
+    if getattr(resp, "ready", False) or getattr(resp, "pin_setup_complete", False):
+        return f"{prefix}{action}完成。"
+    if getattr(resp, "pin_setup_required", False):
+        return f"{prefix}注册完成，需要继续创建 PIN。"
+    stage = str(getattr(resp, "stage", "") or "").strip()
+    return f"{prefix}{action}已提交，当前阶段：{stage or 'unknown'}"
 
 
 class TelegramCheckPhoneBot:
@@ -168,23 +240,25 @@ class TelegramCheckPhoneBot:
         telegram_proxy: str = "",
         default_country_code: str = "+62",
         allowed_chat_ids: Optional[set[str]] = None,
-        owner_chat_ids: Optional[set[str]] = None,
         poll_timeout: int = 30,
         poll_limit: int = 20,
         checker: Callable[[str, str], dict] = check_phone_by_login_methods,
+        gopay: Optional[orchestrator_client.OrchestratorGopayClient] = None,
     ):
         self.token = token.strip()
         self.api_base = api_base.rstrip("/")
         self.telegram_proxy = telegram_proxy
         self.default_country_code = _country_code(default_country_code)
         self.allowed_chat_ids = allowed_chat_ids or set()
-        self.owner_chat_ids = owner_chat_ids or set()
         self.poll_timeout = max(1, poll_timeout)
         self.poll_limit = max(1, min(100, poll_limit))
         self.checker = checker
+        self.gopay = gopay or orchestrator_client.OrchestratorGopayClient(
+            timeout=int(os.environ.get("ORCHESTRATOR_GOPAY_TIMEOUT_SECONDS", "120"))
+        )
         self._stopping = False
         self._pending_checks: dict[tuple[int, str], float] = {}
-        self._pending_gopay_logins: dict[tuple[int, str], dict] = {}
+        self._pending_gopay_flows: dict[tuple[int, str], dict] = {}
 
     def stop(self, *_args) -> None:
         self._stopping = True
@@ -254,9 +328,6 @@ class TelegramCheckPhoneBot:
         user_id = str(user.get("id") or chat_id)
         return int(chat_id), user_id
 
-    def _is_owner(self, chat_id: int) -> bool:
-        return bool(self.owner_chat_ids) and str(chat_id) in self.owner_chat_ids
-
     def _set_pending_check(self, message: dict, chat_id: int) -> None:
         self._pending_checks[self._pending_key(message, chat_id)] = time.time() + PENDING_TTL_SECONDS
 
@@ -271,115 +342,277 @@ class TelegramCheckPhoneBot:
         self._pending_checks.pop(key, None)
         return True
 
-    def _set_pending_gopay_login(self, message: dict, chat_id: int, session: dict) -> None:
+    def _set_pending_gopay_flow(self, message: dict, chat_id: int, session: dict) -> None:
         session = dict(session)
         session["expires_at"] = time.time() + PENDING_TTL_SECONDS
-        self._pending_gopay_logins[self._pending_key(message, chat_id)] = session
+        self._pending_gopay_flows[self._pending_key(message, chat_id)] = session
 
-    def _get_pending_gopay_login(self, message: dict, chat_id: int) -> Optional[dict]:
+    def _get_pending_gopay_flow(self, message: dict, chat_id: int) -> Optional[dict]:
         key = self._pending_key(message, chat_id)
-        session = self._pending_gopay_logins.get(key)
+        session = self._pending_gopay_flows.get(key)
         if not session:
             return None
         if float(session.get("expires_at") or 0) < time.time():
-            self._pending_gopay_logins.pop(key, None)
+            self._pending_gopay_flows.pop(key, None)
             return None
         return session
 
-    def _clear_pending_gopay_login(self, message: dict, chat_id: int) -> None:
-        self._pending_gopay_logins.pop(self._pending_key(message, chat_id), None)
+    def _clear_pending_gopay_flow(self, message: dict, chat_id: int) -> None:
+        self._pending_gopay_flows.pop(self._pending_key(message, chat_id), None)
 
-    def _send_private_denied(self, chat_id: int, message_id: Optional[int]) -> None:
-        self.send_message(chat_id, "这个功能未授权。", message_id)
+    def _gopay_state_key(self, message: dict, chat_id: int) -> str:
+        _chat_id, user_id = self._pending_key(message, chat_id)
+        return f"tg:{user_id}"
 
-    def _handle_private_command(self, first: str, text: str, message: dict, chat_id: int) -> bool:
-        if first not in PRIVATE_COMMANDS:
+    def _handle_gopay_command(self, first: str, text: str, message: dict, chat_id: int) -> bool:
+        if first not in GOPAY_COMMANDS:
             return False
-        if not self._is_owner(chat_id):
-            self._send_private_denied(chat_id, message.get("message_id"))
-            return True
 
         if first == LOGIN_GOPAY_COMMAND:
-            self._set_pending_gopay_login(message, chat_id, {"step": "phone"})
+            self._set_pending_gopay_flow(message, chat_id, {"step": "auth_phone"})
             self.send_message(chat_id, gopay_login_phone_prompt(self.default_country_code), message.get("message_id"))
+            return True
+        if first == CHANGE_GOPAY_PHONE_COMMAND:
+            self._set_pending_gopay_flow(message, chat_id, {"step": "change_phone"})
+            self.send_message(chat_id, gopay_change_phone_prompt(self.default_country_code), message.get("message_id"))
+            return True
+        if first == SIGNUP_GOPAY_COMMAND:
+            self._set_pending_gopay_flow(message, chat_id, {"step": "signup_phone"})
+            self.send_message(chat_id, gopay_signup_phone_prompt(self.default_country_code), message.get("message_id"))
+            return True
+        if first == CREATE_GOPAY_PIN_COMMAND:
+            self._set_pending_gopay_flow(message, chat_id, {"step": "create_pin_pin"})
+            self.send_message(chat_id, gopay_pin_prompt(), message.get("message_id"))
             return True
         if first == GOPAY_STATUS_COMMAND:
             self.send_chat_action(chat_id)
-            result = gopay_login.check_ready_account()
-            self.send_message(chat_id, format_gopay_balance_response(result), message.get("message_id"))
+            try:
+                resp = self.gopay.status(self._gopay_state_key(message, chat_id))
+                self.send_message(chat_id, format_gopay_status_response(resp), message.get("message_id"))
+            except Exception as e:
+                self.send_message(chat_id, f"GoPay state 查询失败：{_redact_token(e)}", message.get("message_id"))
             return True
-        if first == CLEAR_GOPAY_LOGIN_COMMAND:
-            self._clear_pending_gopay_login(message, chat_id)
-            gopay_login.clear_state()
-            self.send_message(chat_id, "已清空本地 GoPay 登录状态。", message.get("message_id"))
+        if first == CLEAR_GOPAY_STATE_COMMAND:
+            self._clear_pending_gopay_flow(message, chat_id)
+            self.send_chat_action(chat_id)
+            try:
+                resp = self.gopay.clear_state(self._gopay_state_key(message, chat_id))
+                if _response_success(resp):
+                    self.send_message(chat_id, "已清空你的 GoPay state。", message.get("message_id"))
+                else:
+                    self.send_message(chat_id, f"清空 GoPay state 失败：{_response_error(resp)}", message.get("message_id"))
+            except Exception as e:
+                self.send_message(chat_id, f"清空 GoPay state 失败：{_redact_token(e)}", message.get("message_id"))
             return True
         return False
 
-    def _handle_pending_gopay_login(self, text: str, message: dict, chat_id: int) -> bool:
-        session = self._get_pending_gopay_login(message, chat_id)
+    def _call_orchestrator(self, chat_id: int, message_id: Optional[int], fn: Callable[[], object]):
+        try:
+            self.send_chat_action(chat_id)
+            return fn()
+        except Exception as e:
+            self.send_message(chat_id, f"GoPay 编排调用失败：{_redact_token(e)}", message_id)
+            return None
+
+    def _handle_pending_gopay_flow(self, text: str, message: dict, chat_id: int) -> bool:
+        session = self._get_pending_gopay_flow(message, chat_id)
         if not session:
             return False
-        if not self._is_owner(chat_id):
-            self._clear_pending_gopay_login(message, chat_id)
-            self._send_private_denied(chat_id, message.get("message_id"))
-            return True
 
         step = session.get("step")
-        if step == "phone":
+        state_key = self._gopay_state_key(message, chat_id)
+        message_id = message.get("message_id")
+
+        if step in {"auth_phone", "signup_phone", "change_phone"}:
             request = parse_check_text(text, self.default_country_code)
             if request is None:
-                self._set_pending_gopay_login(message, chat_id, {"step": "phone"})
-                self.send_message(chat_id, gopay_login_phone_prompt(self.default_country_code), message.get("message_id"))
+                self._set_pending_gopay_flow(message, chat_id, session)
+                if step == "change_phone":
+                    self.send_message(chat_id, gopay_change_phone_prompt(self.default_country_code), message_id)
+                elif step == "signup_phone":
+                    self.send_message(chat_id, gopay_signup_phone_prompt(self.default_country_code), message_id)
+                else:
+                    self.send_message(chat_id, gopay_login_phone_prompt(self.default_country_code), message_id)
                 return True
-            self._set_pending_gopay_login(
+            next_step = {
+                "auth_phone": "auth_pin",
+                "signup_phone": "signup_pin",
+                "change_phone": "change_pin",
+            }[step]
+            self._set_pending_gopay_flow(
                 message,
                 chat_id,
-                {"step": "pin", "phone": request.phone, "country_code": request.country_code},
+                {"step": next_step, "phone": request.phone, "country_code": request.country_code},
             )
-            self.send_message(chat_id, gopay_pin_prompt(), message.get("message_id"))
+            self.send_message(chat_id, gopay_pin_prompt(), message_id)
             return True
 
-        if step == "pin":
+        if step in {"auth_pin", "signup_pin", "change_pin", "create_pin_pin"}:
             pin = re.sub(r"\D", "", text)
             if not pin:
-                self._set_pending_gopay_login(message, chat_id, session)
-                self.send_message(chat_id, gopay_pin_prompt(), message.get("message_id"))
+                self._set_pending_gopay_flow(message, chat_id, session)
+                self.send_message(chat_id, gopay_pin_prompt(), message_id)
                 return True
-            self.send_chat_action(chat_id)
-            result = gopay_login.start_login(
-                str(session.get("phone") or ""),
-                pin,
-                str(session.get("country_code") or self.default_country_code),
+
+            if step == "auth_pin":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.auth_start(
+                        state_key,
+                        phone=str(session.get("phone") or ""),
+                        country_code=str(session.get("country_code") or self.default_country_code),
+                        pin=pin,
+                    ),
+                )
+                if resp is None:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    return True
+                if _response_success(resp) and getattr(resp, "otp_sent", False):
+                    self._set_pending_gopay_flow(
+                        message,
+                        chat_id,
+                        {
+                            "step": "auth_otp",
+                            "pin": pin,
+                            "phone": session.get("phone", ""),
+                            "country_code": session.get("country_code", self.default_country_code),
+                        },
+                    )
+                else:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                self.send_message(chat_id, format_gopay_start_response(resp, "登录"), message_id)
+                return True
+
+            if step == "signup_pin":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.signup_start(
+                        state_key,
+                        phone=str(session.get("phone") or ""),
+                        name="",
+                        email="",
+                        country_code=str(session.get("country_code") or self.default_country_code),
+                    ),
+                )
+                if resp is None:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    return True
+                if _response_success(resp) and getattr(resp, "otp_sent", False):
+                    self._set_pending_gopay_flow(message, chat_id, {"step": "signup_otp", "pin": pin})
+                else:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                self.send_message(chat_id, format_gopay_start_response(resp, "注册"), message_id)
+                return True
+
+            if step == "change_pin":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.change_phone_start(
+                        state_key,
+                        new_phone=str(session.get("phone") or ""),
+                        pin=pin,
+                    ),
+                )
+                if resp is None:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    return True
+                if _response_success(resp) and getattr(resp, "otp_sent", False):
+                    self._set_pending_gopay_flow(message, chat_id, {"step": "change_otp"})
+                else:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                self.send_message(chat_id, format_gopay_start_response(resp, "换绑"), message_id)
+                return True
+
+            resp = self._call_orchestrator(
+                chat_id,
+                message_id,
+                lambda: self.gopay.create_pin_start(state_key, pin=pin),
             )
-            if not result.get("success"):
-                self._clear_pending_gopay_login(message, chat_id)
-                self.send_message(chat_id, format_gopay_balance_response(result), message.get("message_id"))
+            if resp is None:
+                self._clear_pending_gopay_flow(message, chat_id)
                 return True
-            if result.get("ready"):
-                self._clear_pending_gopay_login(message, chat_id)
-                self.send_message(chat_id, format_gopay_balance_response(result), message.get("message_id"))
-                return True
-            if result.get("otp_sent"):
-                self._set_pending_gopay_login(message, chat_id, {"step": "otp"})
-                self.send_message(chat_id, gopay_otp_prompt(result.get("verification_method", "")), message.get("message_id"))
-                return True
-            self._clear_pending_gopay_login(message, chat_id)
-            self.send_message(chat_id, "GoPay 登录状态未知。", message.get("message_id"))
+            if _response_success(resp) and getattr(resp, "otp_sent", False):
+                self._set_pending_gopay_flow(message, chat_id, {"step": "create_pin_otp", "pin": pin})
+            else:
+                self._clear_pending_gopay_flow(message, chat_id)
+            self.send_message(chat_id, format_gopay_start_response(resp, "创建 PIN"), message_id)
             return True
 
-        if step == "otp":
+        if step in {"auth_otp", "signup_otp", "signup_pin_otp", "change_otp", "create_pin_otp"}:
             otp = re.sub(r"\D", "", text)
             if not otp:
-                self._set_pending_gopay_login(message, chat_id, {"step": "otp"})
-                self.send_message(chat_id, gopay_otp_prompt(), message.get("message_id"))
+                self._set_pending_gopay_flow(message, chat_id, session)
+                self.send_message(chat_id, gopay_otp_prompt(), message_id)
                 return True
-            self.send_chat_action(chat_id)
-            result = gopay_login.complete_login(otp)
-            self._clear_pending_gopay_login(message, chat_id)
-            self.send_message(chat_id, format_gopay_balance_response(result), message.get("message_id"))
+
+            pin = str(session.get("pin") or "")
+            if step == "auth_otp":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.auth_complete(state_key, otp=otp, pin=pin),
+                )
+                if resp is None:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    return True
+                self._clear_pending_gopay_flow(message, chat_id)
+                self.send_message(chat_id, format_gopay_complete_response(resp, "登录"), message_id)
+                return True
+
+            if step == "signup_otp":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.signup_complete(state_key, otp=otp),
+                )
+                if resp is None:
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    return True
+                if _response_success(resp) and getattr(resp, "pin_setup_required", False):
+                    start_resp = self._call_orchestrator(
+                        chat_id,
+                        message_id,
+                        lambda: self.gopay.create_pin_start(state_key, pin=pin),
+                    )
+                    if start_resp is not None and _response_success(start_resp) and getattr(start_resp, "otp_sent", False):
+                        self._set_pending_gopay_flow(message, chat_id, {"step": "signup_pin_otp", "pin": pin})
+                        self.send_message(chat_id, format_gopay_start_response(start_resp, "创建 PIN"), message_id)
+                        return True
+                    self._clear_pending_gopay_flow(message, chat_id)
+                    self.send_message(chat_id, format_gopay_start_response(start_resp, "创建 PIN") if start_resp else "创建 PIN 失败。", message_id)
+                    return True
+                self._clear_pending_gopay_flow(message, chat_id)
+                self.send_message(chat_id, format_gopay_complete_response(resp, "注册"), message_id)
+                return True
+
+            if step in {"signup_pin_otp", "create_pin_otp"}:
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.create_pin_complete(state_key, otp=otp, pin=pin),
+                )
+                self._clear_pending_gopay_flow(message, chat_id)
+                if resp is not None:
+                    self.send_message(chat_id, format_gopay_complete_response(resp, "创建 PIN"), message_id)
+                return True
+
+            resp = self._call_orchestrator(
+                chat_id,
+                message_id,
+                lambda: self.gopay.change_phone_complete(state_key, otp=otp),
+            )
+            self._clear_pending_gopay_flow(message, chat_id)
+            if resp is not None:
+                if _response_success(resp):
+                    self.send_message(chat_id, "换绑完成。", message_id)
+                else:
+                    self.send_message(chat_id, f"换绑失败：{_response_error(resp)}", message_id)
             return True
 
-        self._clear_pending_gopay_login(message, chat_id)
+        self._clear_pending_gopay_flow(message, chat_id)
         return False
 
     def handle_update(self, update: dict) -> None:
@@ -400,14 +633,14 @@ class TelegramCheckPhoneBot:
         first = _strip_bot_mention(text.split(maxsplit=1)[0])
         if first in {"/start", "/help"}:
             print(f"[checkphone-tgbot] help chat_id={chat_id}", flush=True)
-            help_text = owner_usage_text(self.default_country_code) if self._is_owner(chat_id) else usage_text(self.default_country_code)
+            help_text = gopay_usage_text(self.default_country_code)
             self.send_message(chat_id, help_text, message.get("message_id"))
             return
 
-        if self._handle_private_command(first, text, message, chat_id):
+        if self._handle_gopay_command(first, text, message, chat_id):
             return
 
-        if self._handle_pending_gopay_login(text, message, chat_id):
+        if self._handle_pending_gopay_flow(text, message, chat_id):
             return
 
         if first in CHECK_COMMANDS:
@@ -477,9 +710,6 @@ def main() -> int:
         telegram_proxy=os.environ.get("TELEGRAM_PROXY", ""),
         default_country_code=os.environ.get("GOPAY_COUNTRY_CODE", "62"),
         allowed_chat_ids=parse_allowed_chat_ids(os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")),
-        owner_chat_ids=parse_allowed_chat_ids(
-            os.environ.get("TELEGRAM_OWNER_CHAT_IDS", "") or os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
-        ),
         poll_timeout=int(os.environ.get("TELEGRAM_POLL_TIMEOUT_SECONDS", "30")),
         poll_limit=int(os.environ.get("TELEGRAM_POLL_LIMIT", "20")),
     )

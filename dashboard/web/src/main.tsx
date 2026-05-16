@@ -61,6 +61,13 @@ type Account = {
   updated_at: number;
 };
 
+type CheckoutLinkResponse = {
+  success: boolean;
+  error_message?: string;
+  checkout_url: string;
+  checkout_session_id: string;
+};
+
 type Job = {
   job_id: string;
   account_id: string;
@@ -137,6 +144,19 @@ type InboxResponse = {
   ban_count: number;
 };
 
+type LatestOtp = {
+  otp: string;
+  subject: string;
+  received_at_unix: number;
+};
+
+type AccountMailboxContext = {
+  account_email: string;
+  primary_email: string;
+  is_split: boolean;
+  known: boolean;
+};
+
 type Step = {
   step_name: string;
   status: string;
@@ -180,8 +200,8 @@ const accountStatusLabels: DisplayLabelMap = {
 const jobStatusLabels: DisplayLabelMap = {
   RUNNING: '运行中',
   SUCCEEDED: '成功',
-  FAILED_RETRYABLE: '失败，可重试',
-  FAILED_RECOVERABLE: '失败，可恢复',
+  FAILED_RETRYABLE: '失败',
+  FAILED_RECOVERABLE: '失败，需处理',
   FAILED_FINAL: '最终失败'
 };
 
@@ -203,7 +223,7 @@ const actionLabels: DisplayLabelMap = {
   LOGIN_SESSION: '登录取 Token',
   ACTIVATE: '激活支付',
   AUTOPAY: '自动支付',
-  GOPAY_CYCLE: 'GoPay 换绑',
+  GOPAY_APP: 'GoPay App',
   REGISTER_AND_ACTIVATE: '注册并激活',
   PROBE_ACCOUNT: '探测账号',
   REGISTER_MAILBOX: '注册 Outlook 邮箱',
@@ -211,12 +231,31 @@ const actionLabels: DisplayLabelMap = {
 };
 
 const stepLabels: DisplayLabelMap = {
+  register_account: '注册账号',
+  login_session: '登录取 Token',
+  ensure_logon: '确认登录',
   create_email: '创建邮箱',
   wait_outlook_otp: '等待 Outlook OTP',
-  gopay_cycle_login: 'GoPay 登录',
-  gopay_cycle_change_phone: 'GoPay 换绑',
+  gopay_app_login: 'GoPay 登录',
+  gopay_app_change_phone: 'GoPay 换绑',
+  gopay_app_change_phone_start: '开始换绑',
+  gopay_app_change_phone_sms_wait: '等待换绑短信',
+  gopay_app_change_phone_retry: '重发换绑短信',
+  gopay_app_change_phone_cancel: '取消换绑号码',
+  gopay_app_change_phone_complete: '完成换绑',
+  gopay_app_deactivate: 'GoPay 注销',
+  gopay_app_deactivate_start: '开始注销',
+  gopay_app_deactivate_sms_wait: '等待注销短信',
+  gopay_app_deactivate_sms_finish: '结束注销号码',
+  gopay_app_deactivate_complete: '完成注销',
+  gopay_app_signup: 'GoPay 注册',
+  gopay_app_create_pin: '创建 GoPay PIN',
   gopay_login: 'GoPay 登录',
   gopay_payment: 'GoPay 支付',
+  probe_plus_trial: '探测 0 元资格',
+  probe_tier: '探测套餐',
+  register_mailbox: '注册邮箱',
+  mailbox_oauth: '邮箱 OAuth',
   oauth_exchange: '交换 OAuth Token',
   captcha: '验证码/风控验证'
 };
@@ -294,14 +333,42 @@ function App() {
     }
   }
 
-  async function runGoPayCycle() {
+  async function createCheckoutLink(account: Account) {
     setBusy(true);
     try {
-      const resp = await api<any>('/api/workflows/gopay-cycle', { method: 'POST', body: '{}' });
+      const resp = await api<CheckoutLinkResponse>(`/api/accounts/${account.account_id}/checkout-link`, { method: 'POST', body: '{}' });
+      if (resp.error_message || !resp.checkout_url) {
+        setToast({ kind: 'error', text: resp.error_message || '提链失败' });
+        return;
+      }
+      const copied = await copyText(resp.checkout_url);
+      setToast({
+        kind: copied ? 'ok' : 'error',
+        text: copied ? `提链已复制: ${short(resp.checkout_session_id || 'ok')}` : '提链成功，但浏览器拒绝复制'
+      });
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyField(label: string, value: string) {
+    const copied = await copyText(value);
+    setToast({
+      kind: copied ? 'ok' : 'error',
+      text: copied ? `${label}已复制` : `${label}复制失败，浏览器拒绝访问剪贴板`
+    });
+  }
+
+  async function runGoPayApp() {
+    setBusy(true);
+    try {
+      const resp = await api<any>('/api/workflows/gopay-app', { method: 'POST', body: '{}' });
       if (resp.error_message) {
         setToast({ kind: 'error', text: resp.error_message });
       } else {
-        setToast({ kind: 'ok', text: `GoPay 换绑已提交: ${resp.job_id || 'ok'}` });
+        setToast({ kind: 'ok', text: `GoPay App 已提交: ${resp.job_id || 'ok'}` });
         await refresh();
       }
     } catch (err) {
@@ -326,23 +393,6 @@ function App() {
     }
   }
 
-  async function retryJob(job: Job) {
-    setBusy(true);
-    try {
-      const resp = await api<any>(`/api/jobs/${job.job_id}/retry`, { method: 'POST', body: '{}' });
-      if (resp.error_message) {
-        setToast({ kind: 'error', text: resp.error_message });
-      } else {
-        setToast({ kind: 'ok', text: `流程已重试: ${resp.job_id || 'ok'}` });
-        await refresh();
-      }
-    } catch (err) {
-      setToast({ kind: 'error', text: errorText(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function submitJobOtp(job: Job, otp: string) {
     try {
       const resp = await api<{ success: boolean; job_id: string; error_message?: string }>(`/api/jobs/${job.job_id}/otp`, {
@@ -354,24 +404,6 @@ function App() {
         return;
       }
       setToast({ kind: 'ok', text: `OTP 已提交: ${short(resp.job_id || job.job_id)}` });
-      await refresh();
-    } catch (err) {
-      setToast({ kind: 'error', text: errorText(err) });
-      throw err;
-    }
-  }
-
-  async function submitPaymentConfirmation(job: Job) {
-    try {
-      const resp = await api<{ success: boolean; job_id: string; error_message?: string }>(`/api/jobs/${job.job_id}/payment-confirm`, {
-        method: 'POST',
-        body: '{}'
-      });
-      if (resp.error_message || !resp.success) {
-        setToast({ kind: 'error', text: resp.error_message || '支付确认提交失败' });
-        return;
-      }
-      setToast({ kind: 'ok', text: `支付确认已提交: ${short(resp.job_id || job.job_id)}` });
       await refresh();
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
@@ -432,7 +464,11 @@ function App() {
       const kind = resp.failed_count > 0 ? 'error' : 'ok';
       const banText = resp.ban_count > 0 ? `，封禁 ${resp.ban_count}` : '';
       const scope = targetEmail ? `${showSecrets ? targetEmail : maskEmail(targetEmail)} ` : '';
-      setToast({ kind, text: `${scope}收信完成：${resp.fetched_count}/${resp.mailbox_count} 个邮箱，${resp.message_count} 封邮件${banText}` });
+      const latestOtp = targetEmail ? latestOtpForEmail(resp, mailboxes, targetEmail) : null;
+      const otpText = latestOtp
+        ? `，OTP ${showSecrets ? latestOtp.otp : mask(latestOtp.otp)}，${formatUnix(latestOtp.received_at_unix)}`
+        : '';
+      setToast({ kind, text: `${scope}收信完成：${resp.fetched_count}/${resp.mailbox_count} 个邮箱，${resp.message_count} 封邮件${otpText}${banText}` });
       await refresh();
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
@@ -557,12 +593,12 @@ function App() {
   const selectedMailboxInbox = selectedMailbox ? inboxResultForMailbox(inboxResponse, selectedMailbox.email_address) : undefined;
   const selectedMailboxBans = selectedMailbox ? bansForMailbox(inboxResponse, selectedMailbox.email_address) : [];
   const selectedMailboxAliases = selectedMailbox ? aliasesForMailbox(mailboxes, selectedMailbox) : [];
+  const selectedAccountMailboxContext = selectedAccount ? mailboxContextForEmail(mailboxes, selectedAccount.email) : null;
   const mailboxRegisterJobs = jobs.filter((job) => job.action === 'REGISTER_MAILBOX');
   const runningMailboxRegisterCount = mailboxRegisterJobs.filter((job) => job.status === 'RUNNING').length;
-  const gopayCycleJobs = jobs.filter((job) => job.action === 'GOPAY_CYCLE');
-  const runningGoPayCycleCount = gopayCycleJobs.filter((job) => job.status === 'RUNNING').length;
-  const latestGoPayCycleJob = gopayCycleJobs[0];
-  const retryableFailureCount = jobs.filter((job) => canRetryJob(job)).length;
+  const gopayAppJobs = jobs.filter((job) => job.action === 'GOPAY_APP');
+  const runningGoPayAppCount = gopayAppJobs.filter((job) => job.status === 'RUNNING').length;
+  const latestGoPayAppJob = gopayAppJobs[0];
   const latestMailboxRegisterJob = mailboxRegisterJobs[0];
   const panelState: PanelState = {
     loading: busy && accounts.length === 0 && jobs.length === 0 && mailboxes.length === 0,
@@ -588,7 +624,7 @@ function App() {
       <section className="appFrame">
         <nav className="navRail" aria-label="主导航">
           <NavItem active={activeView === 'accounts'} icon={<Database size={17} />} label="账号" count={accounts.length} countLabel="全部账号数" onClick={() => openView('accounts')} />
-          <NavItem active={activeView === 'gopay'} icon={<RefreshCcw size={17} />} label="GoPay" count={runningGoPayCycleCount} countLabel="运行中的 GoPay 换绑任务" onClick={() => openView('gopay')} />
+          <NavItem active={activeView === 'gopay'} icon={<RefreshCcw size={17} />} label="GoPay" count={runningGoPayAppCount} countLabel="运行中的 GoPay App 任务" onClick={() => openView('gopay')} />
           <NavItem active={activeView === 'mailboxes'} icon={<Inbox size={17} />} label="邮箱管理" count={allocatableMailboxCount} countLabel="可分配主邮箱数" onClick={() => openView('mailboxes')} />
           <NavItem active={activeView === 'mailboxRegistration'} icon={<Play size={17} />} label="邮箱注册" count={runningMailboxRegisterCount} countLabel="运行中的邮箱注册任务" onClick={() => openView('mailboxRegistration')} />
           <NavItem active={activeView === 'jobs'} icon={<ListChecks size={17} />} label="工作流" count={runningJobCount} countLabel="运行中的工作流任务" onClick={() => openView('jobs')} />
@@ -601,7 +637,6 @@ function App() {
               <Metric label="已激活" value={accounts.filter((a) => a.status === 'ACTIVATED').length} hint="可进入后续使用的账号" icon={<Zap />} />
               <Metric label="可分配邮箱" value={allocatableMailboxCount} hint="AVAILABLE 且 OAuth 已授权" icon={<Mail />} />
               <Metric label="运行中任务" value={runningJobCount} hint="正在执行的工作流" icon={<Activity />} />
-              <Metric label="可重试失败" value={retryableFailureCount} hint="失败且可直接重试" icon={<RefreshCcw />} />
             </section>
           )}
 
@@ -643,8 +678,9 @@ function App() {
                   onRegister={(account) => runAccountWorkflow('注册账号', '/api/workflows/register', account)}
                   onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
                   onActivate={(account) => runAccountWorkflow('激活支付', '/api/workflows/activate', account)}
-                  onAutopay={(account) => runAccountWorkflow('自动支付', '/api/workflows/autopay', account)}
-                  onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
+	                  onAutopay={(account) => runAccountWorkflow('自动支付', '/api/workflows/autopay', account)}
+	                  onCreateCheckoutLink={createCheckoutLink}
+	                  onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
                   onRegisterActivate={(account) => runAccountWorkflow('注册并激活', '/api/workflows/register-and-activate', account)}
                   onRefreshAccessToken={refreshAccountAccessToken}
                   onDelete={deleteAccount}
@@ -655,7 +691,7 @@ function App() {
                 <PanelHeader title="最近工作流" icon={<Activity size={16} />}>
                   <Button className="secondaryButton" onClick={() => openView('jobs')}>查看全部</Button>
                 </PanelHeader>
-                <JobCompactList jobs={jobs.slice(0, 8)} selected={selectedJob?.job_id} busy={busy} onSelect={selectJob} onRetry={retryJob} />
+                <JobCompactList jobs={jobs.slice(0, 8)} selected={selectedJob?.job_id} onSelect={selectJob} />
               </div>
             </section>
           )}
@@ -663,23 +699,23 @@ function App() {
           {activeView === 'gopay' && (
             <section className="workspace jobsWorkspace">
               <div className="panel jobsPanel">
-                <PanelHeader title="GoPay 换绑" icon={<RefreshCcw size={16} />}>
+                <PanelHeader title="GoPay App" icon={<RefreshCcw size={16} />}>
                   <div className="headerControls">
-                    <Button className="primaryButton" onClick={runGoPayCycle} disabled={busy || runningGoPayCycleCount > 0}>
-                      <RefreshCcw size={16} /> {runningGoPayCycleCount > 0 ? '换绑中' : '启动换绑'}
+                    <Button className="primaryButton" onClick={runGoPayApp} disabled={busy || runningGoPayAppCount > 0}>
+                      <RefreshCcw size={16} /> {runningGoPayAppCount > 0 ? '执行中' : '启动'}
                     </Button>
                     <Button className="secondaryButton" onClick={() => openView('jobs')}>
                       <ListChecks size={14} /> 全部工作流
                     </Button>
                   </div>
                 </PanelHeader>
-                <PanelIntro text="GoPay 换绑流程不关联账号；当前只执行登录和换绑，注销、注册、建 PIN 暂不执行。" />
+                <PanelIntro text="登录、换绑、注销、注册和建 PIN 按工作流顺序执行。" />
                 <div className="mailboxRegisterBody">
-                  <RegistrationSummary job={latestGoPayCycleJob} runningCount={runningGoPayCycleCount} />
-                  {latestGoPayCycleJob && canSubmitOtp(latestGoPayCycleJob) && (
-                    <OtpSubmitter job={latestGoPayCycleJob} onSubmit={submitJobOtp} />
+                  <RegistrationSummary job={latestGoPayAppJob} runningCount={runningGoPayAppCount} />
+                  {latestGoPayAppJob && canSubmitOtp(latestGoPayAppJob) && (
+                    <OtpSubmitter job={latestGoPayAppJob} onSubmit={submitJobOtp} />
                   )}
-                  <JobTable jobs={gopayCycleJobs.slice(0, 20)} selected={selectedJob?.job_id} busy={busy} emptyText="暂无 GoPay 换绑任务" onSelect={selectJob} onRetry={retryJob} />
+                  <JobTable jobs={gopayAppJobs.slice(0, 20)} selected={selectedJob?.job_id} emptyText="暂无 GoPay App 任务" onSelect={selectJob} />
                 </div>
               </div>
             </section>
@@ -747,7 +783,7 @@ function App() {
 	                      <ListChecks size={14} /> 全部工作流
 	                    </Button>
 	                  </div>
-	                  <JobTable jobs={mailboxRegisterJobs.slice(0, 20)} selected={selectedJob?.job_id} busy={busy} emptyText="暂无邮箱注册任务" onSelect={selectJob} onRetry={retryJob} />
+	                  <JobTable jobs={mailboxRegisterJobs.slice(0, 20)} selected={selectedJob?.job_id} emptyText="暂无邮箱注册任务" onSelect={selectJob} />
 	                </div>
 	              </div>
 	            </section>
@@ -761,7 +797,7 @@ function App() {
                     {jobStatusOptions.map((s) => <NativeSelectOption key={s} value={s}>{s ? statusText(s) : '全部状态'}</NativeSelectOption>)}
                   </NativeSelect>
                 </PanelHeader>
-                <JobTable jobs={jobs} selected={selectedJob?.job_id} busy={busy} emptyText="暂无工作流任务" onSelect={selectJob} onRetry={retryJob} />
+                <JobTable jobs={jobs} selected={selectedJob?.job_id} emptyText="暂无工作流任务" onSelect={selectJob} />
               </div>
             </section>
           )}
@@ -774,10 +810,15 @@ function App() {
             account={selectedAccount}
             showSecrets={showSecrets}
             busy={busy}
+            inboxLoading={inboxLoading}
+            mailboxContext={selectedAccountMailboxContext}
+            onCopy={copyField}
+            onFetchInbox={fetchMailboxInbox}
             onSessionSave={(account, sessionToken) => updateAccountAuth(account, { session_token: sessionToken })}
             onAccessSave={(account, accessToken) => updateAccountAuth(account, { access_token: accessToken })}
-            onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
-            onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
+	            onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
+	            onCreateCheckoutLink={createCheckoutLink}
+	            onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
             onRefreshAccessToken={refreshAccountAccessToken}
             refreshingAccessToken={refreshingAccessTokenIds.has(selectedAccount.account_id)}
           />
@@ -788,10 +829,8 @@ function App() {
         {selectedJob && (
           <JobDetails
             job={selectedJob}
-            busy={busy}
-            onJobRetry={retryJob}
+            onCopy={copyField}
             onOtpSubmit={submitJobOtp}
-            onPaymentConfirm={submitPaymentConfirmation}
           />
         )}
       </DetailDrawer>
@@ -805,6 +844,7 @@ function App() {
             bans={selectedMailboxBans}
             aliases={selectedMailboxAliases}
             inboxLoading={inboxLoading}
+            onCopy={copyField}
             onFetchInbox={fetchMailboxInbox}
             onDelete={deleteMailbox}
           />
@@ -908,14 +948,19 @@ function DetailDrawer({ open, title, onClose, children }: {
   );
 }
 
-function AccountDetails({ account, showSecrets, busy, refreshingAccessToken, onSessionSave, onAccessSave, onProbeAccount, onLogin, onRefreshAccessToken }: {
+function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAccessToken, mailboxContext, onCopy, onFetchInbox, onSessionSave, onAccessSave, onProbeAccount, onCreateCheckoutLink, onLogin, onRefreshAccessToken }: {
   account: Account;
   showSecrets: boolean;
   busy: boolean;
+  inboxLoading: boolean;
   refreshingAccessToken: boolean;
+  mailboxContext: AccountMailboxContext | null;
+  onCopy: (label: string, value: string) => void;
+  onFetchInbox: (emailAddress?: string) => Promise<void>;
   onSessionSave: (account: Account, sessionToken: string) => Promise<void>;
   onAccessSave: (account: Account, accessToken: string) => Promise<void>;
   onProbeAccount: (account: Account) => void;
+  onCreateCheckoutLink: (account: Account) => Promise<void>;
   onLogin: (account: Account) => void;
   onRefreshAccessToken: (account: Account) => Promise<void>;
 }) {
@@ -938,100 +983,75 @@ function AccountDetails({ account, showSecrets, busy, refreshingAccessToken, onS
             <Button {...buttonHint(probeAccountHint(account))} disabled={busy || !canProbeAccount(account)} onClick={() => onProbeAccount(account)}>
               <Search size={14} /> 探测账号
             </Button>
+            <Button {...buttonHint('创建 checkout 链接并复制到剪贴板')} disabled={busy || !canCreateCheckoutLink(account)} onClick={() => void onCreateCheckoutLink(account)}>
+              <Copy size={14} /> 提链
+            </Button>
+            <Button {...buttonHint(accountInboxHint(account.email, mailboxContext, showSecrets))} disabled={busy || inboxLoading || !account.email} onClick={() => void onFetchInbox(account.email)}>
+              <Inbox size={14} /> {inboxLoading ? '拉取中' : '拉取 OTP'}
+            </Button>
           </div>
         </div>
-        <KV label="ID" value={account.account_id} mono />
-        <KV label="状态" value={statusText(account.status)} copyValue={account.status || '-'} />
+        <KV label="ID" value={account.account_id} mono onCopy={onCopy} />
+        <KV label="状态" value={statusText(account.status)} copyValue={account.status || '-'} onCopy={onCopy} />
         <KV label="Tier" value={tierText(account.tier)} />
         <KV label="Plus" value={plusText(account)} />
-        <KV label="邮箱" value={showSecrets ? account.email : maskEmail(account.email)} copyValue={account.email} copyDisabled={!account.email || !showSecrets} copyHint="显示敏感信息后复制邮箱" />
-        <KV label="密码" value={showSecrets ? account.password : mask(account.password)} copyValue={account.password} copyDisabled={!account.password || !showSecrets} copyHint="显示敏感信息后复制密码" mono />
-        <TokenEditor label="Session" field="session_token" account={account} showSecrets={showSecrets} onSave={onSessionSave} />
-        <TokenEditor label="Access" field="access_token" account={account} showSecrets={showSecrets} onSave={onAccessSave} />
-        <KV label="创建时间" value={formatUnix(account.created_at)} />
-        <KV label="更新时间" value={formatUnix(account.updated_at)} />
-        <KV label="错误" value={account.error_message || '-'} />
+        <KV label="邮箱" value={showSecrets ? account.email : maskEmail(account.email)} copyValue={account.email} copyDisabled={!account.email} masked={!showSecrets} onCopy={onCopy} />
+        <KV label="密码" value={showSecrets ? account.password : mask(account.password)} copyValue={account.password} copyDisabled={!account.password} masked={!showSecrets} mono onCopy={onCopy} />
+        <TokenEditor label="Session" field="session_token" account={account} showSecrets={showSecrets} onCopy={onCopy} onSave={onSessionSave} />
+        <TokenEditor label="Access" field="access_token" account={account} showSecrets={showSecrets} onCopy={onCopy} onSave={onAccessSave} />
+        <KV label="创建时间" value={formatUnix(account.created_at)} onCopy={onCopy} />
+        <KV label="更新时间" value={formatUnix(account.updated_at)} onCopy={onCopy} />
+        <KV label="错误" value={account.error_message || '-'} onCopy={onCopy} />
       </section>
     </div>
   );
 }
 
-function JobDetails({ job, busy, onJobRetry, onOtpSubmit, onPaymentConfirm }: {
+function JobDetails({ job, onCopy, onOtpSubmit }: {
   job: Job;
-  busy: boolean;
-  onJobRetry: (job: Job) => void;
+  onCopy: (label: string, value: string) => void;
   onOtpSubmit: (job: Job, otp: string) => Promise<void>;
-  onPaymentConfirm: (job: Job) => Promise<void>;
 }) {
   return (
     <div className="details">
       <section>
         <div className="sectionTitle">
           <h3>工作流</h3>
-          {canRetryJob(job) && (
-            <Button disabled={busy} onClick={() => onJobRetry(job)}>
-              <RefreshCcw size={14} /> 重试
-            </Button>
-          )}
         </div>
-        <KV label="Job" value={job.job_id} mono />
-        <KV label="对象" value={job.account_id || '-'} mono />
-        <KV label="动作" value={actionText(job.action)} copyValue={job.action} />
-        <KV label="状态" value={statusText(job.status)} copyValue={job.status} />
-        <KV label="当前步骤" value={stepText(job.last_step)} copyValue={job.last_step || '-'} />
-        <KV label="更新时间" value={formatJobTime(job.updated_at)} />
-        <KV label="错误" value={job.error_message || '-'} />
+        <KV label="Job" value={job.job_id} mono onCopy={onCopy} />
+        <KV label="对象" value={job.account_id || '-'} mono onCopy={onCopy} />
+        <KV label="动作" value={actionText(job.action)} copyValue={job.action} onCopy={onCopy} />
+        <KV label="状态" value={statusText(job.status)} copyValue={job.status} onCopy={onCopy} />
+        <KV label="当前步骤" value={stepText(job.last_step)} copyValue={job.last_step || '-'} onCopy={onCopy} />
+        <KV label="更新时间" value={formatJobTime(job.updated_at)} onCopy={onCopy} />
+        <KV label="错误" value={job.error_message || '-'} onCopy={onCopy} />
         {canSubmitOtp(job) && <OtpSubmitter job={job} onSubmit={onOtpSubmit} />}
-        {canConfirmManualPayment(job) && <PaymentConfirmationSubmitter job={job} onSubmit={onPaymentConfirm} />}
         <div className="timeline">
-          {(job.steps || []).map((step) => (
-            <div className="step" key={step.step_name}>
-              <div>
-                <strong>{stepText(step.step_name)} <small className="rawHint">{step.step_name}</small></strong>
-                <span>
-                  {stepDuration(step)}
-                  <StatusBadge status={step.status} retryable={step.retryable} />
-                </span>
+          {(job.steps || []).map((step) => {
+            const progress = stepProgressText(step);
+            return (
+              <div className="step" key={step.step_name}>
+                <div>
+                  <strong>{stepText(step.step_name)} <small className="rawHint">{step.step_name}</small></strong>
+                  <span>
+                    {stepDuration(step)}
+                    <StatusBadge status={step.status} />
+                  </span>
+                </div>
+                {progress && <p className="stepProgress">{progress}</p>}
+                {step.error_message && <p>{step.error_message}</p>}
+                {step.result_json && (
+                  <details className="jsonDetails">
+                    <summary>结果数据</summary>
+                    <pre>{formatJSON(step.result_json)}</pre>
+                  </details>
+                )}
               </div>
-              {step.error_message && <p>{step.error_message}</p>}
-              {step.result_json && (
-                <details className="jsonDetails">
-                  <summary>结果数据</summary>
-                  <pre>{formatJSON(step.result_json)}</pre>
-                </details>
-              )}
-            </div>
-          ))}
+            );
+          })}
           {(!job.steps || job.steps.length === 0) && <EmptyBlock text="暂无步骤明细。" />}
         </div>
       </section>
-    </div>
-  );
-}
-
-function PaymentConfirmationSubmitter({ job, onSubmit }: {
-  job: Job;
-  onSubmit: (job: Job) => Promise<void>;
-}) {
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit() {
-    setSubmitting(true);
-    try {
-      await onSubmit(job);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="otpSubmitter">
-      <span><CheckCircle2 size={14} /> GoPay 支付</span>
-      <div>
-        <Button className="primaryButton" disabled={submitting} onClick={() => void submit()}>
-          <CheckCircle2 size={14} /> 已完成支付
-        </Button>
-      </div>
     </div>
   );
 }
@@ -1078,7 +1098,7 @@ function OtpSubmitter({ job, onSubmit }: {
   );
 }
 
-function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   accounts: Account[];
   selected?: string;
   showSecrets: boolean;
@@ -1090,6 +1110,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
   onAutopay: (a: Account) => void;
+  onCreateCheckoutLink: (a: Account) => Promise<void>;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1143,6 +1164,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
                     onLogin={onLogin}
                     onActivate={onActivate}
                     onAutopay={onAutopay}
+                    onCreateCheckoutLink={onCreateCheckoutLink}
                     onProbeAccount={onProbeAccount}
                     onRegisterActivate={onRegisterActivate}
                     onRefreshAccessToken={onRefreshAccessToken}
@@ -1158,7 +1180,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   );
 }
 
-function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   account: Account;
   accountBusy: boolean;
   busy: boolean;
@@ -1167,6 +1189,7 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
   onAutopay: (a: Account) => void;
+  onCreateCheckoutLink: (a: Account) => Promise<void>;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1180,6 +1203,7 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
   if (canAutopay(account)) actions.push({ label: '自动支付', icon: <Zap size={14} />, onClick: () => onAutopay(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canRefreshAccessToken(account)) actions.push({ label: refreshingAccessToken ? '获取中' : '获取 Access', icon: <KeyRound size={14} />, onClick: () => void onRefreshAccessToken(account), disabled: busy || refreshingAccessToken, kind: actions.length ? 'secondary' : 'primary' });
   if (canLoginSession(account)) actions.push({ label: loginActionLabel(account), icon: <KeyRound size={14} />, onClick: () => onLogin(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
+  if (canCreateCheckoutLink(account)) actions.push({ label: '提链', icon: <Copy size={14} />, onClick: () => void onCreateCheckoutLink(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canProbeAccount(account)) actions.push({ label: '探测账号', icon: <Search size={14} />, onClick: () => onProbeAccount(account), disabled: busy, kind: 'secondary' });
   if (canRegister(account)) actions.push({ label: '注册并激活', icon: <ShieldCheck size={14} />, onClick: () => onRegisterActivate(account), disabled: busy, kind: 'secondary' });
   actions.push({ label: '删除账号', icon: <Trash2 size={14} />, onClick: () => onDelete(account), disabled: busy, kind: 'danger' });
@@ -1212,13 +1236,11 @@ function RowActionButton({ action, showLabel }: { action: RowActionDescriptor; s
   );
 }
 
-function JobTable({ jobs, selected, busy, emptyText = '暂无工作流任务', onSelect, onRetry }: {
+function JobTable({ jobs, selected, emptyText = '暂无工作流任务', onSelect }: {
   jobs: Job[];
   selected?: string;
-  busy: boolean;
   emptyText?: string;
   onSelect: (j: Job) => void;
-  onRetry: (j: Job) => void;
 }) {
   return (
     <div className="tableWrap">
@@ -1238,21 +1260,11 @@ function JobTable({ jobs, selected, busy, emptyText = '暂无工作流任务', o
               </TableCell>
               <TableCell data-label="对象" className="mono">{short(job.account_id || '-', 10)}</TableCell>
               <TableCell data-label="动作" title={job.action}>{actionText(job.action)}</TableCell>
-              <TableCell data-label="状态"><StatusBadge status={job.status} retryable={job.retryable} /></TableCell>
+              <TableCell data-label="状态"><StatusBadge status={job.status} /></TableCell>
               <TableCell data-label="步骤" title={job.last_step}>{stepText(job.last_step)}</TableCell>
               <TableCell data-label="更新">{formatJobTime(job.updated_at)}</TableCell>
               <TableCell data-label="错误" className="errorCell" title={job.error_message}>{compactCellError(job.error_message || '-')}</TableCell>
-              <TableCell data-label="操作">
-                <div className="rowActions" onClick={(event) => event.stopPropagation()}>
-                  {canRetryJob(job) ? (
-                    <Button className="rowButtonText" {...buttonHint('按同参数重试')} disabled={busy} onClick={() => onRetry(job)}>
-                      <RefreshCcw size={14} /> 重试
-                    </Button>
-                  ) : (
-                    <span className="muted">-</span>
-                  )}
-                </div>
-              </TableCell>
+              <TableCell data-label="操作"><span className="muted">-</span></TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -1261,12 +1273,10 @@ function JobTable({ jobs, selected, busy, emptyText = '暂无工作流任务', o
   );
 }
 
-function JobCompactList({ jobs, selected, busy, onSelect, onRetry }: {
+function JobCompactList({ jobs, selected, onSelect }: {
   jobs: Job[];
   selected?: string;
-  busy: boolean;
   onSelect: (j: Job) => void;
-  onRetry: (j: Job) => void;
 }) {
   if (jobs.length === 0) return <div className="empty compactEmpty">暂无工作流任务。</div>;
 
@@ -1291,25 +1301,17 @@ function JobCompactList({ jobs, selected, busy, onSelect, onRetry }: {
               <strong>{actionText(job.action)}</strong>
               <span className="mono">{short(job.job_id)} · {short(job.account_id || '-', 10)}</span>
             </div>
-            <StatusBadge status={job.status} retryable={job.retryable} />
+            <StatusBadge status={job.status} />
           </div>
           <div className="compactJobMeta">
             <span>{stepText(job.last_step)}</span>
             <span>{formatJobTime(job.updated_at)}</span>
           </div>
-          {(job.error_message || canSubmitOtp(job) || canRetryJob(job)) && (
+          {(job.error_message || canSubmitOtp(job)) && (
             <div className="compactJobFoot">
               <span title={job.error_message}>
                 {canSubmitOtp(job) ? '需要 OTP' : compactCellError(job.error_message || '-')}
               </span>
-              {canRetryJob(job) && (
-                <Button className="rowButtonText" {...buttonHint('按同参数重试')} disabled={busy} onClick={(event) => {
-                  event.stopPropagation();
-                  onRetry(job);
-                }}>
-                  <RefreshCcw size={14} /> 重试
-                </Button>
-              )}
             </div>
           )}
         </div>
@@ -1598,13 +1600,14 @@ function MailboxAliasesSection({ aliases, showSecrets, onDelete }: {
   );
 }
 
-function MailboxDetails({ mailbox, showSecrets, inboxResult, bans, aliases, inboxLoading, onFetchInbox, onDelete }: {
+function MailboxDetails({ mailbox, showSecrets, inboxResult, bans, aliases, inboxLoading, onCopy, onFetchInbox, onDelete }: {
   mailbox: Mailbox;
   showSecrets: boolean;
   inboxResult?: InboxResult;
   bans: BanDetection[];
   aliases: Mailbox[];
   inboxLoading: boolean;
+  onCopy: (label: string, value: string) => void;
   onFetchInbox: (emailAddress?: string) => Promise<void>;
   onDelete: (mailbox: Mailbox) => Promise<void>;
 }) {
@@ -1643,20 +1646,20 @@ function MailboxDetails({ mailbox, showSecrets, inboxResult, bans, aliases, inbo
             </div>
           </div>
           <h3>邮箱</h3>
-          <KV label="邮箱" value={showSecrets ? mailbox.email_address : maskEmail(mailbox.email_address)} copyValue={mailbox.email_address} copyDisabled={!showSecrets || !mailbox.email_address} copyHint="显示敏感信息后复制邮箱" />
-          <KV label="密码" value={showSecrets ? mailbox.password : mask(mailbox.password)} copyValue={mailbox.password} copyDisabled={!showSecrets || !mailbox.password} copyHint="显示敏感信息后复制密码" mono />
-          <KV label="占用" value={statusText(mailbox.status)} copyValue={mailbox.status || '-'} />
-          <KV label="OAuth" value={statusText(authStatus(mailbox))} />
-          <KV label="Token" value={tokenText(mailbox)} />
-          <KV label="Alias 数" value={String(aliases.length)} />
-          <KV label="主邮箱" value={showSecrets ? (mailbox.primary_email || '-') : maskEmail(mailbox.primary_email)} copyValue={mailbox.primary_email || '-'} copyDisabled={!showSecrets || !mailbox.primary_email} copyHint="显示敏感信息后复制主邮箱" />
-          <KV label="Refresh" value={showSecrets ? mailbox.refresh_token : mask(mailbox.refresh_token)} copyValue={mailbox.refresh_token} copyDisabled={!showSecrets || !mailbox.refresh_token} copyHint="显示敏感信息后复制 Refresh Token" mono />
-          <KV label="Access" value={showSecrets ? mailbox.access_token : mask(mailbox.access_token)} copyValue={mailbox.access_token} copyDisabled={!showSecrets || !mailbox.access_token} copyHint="显示敏感信息后复制 Access Token" mono />
-          <KV label="最近 OTP" value={showSecrets ? mailbox.latest_otp : mask(mailbox.latest_otp)} copyValue={mailbox.latest_otp} copyDisabled={!showSecrets || !mailbox.latest_otp} copyHint="显示敏感信息后复制 OTP" mono />
-          <KV label="OTP 时间" value={formatUnix(mailbox.latest_otp_received_at_unix)} />
-          <KV label="创建时间" value={formatUnix(mailbox.created_at)} />
-          <KV label="更新时间" value={formatUnix(mailbox.updated_at)} />
-          <KV label="错误" value={mailbox.last_error || '-'} />
+          <KV label="邮箱" value={showSecrets ? mailbox.email_address : maskEmail(mailbox.email_address)} copyValue={mailbox.email_address} copyDisabled={!mailbox.email_address} masked={!showSecrets} onCopy={onCopy} />
+          <KV label="密码" value={showSecrets ? mailbox.password : mask(mailbox.password)} copyValue={mailbox.password} copyDisabled={!mailbox.password} masked={!showSecrets} mono onCopy={onCopy} />
+          <KV label="占用" value={statusText(mailbox.status)} copyValue={mailbox.status || '-'} onCopy={onCopy} />
+          <KV label="OAuth" value={statusText(authStatus(mailbox))} onCopy={onCopy} />
+          <KV label="Token" value={tokenText(mailbox)} onCopy={onCopy} />
+          <KV label="Alias 数" value={String(aliases.length)} onCopy={onCopy} />
+          <KV label="主邮箱" value={showSecrets ? (mailbox.primary_email || '-') : maskEmail(mailbox.primary_email)} copyValue={mailbox.primary_email || '-'} copyDisabled={!mailbox.primary_email} masked={!showSecrets} onCopy={onCopy} />
+          <KV label="Refresh" value={showSecrets ? mailbox.refresh_token : mask(mailbox.refresh_token)} copyValue={mailbox.refresh_token} copyDisabled={!mailbox.refresh_token} masked={!showSecrets} mono onCopy={onCopy} />
+          <KV label="Access" value={showSecrets ? mailbox.access_token : mask(mailbox.access_token)} copyValue={mailbox.access_token} copyDisabled={!mailbox.access_token} masked={!showSecrets} mono onCopy={onCopy} />
+          <KV label="最近 OTP" value={showSecrets ? mailbox.latest_otp : mask(mailbox.latest_otp)} copyValue={mailbox.latest_otp} copyDisabled={!mailbox.latest_otp} masked={!showSecrets} mono onCopy={onCopy} />
+          <KV label="OTP 时间" value={formatUnix(mailbox.latest_otp_received_at_unix)} onCopy={onCopy} />
+          <KV label="创建时间" value={formatUnix(mailbox.created_at)} onCopy={onCopy} />
+          <KV label="更新时间" value={formatUnix(mailbox.updated_at)} onCopy={onCopy} />
+          <KV label="错误" value={mailbox.last_error || '-'} onCopy={onCopy} />
           <div className="buttonRow detailActions">
             <Button className="dangerButton" onClick={() => onDelete(mailbox)}>
               <Trash2 size={14} /> {mailbox.is_primary ? '删除主邮箱' : '删除 Alias'}
@@ -1739,11 +1742,12 @@ function CreateAccountForm({ onDone, onError }: {
   );
 }
 
-function TokenEditor({ label, field, account, showSecrets, onSave }: {
+function TokenEditor({ label, field, account, showSecrets, onCopy, onSave }: {
   label: string;
   field: 'session_token' | 'access_token';
   account: Account;
   showSecrets: boolean;
+  onCopy: (label: string, value: string) => void;
   onSave: (account: Account, token: string) => Promise<void>;
 }) {
   const current = account[field] || '';
@@ -1763,6 +1767,12 @@ function TokenEditor({ label, field, account, showSecrets, onSave }: {
     }
   }
 
+  function copyFromInput(event: React.ClipboardEvent<HTMLInputElement>) {
+    if (!value.trim()) return;
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', value);
+  }
+
   return (
     <div className="editLine">
       <span>{label}</span>
@@ -1771,13 +1781,14 @@ function TokenEditor({ label, field, account, showSecrets, onSave }: {
         type={showSecrets ? 'text' : 'password'}
         value={value}
         onChange={(event) => setValue(event.target.value)}
+        onCopy={copyFromInput}
         placeholder={`${label.toLowerCase()} token`}
       />
       <Button
         className="copyButton"
-        {...buttonHint(showSecrets ? `复制 ${label}` : `显示敏感信息后复制 ${label}`)}
-        disabled={!showSecrets || !value.trim()}
-        onClick={() => copyText(value)}
+        {...buttonHint(`复制 ${label}`)}
+        disabled={!value.trim()}
+        onClick={() => onCopy(label, value)}
       >
         <Copy size={14} />
       </Button>
@@ -1788,34 +1799,56 @@ function TokenEditor({ label, field, account, showSecrets, onSave }: {
   );
 }
 
-function KV({ label, value, mono, copyValue, copyDisabled, copyHint }: {
+function KV({ label, value, mono, copyValue, copyDisabled, copyHint, masked, onCopy }: {
   label: string;
   value: string;
   mono?: boolean;
   copyValue?: string;
   copyDisabled?: boolean;
   copyHint?: string;
+  masked?: boolean;
+  onCopy?: (label: string, value: string) => void;
 }) {
   const actualValue = copyValue ?? value;
+  const inputValue = masked ? actualValue : value;
   const disabled = copyDisabled || !actualValue || actualValue === '-';
   const hint = disabled && copyHint ? copyHint : `复制 ${label}`;
+  const copy = () => {
+    if (onCopy) {
+      onCopy(label, actualValue);
+      return;
+    }
+    void copyText(actualValue);
+  };
+  const copyFromInput = (event: React.ClipboardEvent<HTMLInputElement>) => {
+    if (disabled) return;
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', actualValue);
+  };
   return (
     <div className="kv">
       <span>{label}</span>
-      <Button className={mono ? 'mono valueButton' : 'valueButton'} {...buttonHint(hint)} disabled={disabled} onClick={() => copyText(actualValue)}>{value || '-'}</Button>
-      <Button className="copyButton" {...buttonHint(hint)} disabled={disabled} onClick={() => copyText(actualValue)}>
+      <input
+        className={[mono ? 'mono valueButton' : 'valueButton', masked ? 'maskedValue' : ''].filter(Boolean).join(' ')}
+        readOnly
+        aria-label={`${label}值`}
+        title={value || '-'}
+        value={inputValue || '-'}
+        onFocus={(event) => event.currentTarget.select()}
+        onCopy={copyFromInput}
+      />
+      <Button className="copyButton" {...buttonHint(hint)} disabled={disabled} onClick={copy}>
         <Copy size={14} />
       </Button>
     </div>
   );
 }
 
-function StatusBadge({ status, retryable }: { status: string; retryable?: boolean }) {
+function StatusBadge({ status }: { status: string }) {
   const cls = status.includes('FAILED') || status.includes('EXISTS') || status === 'BLOCKED' || status === 'NEEDS_MANUAL_VERIFICATION' ? 'bad' : status === 'SUCCEEDED' || status === 'ACTIVATED' || status === 'REGISTERED' || status === 'AUTHORIZED' ? 'good' : 'mid';
   const label = statusText(status);
-  const retryText = retryable && !label.includes('可重试') ? ' / 可重试' : '';
   const variant = cls === 'bad' ? 'destructive' : cls === 'good' ? 'default' : 'secondary';
-  return <Badge className={`badge ${cls}`} variant={variant} title={status || '-'}>{label}{retryText}</Badge>;
+  return <Badge className={`badge ${cls}`} variant={variant} title={status || '-'}>{label}</Badge>;
 }
 
 function statusText(status: string) {
@@ -1896,7 +1929,17 @@ function canProbeAccount(account: Account) {
   return !isUserAlreadyExistsAccount(account) && !!account.session_token;
 }
 
+function canCreateCheckoutLink(account: Account) {
+  return !isUserAlreadyExistsAccount(account) &&
+    account.status !== 'ACTIVATED' &&
+    !account.plus_active &&
+    (!!account.session_token || !!account.access_token);
+}
+
 function probeAccountHint(account: Account) {
+  if (normalizeTier(account.tier) === 'plus' || account.plus_active) {
+    return '已是 Plus，直接探测 Tier';
+  }
   if (account.plus_trial_eligible !== undefined && account.plus_trial_eligible !== null) {
     return '资格已探测，直接探测 Tier';
   }
@@ -1935,20 +1978,8 @@ function isUserAlreadyExistsAccount(account: Account) {
   return account.status === 'USER_ALREADY_EXISTS' || account.status === 'EMAIL_ALREADY_EXISTS';
 }
 
-function canRetryJob(job: Job) {
-  return job.retryable && job.status.startsWith('FAILED');
-}
-
 function canSubmitOtp(job: Job) {
-  if (canConfirmManualPayment(job)) return false;
-  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_CYCLE' || job.action === 'REGISTER_AND_ACTIVATE');
-}
-
-function canConfirmManualPayment(job: Job) {
-  if (job.status !== 'RUNNING' || job.last_step !== 'gopay_payment') return false;
-  if (!(job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'REGISTER_AND_ACTIVATE')) return false;
-  const data = stepResultData(job, 'gopay_payment');
-  return !!data?.payment_complete?.awaiting_manual_confirmation && data?.manual_payment_confirmation?.confirmed !== true;
+  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'REGISTER_AND_ACTIVATE');
 }
 
 function stepResultData(job: Job, stepName: string): any | null {
@@ -1963,7 +1994,7 @@ function stepResultData(job: Job, stepName: string): any | null {
 
 function otpSubmitLabel(job: Job) {
   if (job.action === 'LOGIN_SESSION') return '登录 OTP';
-  if (job.action === 'GOPAY_CYCLE') return 'GoPay OTP';
+  if (job.action === 'GOPAY_APP') return 'GoPay OTP';
   if (job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || (job.action === 'REGISTER_AND_ACTIVATE' && (job.last_step === 'gopay_login' || job.last_step === 'gopay_payment'))) {
     return '支付 OTP';
   }
@@ -2008,6 +2039,61 @@ function inboxResultForMailbox(response: InboxResponse | null, email: string) {
   });
 }
 
+function latestOtpForEmail(response: InboxResponse | null, mailboxes: Mailbox[], email: string): LatestOtp | null {
+  const target = normalizeUiEmail(email);
+  if (!target) return null;
+  const candidates: LatestOtp[] = [];
+  const mailbox = mailboxes.find((item) => normalizeUiEmail(item.email_address) === target);
+  if (mailbox?.latest_otp) {
+    candidates.push({
+      otp: mailbox.latest_otp,
+      subject: mailbox.latest_otp_subject,
+      received_at_unix: mailbox.latest_otp_received_at_unix
+    });
+  }
+  const result = inboxResultForMailbox(response, email);
+  for (const message of result?.messages || []) {
+    const matchesTarget = normalizeUiEmail(message.mailbox_email) === target ||
+      (message.recipients || []).some((recipient) => normalizeUiEmail(recipient) === target);
+    if (!matchesTarget || !message.otp) continue;
+    candidates.push({
+      otp: message.otp,
+      subject: message.subject,
+      received_at_unix: message.received_at_unix
+    });
+  }
+  if (result?.mailbox?.latest_otp && normalizeUiEmail(result.mailbox.email_address) === target) {
+    candidates.push({
+      otp: result.mailbox.latest_otp,
+      subject: result.mailbox.latest_otp_subject,
+      received_at_unix: result.mailbox.latest_otp_received_at_unix
+    });
+  }
+  candidates.sort((a, b) => b.received_at_unix - a.received_at_unix);
+  return candidates[0] || null;
+}
+
+function mailboxContextForEmail(mailboxes: Mailbox[], email: string): AccountMailboxContext {
+  const accountEmail = normalizeUiEmail(email);
+  const mailbox = mailboxes.find((item) => normalizeUiEmail(item.email_address) === accountEmail);
+  const primaryEmail = normalizeUiEmail(mailbox?.primary_email || canonicalUiEmail(accountEmail));
+  return {
+    account_email: accountEmail,
+    primary_email: primaryEmail,
+    is_split: !!accountEmail && !!primaryEmail && accountEmail !== primaryEmail,
+    known: !!mailbox
+  };
+}
+
+function accountInboxHint(email: string, context: AccountMailboxContext | null, showSecrets: boolean) {
+  const accountEmail = showSecrets ? email : maskEmail(email);
+  if (context?.is_split) {
+    const primaryEmail = showSecrets ? context.primary_email : maskEmail(context.primary_email);
+    return `用主邮箱 ${primaryEmail} 拉取收件箱，按分裂邮箱 ${accountEmail} 匹配 OTP`;
+  }
+  return `拉取当前账号邮箱 ${accountEmail} 的最新 OTP`;
+}
+
 function bansForMailbox(response: InboxResponse | null, email: string) {
   const target = normalizeUiEmail(email);
   if (!response || !target) return [];
@@ -2049,6 +2135,13 @@ function normalizeUiEmail(value: string) {
   return String(value || '').trim().toLowerCase();
 }
 
+function canonicalUiEmail(value: string) {
+  const normalized = normalizeUiEmail(value);
+  const [local, domain] = normalized.split('@');
+  if (!local || !domain) return normalized;
+  return `${local.split('+')[0]}@${domain}`;
+}
+
 function formatUnix(value: number) {
   return value ? new Date(value * 1000).toLocaleString() : '-';
 }
@@ -2060,12 +2153,23 @@ function formatJobTime(value: string) {
 }
 
 function stepDuration(step: Step) {
-  if (!step.started_at) return null;
-  const end = step.completed_at || Math.floor(Date.now() / 1000);
-  const seconds = Math.max(0, end - step.started_at);
-  if (seconds < 1) return <small className="stepTime">刚刚</small>;
-  if (seconds < 60) return <small className="stepTime">{seconds}s</small>;
-  return <small className="stepTime">{Math.floor(seconds / 60)}m {seconds % 60}s</small>;
+	if (!step.started_at) return null;
+	const end = step.completed_at || Math.floor(Date.now() / 1000);
+	const seconds = Math.max(0, end - step.started_at);
+	if (seconds < 1) return <small className="stepTime">刚刚</small>;
+	if (seconds < 60) return <small className="stepTime">{seconds}s</small>;
+	return <small className="stepTime">{Math.floor(seconds / 60)}m {seconds % 60}s</small>;
+}
+
+function stepProgressText(step: Step) {
+  const data = parseJSON(step.result_json);
+  if (!data || typeof data !== 'object') return '';
+  const record = data as Record<string, any>;
+  const progress = record.progress && typeof record.progress === 'object' ? record.progress as Record<string, any> : {};
+  const message = stringValue(record.progress_message) || stringValue(progress.message);
+  if (!message) return '';
+  const atUnix = numberValue(record.progress_at_unix) || numberValue(progress.at_unix);
+  return atUnix ? `${message} · ${formatUnix(atUnix)}` : message;
 }
 
 function trialText(value?: boolean) {
@@ -2102,16 +2206,69 @@ function compactCellError(value: string) {
 }
 
 function formatJSON(value: string) {
+	try {
+		return JSON.stringify(JSON.parse(value), null, 2);
+	} catch {
+		return value;
+	}
+}
+
+function parseJSON(value: string): unknown {
+  if (!value) return null;
   try {
-    return JSON.stringify(JSON.parse(value), null, 2);
+    return JSON.parse(value);
   } catch {
-    return value;
+    return null;
   }
 }
 
-function copyText(value: string) {
-  if (!value) return;
-  void navigator.clipboard?.writeText(value);
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+async function copyText(value: string): Promise<boolean> {
+  if (!value) return false;
+  if (!window.isSecureContext || !navigator.clipboard?.writeText) {
+    return copyTextFallback(value);
+  }
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return copyTextFallback(value);
+  }
+}
+
+function copyTextFallback(value: string): boolean {
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.width = '1px';
+    textarea.style.height = '1px';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return copied;
+  } catch {
+    return false;
+  }
 }
 
 createRoot(document.getElementById('root')!).render(

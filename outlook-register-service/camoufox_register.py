@@ -28,6 +28,47 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+OUTLOOK_CONSENT_SELECTORS = [
+    'button:has-text("Agree and continue")',
+    'button:has-text("Accept and continue")',
+    'button:text-is("Agree")',
+    'button:text-is("Accept")',
+    'button:has-text("\u540c\u610f\u5e76\u7ee7\u7eed")',
+    'button:has-text("\u63a5\u53d7\u5e76\u7ee7\u7eed")',
+    'button:text-is("\u540c\u610f")',
+    '[role="button"]:has-text("Agree and continue")',
+    '[role="button"]:has-text("Accept and continue")',
+    '[role="button"]:has-text("\u540c\u610f\u5e76\u7ee7\u7eed")',
+    '[role="button"]:has-text("\u63a5\u53d7\u5e76\u7ee7\u7eed")',
+    'text="Agree and continue"',
+    'text="Accept and continue"',
+    'text="\u540c\u610f\u5e76\u7ee7\u7eed"',
+    'text="\u63a5\u53d7\u5e76\u7ee7\u7eed"',
+    'input[type="submit"][value*="Agree"]',
+    'input[type="submit"][value*="Accept"]',
+    'input[type="submit"][value*="\u540c\u610f"]',
+]
+
+OUTLOOK_EMAIL_INPUT_SELECTORS = [
+    'input[aria-label*="New email"]',
+    'input[aria-label*="Create email"]',
+    'input[aria-label*="email"]',
+    'input[aria-label*="\u65b0\u5efa"]',
+    'input[aria-label*="\u7535\u5b50\u90ae\u4ef6"]',
+    'input[placeholder*="New email"]',
+    'input[placeholder*="email"]',
+    'input[placeholder*="\u65b0\u5efa"]',
+    'input[placeholder*="\u7535\u5b50\u90ae\u4ef6"]',
+    'input[name="MemberName"]',
+    'input[id="MemberName"]',
+    'input[id*="username" i]',
+    '#usernameInput',
+    'input[type="email"]',
+    'input[autocomplete="username"]',
+    'input:not([type="hidden"]):not([type="password"])',
+]
+
+
 def _is_target_closed(exc: Exception) -> bool:
     """Check if an exception is a Playwright TargetClosedError by class name."""
     return type(exc).__name__ == "TargetClosedError"
@@ -39,6 +80,13 @@ def _page_is_closed(page) -> bool:
     except Exception as exc:
         logger.debug("[browser] page.is_closed() failed; treating page as still active: %s", exc)
         return False
+
+
+def _safe_page_url(page) -> str:
+    try:
+        return str(page.url)
+    except Exception:
+        return ""
 
 try:
     BOT_PROTECTION_WAIT = max(0, int(os.environ.get("OUTLOOK_REGISTER_BOT_PROTECTION_WAIT", "0")))
@@ -174,6 +222,40 @@ def _type_into(locator, value, delay=0):
     except Exception as type_exc:
         last_error = type_exc
     raise last_error
+
+
+def _accept_outlook_consent_if_visible(page, timeout=3000) -> bool:
+    try:
+        consent = _first_visible_locator(page, OUTLOOK_CONSENT_SELECTORS, timeout=timeout)
+    except Exception:
+        return False
+    page.wait_for_timeout(150)
+    consent.click(timeout=30000)
+    logger.info("[outlook] Consent accepted")
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:
+        pass
+    return True
+
+
+def _outlook_email_input(page, timeout=30000):
+    deadline = time.time() + timeout / 1000
+    last_error = None
+    while time.time() < deadline:
+        if _accept_outlook_consent_if_visible(page, timeout=500):
+            page.wait_for_timeout(800)
+            continue
+        try:
+            return _first_visible_locator(page, OUTLOOK_EMAIL_INPUT_SELECTORS, timeout=700)
+        except Exception as exc:
+            last_error = exc
+        page.wait_for_timeout(250)
+
+    raise TimeoutError(
+        f"no Outlook email input visible after consent handling; "
+        f"url={_safe_page_url(page)}; last_error={last_error}"
+    )
 
 
 def _click_primary(page, timeout=10000):
@@ -1396,17 +1478,8 @@ def outlook_register(
                 page.goto("https://outlook.live.com/mail/0/?prompt=create_account",
                           timeout=60000, wait_until="domcontentloaded")
                 start_time = time.time()
-                try:
-                    consent = _first_visible_locator(page, [
-                        'button:has-text("Agree and continue")',
-                        'button:has-text("Accept and continue")',
-                        'button:has-text("Agree")',
-                        'text="Agree and continue"',
-                    ], timeout=5000)
-                    page.wait_for_timeout(int(0.1 * wait_ms))
-                    consent.click(timeout=30000)
-                    logger.info("[outlook] Consent accepted")
-                except Exception:
+                page.wait_for_timeout(int(0.1 * wait_ms))
+                if not _accept_outlook_consent_if_visible(page, timeout=5000):
                     logger.info("[outlook] Consent screen not shown, continuing")
             except Exception as e:
                 page.screenshot(path=os.path.join(ss_dir, "outlook_no_consent.png"))
@@ -1420,24 +1493,19 @@ def outlook_register(
             try:
                 # Switch domain if hotmail
                 if email_suffix == "@hotmail.com":
+                    _outlook_email_input(page, timeout=30000)
                     page.get_by_text("@outlook.com").click(timeout=10000)
                     page.locator('[role="option"]:text-is("@hotmail.com")').click()
-
-                email_input_selectors = [
-                    'input[aria-label*="New email"]',
-                    'input[name="MemberName"]',
-                    'input[type="email"]',
-                    'input:not([type="hidden"]):not([type="password"])',
-                ]
                 attempted_locals: set[str] = set()
                 max_email_attempts = int(os.environ.get("OUTLOOK_REGISTER_EMAIL_ATTEMPTS", "5"))
+                email_input_timeout = int(os.environ.get("OUTLOOK_REGISTER_EMAIL_INPUT_TIMEOUT_MS", "60000"))
                 for attempt in range(1, max_email_attempts + 1):
                     full_email = email_local + email_suffix
                     result["email"] = full_email
                     attempted_locals.add(email_local.lower())
                     logger.info("[outlook] Trying email (%d/%d): %s", attempt, max_email_attempts, full_email)
 
-                    email_input = _first_visible_locator(page, email_input_selectors, timeout=15000)
+                    email_input = _outlook_email_input(page, timeout=email_input_timeout)
                     _type_into(email_input, email_local, delay=int(0.002 * wait_ms))
                     try:
                         actual_local = email_input.input_value(timeout=2000).strip().lower()

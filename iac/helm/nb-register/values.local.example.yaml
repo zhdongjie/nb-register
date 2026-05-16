@@ -1,0 +1,93 @@
+global:
+  imageRegistry: registry.example.internal/nb-register
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+workloads:
+  account-db:
+    image:
+      repository: account-db
+      tag: dev
+  orchestrator:
+    image:
+      repository: orchestrator
+      tag: dev
+  dashboard:
+    image:
+      repository: dashboard
+      tag: dev
+  outlook-imap-service:
+    image:
+      repository: outlook-imap-service
+      tag: dev
+  outlook-register-service:
+    image:
+      repository: outlook-register-service
+      tag: dev
+  browser-reg:
+    image:
+      repository: browser-reg
+      tag: dev
+  gopay-payment:
+    image:
+      repository: gopay-payment
+      tag: dev
+  whatsapp-otp-relay:
+    image:
+      repository: whatsapp-otp-relay
+      tag: dev
+  gopay-app:
+    image:
+      repository: gopay-app
+      tag: dev
+  herosms-sms-service:
+    image:
+      repository: herosms-sms-service
+      tag: dev
+ingress:
+  dashboard:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: nb-register.example.internal
+        paths:
+          - path: /
+            pathType: Prefix
+  webhook:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: nb-register-webhook.example.internal
+        paths:
+          - path: /
+            pathType: Prefix
+
+secrets:
+  stringData:
+    POSTGRES_PASSWORD: change-me
+    REGISTER_PROXY_URL: socks5://proxy.internal:10813
+    OUTLOOK_REGISTER_PROXY: socks5://proxy.internal:10810
+    GOPAY_PHONE_NUMBER: ""
+    GOPAY_PIN: ""
+    GOPAY_PROXY_URL: http://proxy.internal:10809
+    GOPAY_SIGNUP_AUTH_UUID: ""
+    GOPAY_HMAC_KEY: ""
+    GOPAY_X_E2: ""
+    GOTO_CLIENT_SECRET: ""
+    GOTO_SSO_CLIENT_SECRET: ""
+    HEROSMS_API_KEY: ""
+
+gopayPaymentConfig:
+  config:
+    auth:
+      session_token: ""
+    gopay:
+      country_code: "62"
+      phone_number: ""
+      pin: ""
+      tokenization: "true"
+      browser_locale: zh-CN
+      pin_locale: id
+    proxies:
+      checkout: ""
+      payment: ""

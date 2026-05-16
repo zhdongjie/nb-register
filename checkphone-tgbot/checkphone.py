@@ -1,8 +1,8 @@
 """
 Standalone GoPay phone availability checker for the Telegram bot.
 
-This is intentionally copied out of gopay-cycle so the bot can run as an
-independent container without calling the gopay-cycle gRPC service.
+This is intentionally copied out of gopay-app so the bot can run as an
+independent container without calling the gopay-app gRPC service.
 """
 
 import hashlib

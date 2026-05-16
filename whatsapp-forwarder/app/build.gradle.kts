@@ -4,7 +4,7 @@ plugins {
 }
 
 val defaultWebhookUrl = providers.gradleProperty("defaultWebhookUrl")
-    .orElse("http://192.168.0.115:8081/webhook/otp")
+    .orElse("http://192.168.0.115:8081/local/gopay")
     .get()
 val escapedDefaultWebhookUrl = defaultWebhookUrl
     .replace("\\", "\\\\")

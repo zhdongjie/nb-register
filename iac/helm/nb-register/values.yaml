@@ -93,6 +93,7 @@ secrets:
     OUTLOOK_REGISTER_OAUTH_PROOF_EMAIL: ""
 
     GOPAY_PHONE_NUMBER: ""
+    GOPAY_WA_PHONE_NUMBER: ""
     GOPAY_PIN: ""
     GOPAY_PROXY_POOL: ""
     GOPAY_SIGNUP_AUTH_UUID: ""
@@ -488,6 +489,8 @@ workloads:
     secretEnv:
       - name: GOPAY_PHONE_NUMBER
         key: GOPAY_PHONE_NUMBER
+      - name: GOPAY_WA_PHONE_NUMBER
+        key: GOPAY_WA_PHONE_NUMBER
       - name: GOPAY_PIN
         key: GOPAY_PIN
       - name: GOPAY_ADD_BALANCE_ENVELOPE_LINK

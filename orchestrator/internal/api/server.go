@@ -16,15 +16,17 @@ import (
 )
 
 type Config struct {
-	DB                          *gorm.DB
-	JobStore                    *jobprojection.Store
-	JobEvents                   *jobevents.Store
-	Temporal                    temporalclient.Client
-	TaskQueue                   string
-	AccountClient               pb.AccountDatabaseServiceClient
-	EmailClient                 pb.EmailServiceClient
-	GoPayClient                 pb.GopayAppServiceClient
-	OutlookRegisterEnableOAuth2 bool
+	DB                                   *gorm.DB
+	JobStore                             *jobprojection.Store
+	JobEvents                            *jobevents.Store
+	Temporal                             temporalclient.Client
+	TaskQueue                            string
+	AccountClient                        pb.AccountDatabaseServiceClient
+	EmailClient                          pb.EmailServiceClient
+	GoPayClient                          pb.GopayAppServiceClient
+	DefaultGoPayAddBalance               *pb.GoPayAddBalance
+	GoPayAddBalanceConfirmTimeoutSeconds int32
+	OutlookRegisterEnableOAuth2          bool
 }
 
 type Server struct {
@@ -35,18 +37,21 @@ type Server struct {
 	pb.UnimplementedOTPServiceServer
 	pb.UnimplementedJobServiceServer
 
-	db                          *gorm.DB
-	jobStore                    *jobprojection.Store
-	jobEvents                   *jobevents.Store
-	temporal                    temporalclient.Client
-	taskQueue                   string
-	accountClient               pb.AccountDatabaseServiceClient
-	emailClient                 pb.EmailServiceClient
-	gopayClient                 pb.GopayAppServiceClient
-	outlookRegisterEnableOAuth2 bool
+	db                                   *gorm.DB
+	jobStore                             *jobprojection.Store
+	jobEvents                            *jobevents.Store
+	temporal                             temporalclient.Client
+	taskQueue                            string
+	accountClient                        pb.AccountDatabaseServiceClient
+	emailClient                          pb.EmailServiceClient
+	gopayClient                          pb.GopayAppServiceClient
+	defaultGoPayAddBalance               *pb.GoPayAddBalance
+	goPayAddBalanceConfirmTimeoutSeconds int32
+	outlookRegisterEnableOAuth2          bool
 }
 
 type ManualOTPSignal = pb.ManualOTPSignal
+type ManualAddBalanceSignal = pb.ManualAddBalanceSignal
 
 const (
 	actionRegister            = contracts.ActionRegister
@@ -54,6 +59,7 @@ const (
 	actionAutopay             = contracts.ActionAutopay
 	actionGoPayApp            = contracts.ActionGoPayApp
 	actionGoPayPayment        = contracts.ActionGoPayPayment
+	actionGoPayPaymentRebind  = contracts.ActionGoPayPaymentRebind
 	actionProbeAccount        = contracts.ActionProbeAccount
 	actionLoginSession        = contracts.ActionLoginSession
 	actionRegisterAndActivate = contracts.ActionRegisterAndActivate
@@ -63,14 +69,16 @@ const (
 	statusRunning   = jobstatus.Running
 	statusSucceeded = jobstatus.Succeeded
 
-	stepRegisterAccount   = "register_account"
-	stepEnsureLogon       = "ensure_logon"
-	stepGoPayPayment      = "gopay_payment"
-	registrationOTPParam  = "registration_otp"
-	paymentOTPParam       = "payment_otp"
-	manualOTPSignalName   = contracts.ManualOTPSignalName
-	registrationOTPSubmit = "registration_otp_submitted_at_unix"
-	paymentOTPSubmit      = "payment_otp_submitted_at_unix"
+	stepRegisterAccount        = "register_account"
+	stepEnsureLogon            = "ensure_logon"
+	stepGoPayAppAddBalance     = "gopay_app_add_balance"
+	stepGoPayPayment           = "gopay_payment"
+	registrationOTPParam       = "registration_otp"
+	paymentOTPParam            = "payment_otp"
+	manualOTPSignalName        = contracts.ManualOTPSignalName
+	manualAddBalanceSignalName = contracts.ManualAddBalanceSignalName
+	registrationOTPSubmit      = "registration_otp_submitted_at_unix"
+	paymentOTPSubmit           = "payment_otp_submitted_at_unix"
 )
 
 const (
@@ -80,15 +88,17 @@ const (
 
 func NewServer(cfg Config) *Server {
 	return &Server{
-		db:                          cfg.DB,
-		jobStore:                    cfg.JobStore,
-		jobEvents:                   cfg.JobEvents,
-		temporal:                    cfg.Temporal,
-		taskQueue:                   cfg.TaskQueue,
-		accountClient:               cfg.AccountClient,
-		emailClient:                 cfg.EmailClient,
-		gopayClient:                 cfg.GoPayClient,
-		outlookRegisterEnableOAuth2: cfg.OutlookRegisterEnableOAuth2,
+		db:                                   cfg.DB,
+		jobStore:                             cfg.JobStore,
+		jobEvents:                            cfg.JobEvents,
+		temporal:                             cfg.Temporal,
+		taskQueue:                            cfg.TaskQueue,
+		accountClient:                        cfg.AccountClient,
+		emailClient:                          cfg.EmailClient,
+		gopayClient:                          cfg.GoPayClient,
+		defaultGoPayAddBalance:               cfg.DefaultGoPayAddBalance,
+		goPayAddBalanceConfirmTimeoutSeconds: cfg.GoPayAddBalanceConfirmTimeoutSeconds,
+		outlookRegisterEnableOAuth2:          cfg.OutlookRegisterEnableOAuth2,
 	}
 }
 

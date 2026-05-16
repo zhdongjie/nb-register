@@ -13,6 +13,31 @@ message StartGoPayRequest {
   string checkout_url = 9;
   string checkout_session_id = 10;
   string gopay_phone = 11;
+  string otp_channel = 12; // sms 时调用 resend-otp；wa/空值只走 user-consent
+}
+
+message PrepareGoPayRequest {
+  string session_token = 1;
+  string access_token = 2;
+  string tokenization = 3;
+  string checkout_url = 4;
+  string checkout_session_id = 5;
+  string gopay_phone = 6;
+}
+
+message PrepareGoPayResponse {
+  bool success = 1;
+  string error_message = 2;
+  string flow_id = 3;
+  string snap_token = 4;
+  string checkout_url = 5;
+  string checkout_session_id = 6;
+}
+
+message StartPreparedGoPayRequest {
+  string flow_id = 1;
+  string gopay_phone = 2;
+  string otp_channel = 3; // sms 时调用 resend-otp；wa/空值只走 user-consent
 }
 
 message StartGoPayResponse {
@@ -24,6 +49,7 @@ message StartGoPayResponse {
   int64 expires_at_unix = 6;
   string checkout_url = 7;
   string checkout_session_id = 8;
+  bool otp_required = 9;
 }
 
 message ProbePlusTrialPaymentRequest {
@@ -75,6 +101,17 @@ message CompleteGoPayRequest {
   string otp = 2;
 }
 
+message ResendGoPayOTPRequest {
+  string flow_id = 1;
+}
+
+message ResendGoPayOTPResponse {
+  bool success = 1;
+  string error_message = 2;
+  string flow_id = 3;
+  int64 issued_after_unix = 4;
+}
+
 message ConfirmGoPayPaymentRequest {
   string flow_id = 1;
 }
@@ -101,11 +138,14 @@ message GoPayResponse {
 }
 
 service PaymentService {
+  rpc PrepareGoPay(PrepareGoPayRequest) returns (PrepareGoPayResponse);
+  rpc StartPreparedGoPay(StartPreparedGoPayRequest) returns (StartGoPayResponse);
   rpc StartGoPay(StartGoPayRequest) returns (StartGoPayResponse);
   rpc CreateCheckoutLink(CreateCheckoutLinkRequest) returns (CreateCheckoutLinkResponse);
   rpc ProbePlusTrial(ProbePlusTrialPaymentRequest) returns (ProbePlusTrialPaymentResponse);
   rpc ProbeTier(ProbeTierPaymentRequest) returns (ProbeTierPaymentResponse);
   rpc CompleteGoPay(CompleteGoPayRequest) returns (GoPayResponse);
+  rpc ResendGoPayOTP(ResendGoPayOTPRequest) returns (ResendGoPayOTPResponse);
   rpc ConfirmGoPayPayment(ConfirmGoPayPaymentRequest) returns (GoPayResponse);
   rpc CancelGoPay(CancelGoPayRequest) returns (CancelGoPayResponse);
 }

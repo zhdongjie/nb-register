@@ -332,6 +332,7 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
         checkout_url = (getattr(request, "checkout_url", "") or "").strip()
         checkout_session_id = (getattr(request, "checkout_session_id", "") or "").strip()
         gopay_phone = (getattr(request, "gopay_phone", "") or "").strip()
+        otp_channel = (getattr(request, "otp_channel", "") or "").strip().lower()
         if session_token and not access_token and _looks_access_token(session_token):
             access_token = session_token
             session_token = ""
@@ -399,19 +400,26 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             )
 
             logger.info(
-                "[payment] StartGoPay start reuse_checkout=%s",
+                "[payment] StartGoPay start reuse_checkout=%s otp_channel=%s",
                 bool(checkout_session_id or checkout_url),
+                otp_channel or "default",
             )
             state = charger.start_until_otp(
                 stripe_pk=stripe_pk,
                 billing=_billing_from_config(cfg),
                 checkout_session_id=checkout_session_id,
                 checkout_url=checkout_url,
+                otp_channel=otp_channel,
             )
             flow_id = self._flows.put(charger, state, use_account_token=use_account_token)
             charger = None
             cs_session = None
-            logger.info("[payment] StartGoPay waiting_otp flow=%s", flow_id[:8])
+            otp_required = bool(state.get("otp_required", True))
+            logger.info(
+                "[payment] StartGoPay flow=%s otp_required=%s",
+                flow_id[:8],
+                otp_required,
+            )
             return payment_pb2.StartGoPayResponse(
                 success=True,
                 flow_id=flow_id,
@@ -420,6 +428,7 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
                 expires_at_unix=0,
                 checkout_url=str(state.get("checkout_url") or ""),
                 checkout_session_id=str(state.get("cs_id") or ""),
+                otp_required=otp_required,
             )
         except GoPayError as exc:
             logger.error("[payment] StartGoPay failed: %s", exc)
@@ -433,21 +442,197 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
             elif cs_session is not None:
                 _close_session(cs_session)
 
+    def PrepareGoPay(self, request, context):
+        session_token = (request.session_token or "").strip()
+        access_token = (getattr(request, "access_token", "") or "").strip()
+        tokenization = (getattr(request, "tokenization", "") or "").strip()
+        checkout_url = (getattr(request, "checkout_url", "") or "").strip()
+        checkout_session_id = (getattr(request, "checkout_session_id", "") or "").strip()
+        gopay_phone = (getattr(request, "gopay_phone", "") or "").strip()
+        if session_token and not access_token and _looks_access_token(session_token):
+            access_token = session_token
+            session_token = ""
+        if access_token:
+            session_token = ""
+        if not (session_token or access_token):
+            return payment_pb2.PrepareGoPayResponse(
+                success=False,
+                error_message="session_token or access_token is required",
+            )
+
+        charger = None
+        cs_session = None
+        try:
+            cfg = copy.deepcopy(self._cfg)
+            fresh_checkout = cfg.get("fresh_checkout") or {}
+            auth_cfg = dict(fresh_checkout.get("auth") or {})
+            auth_cfg.pop("cookie_header", None)
+            auth_cfg.pop("session_token", None)
+            auth_cfg.pop("access_token", None)
+            if session_token:
+                auth_cfg["session_token"] = session_token
+            if access_token:
+                auth_cfg["access_token"] = access_token
+
+            checkout_proxy = resolve_checkout_proxy(cfg)
+            payment_proxy = resolve_payment_proxy(cfg)
+            cs_session = _build_chatgpt_session(auth_cfg, proxy=checkout_proxy)
+
+            gopay_cfg = resolve_gopay_cfg(cfg)
+            if gopay_phone:
+                gopay_cfg["phone_number"] = gopay_phone
+            if tokenization:
+                gopay_cfg["tokenization"] = tokenization
+            gopay_cfg = validate_gopay_cfg(gopay_cfg)
+
+            stripe_pk = (
+                (cfg.get("stripe") or {}).get("publishable_key")
+                or auth_cfg.get("stripe_pk")
+                or DEFAULT_STRIPE_PK
+            )
+            runtime_cfg = dict(cfg.get("runtime") or {})
+            charger = GoPayCharger(
+                cs_session,
+                gopay_cfg,
+                otp_provider=lambda: (_ for _ in ()).throw(OTPCancelled("external OTP required")),
+                checkout_proxy=checkout_proxy,
+                payment_proxy=payment_proxy,
+                runtime_cfg=runtime_cfg,
+                checkout_cfg=dict((cfg.get("fresh_checkout") or {}).get("plan") or {}),
+                browser_challenge_cfg=dict(cfg.get("browser_challenge") or {}),
+                pre_solve_passive_captcha=bool(cfg.get("pre_solve_passive_captcha", False)),
+                log=logger.info,
+            )
+
+            logger.info(
+                "[payment] PrepareGoPay start reuse_checkout=%s",
+                bool(checkout_session_id or checkout_url),
+            )
+            state = charger.prepare_until_linking(
+                stripe_pk=stripe_pk,
+                billing=_billing_from_config(cfg),
+                checkout_session_id=checkout_session_id,
+                checkout_url=checkout_url,
+            )
+            flow_id = self._flows.put(charger, state, use_account_token=False)
+            charger = None
+            cs_session = None
+            logger.info("[payment] PrepareGoPay flow=%s", flow_id[:8])
+            return payment_pb2.PrepareGoPayResponse(
+                success=True,
+                flow_id=flow_id,
+                snap_token=str(state.get("snap_token") or ""),
+                checkout_url=str(state.get("checkout_url") or ""),
+                checkout_session_id=str(state.get("cs_id") or ""),
+            )
+        except GoPayError as exc:
+            logger.error("[payment] PrepareGoPay failed: %s", exc)
+            return payment_pb2.PrepareGoPayResponse(success=False, error_message=str(exc)[:500])
+        except Exception as exc:
+            logger.exception("[payment] PrepareGoPay crashed")
+            return payment_pb2.PrepareGoPayResponse(success=False, error_message=str(exc)[:500])
+        finally:
+            if charger is not None:
+                charger.close()
+            elif cs_session is not None:
+                _close_session(cs_session)
+
+    def StartPreparedGoPay(self, request, context):
+        flow_id = (request.flow_id or "").strip()
+        gopay_phone = (getattr(request, "gopay_phone", "") or "").strip()
+        otp_channel = (getattr(request, "otp_channel", "") or "").strip().lower()
+        if not flow_id:
+            return payment_pb2.StartGoPayResponse(success=False, error_message="flow_id is required")
+
+        flow = self._flows.get(flow_id)
+        if flow is None:
+            return payment_pb2.StartGoPayResponse(success=False, error_message="prepared payment flow not found")
+
+        try:
+            logger.info(
+                "[payment] StartPreparedGoPay flow=%s otp_channel=%s",
+                flow_id[:8],
+                otp_channel or "default",
+            )
+            state = flow.charger.start_prepared_linking_until_otp(
+                flow.state,
+                otp_channel=otp_channel,
+                gopay_phone=gopay_phone,
+            )
+            flow.state = state
+            otp_required = bool(state.get("otp_required", True))
+            logger.info(
+                "[payment] StartPreparedGoPay flow=%s otp_required=%s",
+                flow_id[:8],
+                otp_required,
+            )
+            return payment_pb2.StartGoPayResponse(
+                success=True,
+                flow_id=flow_id,
+                snap_token=str(state.get("snap_token") or ""),
+                issued_after_unix=int(state.get("issued_after_unix") or 0),
+                expires_at_unix=0,
+                checkout_url=str(state.get("checkout_url") or ""),
+                checkout_session_id=str(state.get("cs_id") or ""),
+                otp_required=otp_required,
+            )
+        except GoPayError as exc:
+            logger.error("[payment] StartPreparedGoPay failed: %s", exc)
+            failed = self._flows.pop(flow_id)
+            if failed is not None:
+                failed.close()
+            return payment_pb2.StartGoPayResponse(success=False, error_message=str(exc)[:500])
+        except Exception as exc:
+            logger.exception("[payment] StartPreparedGoPay crashed")
+            failed = self._flows.pop(flow_id)
+            if failed is not None:
+                failed.close()
+            return payment_pb2.StartGoPayResponse(success=False, error_message=str(exc)[:500])
+
+    def ResendGoPayOTP(self, request, context):
+        flow_id = (request.flow_id or "").strip()
+        if not flow_id:
+            return payment_pb2.ResendGoPayOTPResponse(success=False, error_message="flow_id is required")
+
+        flow = self._flows.get(flow_id)
+        if flow is None:
+            return payment_pb2.ResendGoPayOTPResponse(success=False, error_message="payment flow not found")
+
+        try:
+            logger.info("[payment] ResendGoPayOTP flow=%s", flow_id[:8])
+            state = flow.charger.resend_linking_otp(flow.state)
+            flow.state = state
+            return payment_pb2.ResendGoPayOTPResponse(
+                success=True,
+                flow_id=flow_id,
+                issued_after_unix=int(state.get("issued_after_unix") or 0),
+            )
+        except GoPayError as exc:
+            logger.error("[payment] ResendGoPayOTP failed: %s", exc)
+            return payment_pb2.ResendGoPayOTPResponse(success=False, flow_id=flow_id, error_message=str(exc)[:500])
+        except Exception as exc:
+            logger.exception("[payment] ResendGoPayOTP crashed")
+            return payment_pb2.ResendGoPayOTPResponse(success=False, flow_id=flow_id, error_message=str(exc)[:500])
+
     def CompleteGoPay(self, request, context):
         if not request.flow_id:
             return payment_pb2.GoPayResponse(success=False, error_message="flow_id is required")
-        if not request.otp:
-            return payment_pb2.GoPayResponse(success=False, error_message="otp is required")
 
         flow = self._flows.get(request.flow_id)
         if flow is None:
             return payment_pb2.GoPayResponse(success=False, error_message="payment flow not found")
+        if not request.otp and bool(flow.state.get("otp_required", True)):
+            return payment_pb2.GoPayResponse(success=False, error_message="otp is required")
 
         close_flow = True
         try:
             logger.info("[payment] CompleteGoPay flow=%s", request.flow_id[:8])
             if _requires_manual_payment_confirmation(flow):
-                result = flow.charger.complete_after_otp_until_manual_confirmation(flow.state, request.otp)
+                if bool(flow.state.get("otp_required", True)):
+                    result = flow.charger.complete_after_otp_until_manual_confirmation(flow.state, request.otp)
+                    flow.state = result
+                else:
+                    result = flow.state
                 flow.state = result
                 close_flow = False
                 return payment_pb2.GoPayResponse(
@@ -461,7 +646,10 @@ class PaymentService(payment_pb2_grpc.PaymentServiceServicer):
                     finish_200_redirect_url=str(result.get("finish_200_redirect_url") or ""),
                 )
 
-            result = flow.charger.complete_after_otp(flow.state, request.otp)
+            if bool(flow.state.get("otp_required", True)):
+                result = flow.charger.complete_after_otp(flow.state, request.otp)
+            else:
+                result = flow.charger.complete_after_manual_confirmation(flow.state)
             state = str(result.get("state") or "")
             success = state == "succeeded"
             return payment_pb2.GoPayResponse(

@@ -23,6 +23,7 @@ OUTLOOK_REGISTER_PROXY_POOL=
 
 GOPAY_COUNTRY_CODE=62
 GOPAY_PHONE_NUMBER=
+GOPAY_WA_PHONE_NUMBER=
 GOPAY_PIN=
 GOPAY_PROXY_POOL=socks5://host.docker.internal:10810,socks5://host.docker.internal:10811,socks5://host.docker.internal:10813,http://host.docker.internal:10814
 GOPAY_SIGNUP_AUTH_UUID=
@@ -162,6 +163,7 @@ GoPay 支付参数在 `.env` 中配置：
 ```env
 GOPAY_COUNTRY_CODE=62
 GOPAY_PHONE_NUMBER=
+GOPAY_WA_PHONE_NUMBER=
 GOPAY_PIN=
 GOPAY_PROXY_POOL=socks5://host.docker.internal:10810,socks5://host.docker.internal:10811,socks5://host.docker.internal:10813,http://host.docker.internal:10814
 GOPAY_SIGNUP_AUTH_UUID=

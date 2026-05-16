@@ -15,8 +15,7 @@ const (
 	otpWaitChannelPayment = otpwait.ChannelPayment
 	otpWaitChannelSMS     = otpwait.ChannelSMS
 
-	defaultOTPWaitSeconds            = int32(120)
-	defaultChangePhoneOTPWaitSeconds = int32(120)
+	defaultOTPWaitSeconds = int32(180)
 )
 
 func otpWaitInputChannel(input OTPWaitInput) string {
@@ -30,11 +29,7 @@ func waitForOTP(ctx workflow.Context, input OTPWaitInput) (OTPWaitOutput, error)
 	}
 	timeoutSeconds := input.GetTimeoutSeconds()
 	if timeoutSeconds <= 0 {
-		if channel == otpWaitChannelSMS {
-			timeoutSeconds = defaultChangePhoneOTPWaitSeconds
-		} else {
-			timeoutSeconds = defaultOTPWaitSeconds
-		}
+		timeoutSeconds = defaultOTPWaitSeconds
 	}
 	input.TimeoutSeconds = timeoutSeconds
 	timeout := time.Duration(timeoutSeconds) * time.Second
@@ -122,6 +117,38 @@ func waitForOTP(ctx workflow.Context, input OTPWaitInput) (OTPWaitOutput, error)
 		}
 	}
 }
+
+func waitForManualAddBalance(ctx workflow.Context, timeoutSeconds int32) error {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 1800
+	}
+	timerCtx, cancelTimer := workflow.WithCancel(ctx)
+	timer := workflow.NewTimer(timerCtx, time.Duration(timeoutSeconds)*time.Second)
+	signalCh := workflow.GetSignalChannel(ctx, manualAddBalanceSignalName)
+
+	var confirmed bool
+	var timedOut bool
+	selector := workflow.NewSelector(ctx)
+	selector.AddReceive(signalCh, func(c workflow.ReceiveChannel, more bool) {
+		var signal ManualAddBalanceSignal
+		c.Receive(ctx, &signal)
+		confirmed = true
+	})
+	selector.AddFuture(timer, func(f workflow.Future) {
+		timedOut = true
+	})
+	selector.Select(ctx)
+
+	if confirmed {
+		cancelTimer()
+		return nil
+	}
+	if timedOut {
+		return fmt.Errorf("manual add_balance not confirmed after %ds", timeoutSeconds)
+	}
+	return fmt.Errorf("manual add_balance wait ended unexpectedly")
+}
+
 func atomicActivityOptions(timeout time.Duration) workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		StartToCloseTimeout: timeout,

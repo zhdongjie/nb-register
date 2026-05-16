@@ -37,6 +37,49 @@ def jwt_with_payload(payload: dict) -> str:
     return f"{header}.{body}.signature"
 
 
+class GopayClientHeaderTests(unittest.TestCase):
+    def test_customer_signup_uses_captured_app_header_profile(self):
+        client = gopay_client.GopayClient(
+            "",
+            device={
+                "x-uniqueid": "unique-id",
+                "x-devicetoken": "device-token",
+                "x-e2": "xe2",
+                "m1_signature": "m1-signature",
+                "m1_appsflyer_id": "appsflyer-id",
+                "m1_widevine_id": "widevine-id",
+            },
+        )
+
+        with patch.object(gopay_client, "generate_xe1", return_value=("xe1", "body-md5")) as sign:
+            headers = client._headers(
+                "POST",
+                "https://api.gojekapi.com/v7/customers/signup",
+                '{"client_name":"gopay:consumer:app"}',
+                {
+                    "Authorization": "Basic request-id",
+                    "Verification-Token": "Bearer verification-token",
+                },
+            )
+
+        self.assertEqual(sign.call_args.args[3], "Basic request-id")
+        self.assertEqual(headers["Authorization"], "Basic request-id")
+        self.assertEqual(headers["Verification-Token"], "Bearer verification-token")
+        self.assertEqual(headers["X-E1"], "xe1")
+        self.assertEqual(headers["X-E2"], "xe2")
+        self.assertEqual(headers["X-AppId"], "com.gojek.gopay")
+        self.assertEqual(headers["X-AppType"], "GOPAY")
+        self.assertEqual(headers["Gojek-Country-Code"], "ID")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertIn("X-M1", headers)
+        for key in ("X-AuthSDK-Version", "X-CVSDK-Version", "X-Request-ID", "Transaction-ID", "X-Location", "X-Location-Accuracy"):
+            self.assertIn(key, headers)
+        self.assertNotIn("D1", headers)
+        self.assertNotIn("X-E3", headers)
+        self.assertNotIn("AdjTs", headers)
+        self.assertNotIn("X-Session-ID", headers)
+
+
 class TokenRefreshTests(unittest.TestCase):
     def test_access_token_usable_checks_exp(self):
         state = {"token": jwt_with_exp(int(time.time()) + 120)}
@@ -88,6 +131,35 @@ class TokenRefreshTests(unittest.TestCase):
 
         self.assertNotEqual(state["token"], "old-token")
         self.assertNotIn("refresh_token", state)
+
+    def test_refresh_access_token_prefers_captured_token_field(self):
+        state = {"token": "access-token", "refresh_token": "refresh-token"}
+        calls = []
+        client_tokens = []
+
+        class FakeClient:
+            def __init__(self, token, proxy=None, device=None):
+                client_tokens.append(token)
+
+            def post(self, url, body=None, **kwargs):
+                calls.append(body)
+                return {
+                    "status": 201,
+                    "data": {
+                        "access_token": jwt_with_exp(int(time.time()) + 3600),
+                        "refresh_token": "new-refresh-token",
+                    },
+                }
+
+        with patch.object(gopay_app, "GopayClient", FakeClient), \
+                patch.object(gopay_app, "save_state", lambda target: None):
+            result = gopay_app.refresh_access_token(state)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(client_tokens[0], "access-token")
+        self.assertEqual(calls[0]["grant_type"], "refresh_token")
+        self.assertEqual(calls[0]["token"], "refresh-token")
+        self.assertNotIn("refresh_token", calls[0])
 
     def test_check_token_valid_checks_profile_before_refresh(self):
         state = {"token": "access-token", "device": {}}
@@ -239,14 +311,94 @@ class TokenRefreshTests(unittest.TestCase):
 
 
 class LogonProfileTests(unittest.TestCase):
-    def test_new_logon_device_profile_randomizes_model(self):
-        with patch.object(gopay_app, "generate_device_fingerprint", return_value={"x-uniqueid": "u1"}) as gen:
+    def test_new_logon_device_profile_uses_default_capture_shape(self):
+        with patch.object(gopay_app, "generate_random_device_fingerprint", return_value={"x-uniqueid": "u1"}) as gen:
             profile = gopay_app.new_logon_device_profile()
 
-        gen.assert_called_once_with(randomize_model=True)
+        gen.assert_called_once_with()
         self.assertEqual(profile["x-uniqueid"], "u1")
         self.assertTrue(profile["profile_id"])
         self.assertTrue(profile["profile_created_at"])
+
+    def test_random_device_fingerprint_ignores_static_identity_env(self):
+        with patch.dict(gopay_client.os.environ, {
+            "GOPAY_UNIQUE_ID": "fixed-unique-id",
+            "GOPAY_APPSFLYER_ID": "fixed-appsflyer-id",
+            "GOPAY_WIDEVINE_ID": "fixed-widevine-id",
+            "GOPAY_M1_SIGNATURE": "fixed-m1-signature",
+            "GOPAY_D1": "fixed-d1",
+            "GOPAY_SCREEN": "1080x2148",
+            "GOPAY_DEVICE_OS": "Android, 99",
+            "GOPAY_USER_AGENT": "fixed-user-agent",
+            "GOPAY_WIFI_MAC": "02:00:00:00:00:00",
+            "GOPAY_STATIC_DEVICE_IDENTITY": "",
+        }, clear=False):
+            first = gopay_client.generate_random_device_fingerprint()
+            second = gopay_client.generate_random_device_fingerprint()
+
+        for field, fixed in (
+            ("x-uniqueid", "fixed-unique-id"),
+            ("m1_appsflyer_id", "fixed-appsflyer-id"),
+            ("m1_widevine_id", "fixed-widevine-id"),
+            ("m1_signature", "fixed-m1-signature"),
+            ("d1", "fixed-d1"),
+            ("m1_wifi_mac", "02:00:00:00:00:00"),
+        ):
+            self.assertNotEqual(first[field], fixed)
+            self.assertNotEqual(second[field], fixed)
+            self.assertNotEqual(first[field], second[field])
+        for device in (first, second):
+            self.assertNotEqual(device["x-phonemodel"], "Google, sdk_gphone_arm64")
+            self.assertNotEqual(device["m1_screen"], "1080x2148")
+            self.assertNotEqual(device["x-deviceos"], "Android, 99")
+            self.assertNotEqual(device["user-agent"], "fixed-user-agent")
+
+    def test_ensure_device_defaults_randomizes_missing_template_fields(self):
+        with patch.dict(gopay_client.os.environ, {
+            "GOPAY_UNIQUE_ID": "fixed-unique-id",
+            "GOPAY_SCREEN": "1080x2148",
+            "GOPAY_STATIC_DEVICE_IDENTITY": "",
+        }, clear=False):
+            device = gopay_client._ensure_device_defaults({})
+
+        self.assertNotEqual(device["x-uniqueid"], "fixed-unique-id")
+        self.assertNotEqual(device["x-phonemodel"], "Google, sdk_gphone_arm64")
+        self.assertNotEqual(device["m1_screen"], "1080x2148")
+
+    def test_state_device_is_initialized_once_per_flow(self):
+        state = {}
+        saved = []
+
+        with patch.object(gopay_app, "save_state", lambda target: saved.append(json.dumps(target, sort_keys=True))):
+            first = gopay_app.ensure_state_device(state)
+            first_snapshot = json.dumps(first, sort_keys=True)
+            with patch.object(
+                gopay_app,
+                "generate_random_device_fingerprint",
+                side_effect=AssertionError("device fingerprint should be reused"),
+            ):
+                second = gopay_app.ensure_state_device(state)
+
+        self.assertIs(first, second)
+        self.assertEqual(json.dumps(second, sort_keys=True), first_snapshot)
+        self.assertEqual(state["device"]["profile_id"], first["profile_id"])
+        self.assertEqual(len(saved), 1)
+
+    def test_partial_state_device_is_completed_then_reused(self):
+        state = {"device": {"x-uniqueid": "flow-device", "profile_id": "flow-profile"}}
+        saved = []
+
+        with patch.object(gopay_app, "save_state", lambda target: saved.append(json.dumps(target, sort_keys=True))):
+            first = gopay_app.ensure_state_device(state)
+            first_snapshot = json.dumps(first, sort_keys=True)
+            second = gopay_app.ensure_state_device(state)
+
+        self.assertIs(first, second)
+        self.assertEqual(json.dumps(second, sort_keys=True), first_snapshot)
+        self.assertEqual(first["x-uniqueid"], "flow-device")
+        self.assertEqual(first["profile_id"], "flow-profile")
+        self.assertTrue(first["profile_created_at"])
+        self.assertEqual(len(saved), 1)
 
     def test_start_login_uses_fresh_profile_each_start(self):
         states = [{}, {}]
@@ -285,6 +437,72 @@ class LogonProfileTests(unittest.TestCase):
         self.assertEqual(client_devices[0]["profile_id"], "p1")
         self.assertEqual(client_devices[1]["profile_id"], "p2")
 
+    def test_start_login_uses_nb_pin_endpoints_for_prelogin_pin(self):
+        state = {}
+        calls = []
+        profile = {"profile_id": "login-profile", "x-uniqueid": "login-u1"}
+
+        class FakeClient:
+            def __init__(self, token, proxy=None, device=None):
+                self.token = token
+
+            def post(self, url, body=None, **kwargs):
+                calls.append(("post", url, body, kwargs))
+                if url.endswith("/goto-auth/login/methods"):
+                    return {
+                        "status": 201,
+                        "data": {
+                            "methods": ["goto_pin"],
+                            "verification_id": "login-verification-id",
+                        },
+                    }
+                if url.endswith("/cvs/v1/initiate"):
+                    return {"status": 200, "data": {"challenge_id": "challenge-id"}}
+                if url.endswith("/pin/tokens/nb"):
+                    return {"status": 200, "data": {"token": "validation-jwt"}}
+                if url.endswith("/cvs/v1/verify"):
+                    return {"status": 200, "data": {"verification_token": "verification-token"}}
+                if url.endswith("/goto-auth/accountlist"):
+                    return {
+                        "status": 200,
+                        "data": {
+                            "account_list": [{"account_id": "account-id"}],
+                            "1fa_token": "one-fa-token",
+                        },
+                    }
+                if url.endswith("/goto-auth/token"):
+                    return {
+                        "status": 201,
+                        "data": {
+                            "access_token": jwt_with_exp(int(time.time()) + 3600),
+                            "refresh_token": "refresh-token",
+                            "expires_in": 1500,
+                        },
+                    }
+                raise AssertionError(f"unexpected post {url}")
+
+            def get(self, url, **kwargs):
+                calls.append(("get", url, None, kwargs))
+                if url.endswith("/pin-page/nb"):
+                    return {"status": 200, "data": {}, "raw": {"success": True}}
+                raise AssertionError(f"unexpected get {url}")
+
+        with patch.object(gopay_app, "save_state", lambda target: None), \
+                patch.object(gopay_app, "new_logon_device_profile", return_value=profile), \
+                patch.object(gopay_app, "GopayClient", FakeClient):
+            result = gopay_app.start_login(state, TEST_LOCAL_PHONE, TEST_PIN, "+62")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["ready"])
+        self.assertIn(
+            ("get", "https://customer.gopayapi.com/api/v2/challenges/challenge-id/pin-page/nb", None, {}),
+            calls,
+        )
+        self.assertIn(
+            "https://customer.gopayapi.com/api/v1/users/pin/tokens/nb",
+            [call[1] for call in calls],
+        )
+
 
 class ProfileHeaderTests(unittest.TestCase):
     def test_customer_slim_get_headers_match_gopay_capture_shape(self):
@@ -304,9 +522,15 @@ class ProfileHeaderTests(unittest.TestCase):
             lower = {key.lower(): value for key, value in headers.items()}
             for key in (
                 "authorization",
+                "country-code",
+                "gojek-service-area",
+                "gojek-timezone",
                 "x-appversion",
                 "x-uniqueid",
                 "x-phonemake",
+                "x-help-version",
+                "x-location",
+                "x-location-accuracy",
                 "x-e1",
                 "x-deviceos",
                 "x-user-type",
@@ -320,6 +544,10 @@ class ProfileHeaderTests(unittest.TestCase):
                 "accept-language",
                 "x-user-locale",
                 "x-devicetoken",
+                "x-authsdk-version",
+                "x-cvsdk-version",
+                "x-request-id",
+                "transaction-id",
                 "gojek-country-code",
             ):
                 self.assertIn(key, lower)
@@ -330,12 +558,108 @@ class ProfileHeaderTests(unittest.TestCase):
                 "adjts",
                 "x-pushtokentype",
                 "user-uuid",
-                "x-location",
-                "x-location-accuracy",
                 "x-dark-mode",
                 "content-type",
             ):
                 self.assertNotIn(key, lower)
+
+    def test_customer_pin_and_deactivation_headers_match_capture_shape(self):
+        device = gopay_app.new_logon_device_profile()
+        client = gopay_client.GopayClient("access-token", device=device)
+
+        with patch.object(gopay_client, "HMAC_KEY", "test-key"):
+            header_sets = [
+                client._headers(
+                    "POST",
+                    "https://customer.gopayapi.com/api/v1/users/pin/challenges",
+                    '{"flow":"pin_change"}',
+                    None,
+                ),
+                client._headers(
+                    "POST",
+                    "https://customer.gopayapi.com/api/v1/users/pin/tokens",
+                    '{"challenge_id":"challenge","client_id":"client","pin":"000000"}',
+                    None,
+                ),
+                client._headers(
+                    "POST",
+                    "https://customer.gopayapi.com/api/v1/users/pin/tokens/nb",
+                    '{"challenge_id":"challenge","client_id":"client","pin":"000000"}',
+                    None,
+                ),
+                client._headers(
+                    "GET",
+                    "https://customer.gopayapi.com/api/v1/users/deactivate/check",
+                    "",
+                    None,
+                ),
+                client._headers(
+                    "GET",
+                    "https://customer.gopayapi.com/api/v2/challenges/challenge/pin-page/nb",
+                    "",
+                    None,
+                ),
+                client._headers(
+                    "DELETE",
+                    "https://customer.gopayapi.com/api/v1/users/deactivate",
+                    '{"otp":"1234","reason":"I no longer need this account","description":null}',
+                    None,
+                ),
+            ]
+
+        for headers in header_sets:
+            lower = {key.lower(): value for key, value in headers.items()}
+            for key in (
+                "accept-encoding",
+                "authorization",
+                "gojek-service-area",
+                "country-code",
+                "x-appversion",
+                "x-m1",
+                "gojek-country-code",
+                "x-uniqueid",
+                "x-phonemake",
+                "x-help-version",
+                "x-location",
+                "x-location-accuracy",
+                "x-e1",
+                "x-deviceos",
+                "x-user-type",
+                "user-agent",
+                "x-appid",
+                "gojek-timezone",
+                "x-apptype",
+                "x-user-locale",
+                "x-devicetoken",
+                "x-e2",
+                "x-authsdk-version",
+                "x-cvsdk-version",
+                "x-request-id",
+                "transaction-id",
+                "accept-language",
+                "x-phonemodel",
+                "x-platform",
+            ):
+                self.assertIn(key, lower)
+            for key in (
+                "x-e3",
+                "d1",
+                "x-session-id",
+                "adjts",
+                "x-pushtokentype",
+                "user-uuid",
+                "x-dark-mode",
+            ):
+                self.assertNotIn(key, lower)
+
+        pin_headers = {key.lower(): value for key, value in header_sets[1].items()}
+        self.assertEqual(pin_headers["sdk-version"], "2.7.0")
+        self.assertEqual(pin_headers["x-biometric"], "")
+        self.assertEqual(pin_headers["x-verification"], "PIN")
+
+        nb_pin_headers = {key.lower(): value for key, value in header_sets[2].items()}
+        for key in ("sdk-version", "x-biometric", "x-verification"):
+            self.assertNotIn(key, nb_pin_headers)
 
     def test_gojek_activity_change_phone_headers_match_capture_shape(self):
         device = gopay_app.new_logon_device_profile()
@@ -367,6 +691,8 @@ class ProfileHeaderTests(unittest.TestCase):
             "x-uniqueid",
             "x-phonemake",
             "x-help-version",
+            "x-location",
+            "x-location-accuracy",
             "x-e1",
             "x-deviceos",
             "x-user-type",
@@ -378,6 +704,10 @@ class ProfileHeaderTests(unittest.TestCase):
             "x-user-locale",
             "x-devicetoken",
             "x-e2",
+            "x-authsdk-version",
+            "x-cvsdk-version",
+            "x-request-id",
+            "transaction-id",
             "accept-language",
             "x-phonemodel",
             "x-platform",
@@ -391,11 +721,7 @@ class ProfileHeaderTests(unittest.TestCase):
             "adjts",
             "x-pushtokentype",
             "user-uuid",
-            "x-location",
-            "x-location-accuracy",
             "x-dark-mode",
-            "x-authsdk-version",
-            "transaction-id",
         ):
             self.assertNotIn(key, lower)
 
@@ -409,7 +735,7 @@ class ProfileHeaderTests(unittest.TestCase):
                 client._headers("PATCH", "https://customer.gopayapi.com/v1/links/link-1", "", None),
                 client._headers(
                     "GET",
-                    "https://customer.gopayapi.com/v1/festivals/envelope-requests/6a070b928feaf260b5a0b201",
+                    "https://customer.gopayapi.com/v1/festivals/envelope-requests/test-envelope-request-id",
                     "",
                     None,
                 ),
@@ -430,6 +756,8 @@ class ProfileHeaderTests(unittest.TestCase):
                 "x-uniqueid",
                 "x-phonemake",
                 "x-help-version",
+                "x-location",
+                "x-location-accuracy",
                 "x-e1",
                 "x-deviceos",
                 "x-user-type",
@@ -440,6 +768,10 @@ class ProfileHeaderTests(unittest.TestCase):
                 "x-user-locale",
                 "x-devicetoken",
                 "x-e2",
+                "x-authsdk-version",
+                "x-cvsdk-version",
+                "x-request-id",
+                "transaction-id",
                 "accept-language",
                 "x-phonemodel",
                 "x-platform",
@@ -452,8 +784,6 @@ class ProfileHeaderTests(unittest.TestCase):
                 "adjts",
                 "x-pushtokentype",
                 "user-uuid",
-                "x-location",
-                "x-location-accuracy",
                 "x-dark-mode",
                 "content-type",
             ):
@@ -903,8 +1233,49 @@ class LoginStartTests(unittest.TestCase):
         self.assertEqual(captured["phone"], TEST_CHANGE_LOCAL_PHONE)
         self.assertEqual(captured["country_code"], "+62")
 
+    @unittest.skipIf(app_server is None, f"app_server import failed: {APP_SERVER_IMPORT_ERROR}")
+    def test_signup_start_generates_profile_when_name_missing_and_keeps_empty_email(self):
+        state = {"stage": "idle"}
+        captured = {}
+
+        def fake_start_signup(target, phone, name, email, country_code, otp_channel=""):
+            captured["phone"] = phone
+            captured["name"] = name
+            captured["email"] = email
+            captured["country_code"] = country_code
+            return {
+                "success": True,
+                "otp_sent": True,
+                "verification_id": "verification-id",
+                "method": "otp_sms",
+            }
+
+        with patch.object(app_server, "load_state", lambda: dict(state)), \
+                patch.object(app_server, "save_state", lambda target: None), \
+                patch.object(app_server, "start_signup", fake_start_signup), \
+                patch.object(app_server, "GOPAY_SIGNUP_NAME", ""), \
+                patch.object(app_server, "GOPAY_SIGNUP_EMAIL", ""), \
+                patch.object(app_server.time, "time", return_value=1770000000), \
+                patch.object(app_server.os, "urandom", return_value=bytes.fromhex("abcdef")):
+            resp = app_server.GopayAppServicer().SignupStart(
+                app_server.gopay_app_pb2.SignupStartRequest(phone=TEST_CHANGE_LOCAL_PHONE),
+                None,
+            )
+
+        self.assertTrue(resp.success)
+        self.assertEqual(captured["name"], "op")
+        self.assertEqual(captured["email"], "")
+
 
 class SignupFlowTests(unittest.TestCase):
+    def test_otp_method_selection_distinguishes_sms_and_wa(self):
+        methods = ["otp_wa", "otp_sms"]
+
+        self.assertEqual(gopay_app._choose_method(methods, ""), "otp_sms")
+        self.assertEqual(gopay_app._choose_method(methods, "sms"), "otp_sms")
+        self.assertEqual(gopay_app._choose_method(methods, "wa"), "otp_wa")
+        self.assertEqual(gopay_app._choose_method(["otp_wa"], "sms"), "")
+
     def test_signup_basic_authorization_uses_env_uuid(self):
         request_id = "87654321-4321-6789-4321-678987654321"
         expected = "Basic " + base64.b64encode(request_id.encode("utf-8")).decode("ascii")
@@ -958,7 +1329,48 @@ class SignupFlowTests(unittest.TestCase):
         self.assertEqual(client_devices[0]["profile_id"], "signup-profile")
         self.assertEqual(calls[0][1]["flow"], "signup")
         self.assertEqual(calls[0][1]["country_code"], "+62")
-        self.assertEqual(calls[1][1]["verification_method"], "otp_wa")
+        self.assertEqual(calls[1][1]["verification_method"], "otp_sms")
+
+    def test_retry_signup_otp_uses_cvs_retry_flow(self):
+        state = {
+            "stage": "signup_otp_pending",
+            "token": "access-token",
+            "device": {"profile_id": "signup-profile"},
+            "_signup_verification_method": "otp_sms",
+            "_signup_otp_token": "signup-otp-token",
+        }
+        calls = []
+
+        class FakeClient:
+            def __init__(self, token, proxy=None, device=None):
+                self.token = token
+                self.device = device
+
+            def post(self, url, body=None, **kwargs):
+                calls.append((url, body, kwargs, self.token, self.device))
+                if url.endswith("/cvs/v1/retry"):
+                    return {
+                        "status": 200,
+                        "success": True,
+                        "data": {"otp_token": "retry-otp-token"},
+                    }
+                raise AssertionError(f"unexpected post {url}")
+
+        with patch.object(gopay_app, "save_state", lambda target: None), \
+                patch.object(gopay_app.time, "time", return_value=1770000123), \
+                patch.object(gopay_app, "GopayClient", FakeClient):
+            result = gopay_app.retry_signup_otp(state)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(calls[0][0], "https://accounts.goto-products.com/cvs/v1/retry")
+        self.assertEqual(calls[0][1]["flow"], "signup")
+        self.assertEqual(calls[0][1]["verification_method"], "otp_sms")
+        self.assertEqual(calls[0][1]["data"]["otp_token"], "signup-otp-token")
+        self.assertEqual(calls[0][3], "access-token")
+        self.assertEqual(calls[0][4]["profile_id"], "signup-profile")
+        self.assertEqual(state["_signup_otp_token"], "retry-otp-token")
+        self.assertEqual(state["_signup_otp_sent_at"], 1770000123)
+        self.assertIn('"success":true', result["raw_json"])
 
     def test_complete_signup_creates_customer_and_refreshes_token(self):
         state = {
@@ -968,7 +1380,7 @@ class SignupFlowTests(unittest.TestCase):
             "_signup_phone": TEST_LOCAL_PHONE,
             "_signup_country_code": "+62",
             "_signup_name": "gg",
-            "_signup_email": "gg@example.test",
+            "_signup_email": "",
             "_signup_verification_id": "verification-id",
             "_signup_verification_method": "otp_wa",
             "_signup_otp_token": "signup-otp-token",
@@ -1015,6 +1427,7 @@ class SignupFlowTests(unittest.TestCase):
         self.assertNotIn("_signup_otp_token", state)
         signup_call = calls[1]
         self.assertEqual(signup_call[1]["data"]["phone"], TEST_E164_PHONE)
+        self.assertEqual(signup_call[1]["data"]["email"], "")
         self.assertEqual(
             signup_call[2]["extra_headers"],
             {
@@ -1040,11 +1453,6 @@ class SignupFlowTests(unittest.TestCase):
                 calls.append((url, body, kwargs))
                 if url.endswith("/api/v1/users/pins/allowed"):
                     return {"status": 200, "data": {"success": True}}
-                if url.endswith("/api/v1/users/pin/challenges"):
-                    return {
-                        "status": 200,
-                        "data": {"challenge_id": "challenge-id", "client_id": "pin-client-id"},
-                    }
                 if url.endswith("/cvs/v1/methods"):
                     return {
                         "status": 200,
@@ -1073,25 +1481,36 @@ class SignupFlowTests(unittest.TestCase):
         self.assertEqual(state["stage"], "ready")
         self.assertEqual(state["phone"], TEST_LOCAL_PHONE)
         self.assertNotIn("_signup_pin_otp_token", state)
-        methods_call = calls[2]
-        self.assertEqual(methods_call[1]["flow"], "goto_pin_wa_sms_gp_app")
+        methods_call = calls[1]
+        self.assertEqual(methods_call[1]["flow"], "goto_pin_wa_sms")
         self.assertIsNone(methods_call[1]["country_code"])
+        self.assertIsNone(methods_call[1]["phone_number"])
+        initiate_call = calls[2]
+        self.assertEqual(initiate_call[1]["flow"], "goto_pin_wa_sms")
+        self.assertEqual(initiate_call[1]["verification_method"], "otp_sms")
+        self.assertIsNone(initiate_call[1]["phone_number"])
+        verify_call = calls[3]
+        self.assertEqual(verify_call[1]["flow"], "goto_pin_wa_sms")
+        self.assertEqual(verify_call[1]["verification_method"], "otp_sms")
         setup_call = calls[-1]
         self.assertEqual(setup_call[1], {
+            "client_id": "",
             "pin": TEST_PIN,
-            "client_id": "pin-client-id",
-            "challenge_id": "challenge-id",
+            "challenge_id": "",
         })
         self.assertEqual(
             setup_call[2]["extra_headers"],
-            {"Verification-Token": "Bearer pin-verification-token"},
+            {
+                "Verification-Token": "Bearer pin-verification-token",
+                "Is-Token-Required": "false",
+            },
         )
 
 
 class EnvelopeFlowTests(unittest.TestCase):
     @unittest.skipIf(app_server is None, f"app_server import failed: {APP_SERVER_IMPORT_ERROR}")
     def test_extracts_envelope_id_from_shortlink_html(self):
-        envelope_id = "6a070b928feaf260b5a0b201"
+        envelope_id = "test-envelope-request-id"
         html = (
             "<script>var app_link = "
             f"'gopay://envelope/home?data=%7Benvelope_request_id:{envelope_id}%7D';</script>"
@@ -1100,40 +1519,85 @@ class EnvelopeFlowTests(unittest.TestCase):
         self.assertEqual(app_server._extract_envelope_request_id(html), envelope_id)
 
     @unittest.skipIf(app_server is None, f"app_server import failed: {APP_SERVER_IMPORT_ERROR}")
-    def test_claim_envelope_calls_customer_endpoint(self):
-        envelope_id = "6a070b928feaf260b5a0b201"
-        response_envelope_id = "6a070b928feaf260b5a0b20e"
+    def test_claim_envelope_uses_festivals_endpoint_and_loads_detail(self):
+        calls = []
+
+        class FakeClient:
+            def post(self, url, body=None, **kwargs):
+                calls.append(("post", url, body))
+                return {
+                    "status": 200,
+                    "data": {"envelope_request_id": "response-envelope-id"},
+                    "raw": {"data": {"envelope_request_id": "response-envelope-id"}, "success": True},
+                }
+
+            def get(self, url, **kwargs):
+                calls.append(("get", url, None))
+                return {
+                    "status": 200,
+                    "data": {
+                        "envelope_request_id": "response-envelope-id",
+                        "status": "OPENED",
+                        "amount": 20,
+                        "currency": "IDR",
+                    },
+                    "raw": {
+                        "data": {
+                            "envelope_request_id": "response-envelope-id",
+                            "status": "OPENED",
+                            "amount": 20,
+                            "currency": "IDR",
+                        },
+                        "success": True,
+                    },
+                }
+
+        response = app_server._claim_envelope(FakeClient(), "request-envelope-id")
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(response["data"]["status"], "OPENED")
+        self.assertEqual(calls[0], (
+            "post",
+            "https://customer.gopayapi.com/v1/festivals/envelope-requests",
+            {"envelope_request_id": "request-envelope-id"},
+        ))
+        self.assertEqual(calls[1], (
+            "get",
+            "https://customer.gopayapi.com/v1/festivals/envelope-requests/request-envelope-id",
+            None,
+        ))
+
+    @unittest.skipIf(app_server is None, f"app_server import failed: {APP_SERVER_IMPORT_ERROR}")
+    def test_claim_envelope_posts_claim_endpoint(self):
+        envelope_id = "test-envelope-request-id"
         state = {
             "stage": "ready",
             "token": jwt_with_exp(int(time.time()) + 3600),
             "device": {},
         }
+        client = object()
         calls = []
 
-        class FakeClient:
-            def __init__(self, token, proxy=None, device=None):
-                self.token = token
+        def fake_claim(target_client, target_envelope_id):
+            calls.append((target_client, target_envelope_id))
+            return {
+                "status": 200,
+                "data": {
+                    "amount": 2,
+                    "currency": "IDR",
+                    "remaining": 88,
+                    "total": 100,
+                },
+                "raw": {
+                    "amount": 2,
+                    "currency": "IDR",
+                    "remaining": 88,
+                    "total": 100,
+                },
+            }
 
-            def get(self, url, **kwargs):
-                calls.append(url)
-                return {
-                    "status": 200,
-                    "data": {
-                        "envelope_request_id": response_envelope_id,
-                        "status": "CREATED",
-                    },
-                    "raw": {
-                        "success": True,
-                        "data": {
-                            "envelope_request_id": response_envelope_id,
-                            "status": "CREATED",
-                        },
-                    },
-                }
-
-        with patch.object(app_server, "GopayClient", FakeClient), \
-                patch.object(app_server, "ensure_access_token", lambda target: {"success": True}), \
-                patch.object(app_server, "access_token_usable", lambda target, min_ttl=0: True):
+        with patch.object(app_server, "_client", lambda target: client), \
+                patch.object(app_server, "_claim_envelope", fake_claim):
             resp = app_server.GopayAppServicer().ClaimEnvelope(
                 app_server.gopay_app_pb2.ClaimEnvelopeRequest(
                     envelope_request_id=envelope_id,
@@ -1144,13 +1608,9 @@ class EnvelopeFlowTests(unittest.TestCase):
 
         self.assertTrue(resp.success)
         self.assertEqual(resp.envelope_request_id, envelope_id)
-        self.assertEqual(resp.response_envelope_request_id, response_envelope_id)
-        self.assertEqual(resp.status, "CREATED")
         self.assertEqual(resp.http_status, 200)
-        self.assertIn(response_envelope_id, resp.raw_json)
-        self.assertEqual(calls, [
-            f"https://customer.gopayapi.com/v1/festivals/envelope-requests/{envelope_id}",
-        ])
+        self.assertIn('"amount":2', resp.raw_json)
+        self.assertEqual(calls, [(client, envelope_id)])
 
 
 class DeactivationFlowTests(unittest.TestCase):
@@ -1257,7 +1717,8 @@ class ChangePhoneActivityFlowTests(unittest.TestCase):
                     },
                 }
 
-        with patch.object(gopay_app, "new_logon_device_profile", side_effect=devices), \
+        with patch.dict(gopay_app.os.environ, {"GOPAY_PROXY_POOL": "http://proxy-1 http://proxy-2"}), \
+                patch.object(gopay_app, "new_logon_device_profile", side_effect=devices), \
                 patch.object(gopay_app, "GopayClient", FakeClient):
             first = gopay_app.check_phone_by_login_methods("8000000000", "+62")
             second = gopay_app.check_phone_by_login_methods("8000000001", "+62")
@@ -1265,6 +1726,85 @@ class ChangePhoneActivityFlowTests(unittest.TestCase):
         self.assertTrue(first["available"])
         self.assertTrue(second["available"])
         self.assertEqual(used_devices, devices)
+
+    def test_check_phone_login_methods_rotates_fingerprint_and_proxy_after_rate_limit(self):
+        devices = [{"profile_id": "p1"}, {"profile_id": "p2"}, {"profile_id": "p3"}]
+        used_devices = []
+        used_proxies = []
+        responses = [
+            {"status": 429, "raw": {"errors": [{"code": "RateLimited"}]}},
+            {"status": 429, "raw": {"errors": [{"code": "RateLimited"}]}},
+            {
+                "status": 401,
+                "raw": {
+                    "errors": [{
+                        "message_title": "Invalid User",
+                        "message": "Could not find the user +628000000000",
+                    }]
+                },
+            },
+        ]
+
+        class FakeClient:
+            def __init__(self, token, proxy=None, device=None):
+                used_devices.append(device)
+                used_proxies.append(proxy)
+
+            def post(self, url, body=None, **kwargs):
+                return responses.pop(0)
+
+        with patch.dict(gopay_app.os.environ, {"GOPAY_PROXY_POOL": "http://proxy-1 http://proxy-2,http://proxy-3"}), \
+                patch.object(gopay_app, "new_logon_device_profile", side_effect=devices), \
+                patch.object(gopay_app, "GopayClient", FakeClient), \
+                patch.object(gopay_app.time, "sleep", lambda _seconds: None):
+            result = gopay_app.check_phone_by_login_methods("8000000000", "+62")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["attempts"], 3)
+        self.assertEqual(result["fingerprint_rotations"], 2)
+        self.assertEqual(result["proxy_rotations"], 2)
+        self.assertEqual(result["proxy_pool_size"], 3)
+        self.assertEqual(used_devices, devices)
+        self.assertEqual(used_proxies, ["http://proxy-1", "http://proxy-2", "http://proxy-3"])
+
+    def test_check_phone_login_methods_fails_when_proxy_wheel_returns_to_first(self):
+        devices = [{"profile_id": "p1"}, {"profile_id": "p2"}]
+        used_devices = []
+        used_proxies = []
+
+        class FakeClient:
+            def __init__(self, token, proxy=None, device=None):
+                used_devices.append(device)
+                used_proxies.append(proxy)
+
+            def post(self, url, body=None, **kwargs):
+                return {"status": 429, "raw": {"errors": [{"code": "RateLimited"}]}}
+
+        with patch.dict(gopay_app.os.environ, {"GOPAY_PROXY_POOL": "http://proxy-1,http://proxy-2"}), \
+                patch.object(gopay_app, "new_logon_device_profile", side_effect=devices), \
+                patch.object(gopay_app, "GopayClient", FakeClient), \
+                patch.object(gopay_app.time, "sleep", lambda _seconds: None):
+            result = gopay_app.check_phone_by_login_methods("8000000000", "+62")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "rate_limited")
+        self.assertIn("GOPAY_PROXY_POOL exhausted", result["error"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["proxy_pool_size"], 2)
+        self.assertEqual(used_devices, devices)
+        self.assertEqual(used_proxies, ["http://proxy-1", "http://proxy-2"])
+
+    def test_proxy_rotation_starts_from_previous_proxy_without_first_state(self):
+        state = {"_gopay_proxy": "http://proxy-2"}
+        with patch.dict(gopay_app.os.environ, {"GOPAY_PROXY_POOL": "http://proxy-1,http://proxy-2,http://proxy-3"}):
+            first = gopay_app.gopay_proxy_for_attempt(1, state)
+            second = gopay_app.gopay_proxy_for_attempt(2, state)
+            third = gopay_app.gopay_proxy_for_attempt(3, state)
+
+        self.assertEqual(first[0], "http://proxy-2")
+        self.assertEqual(second[0], "http://proxy-3")
+        self.assertEqual(third[0], "http://proxy-1")
+        self.assertNotIn("_gopay_proxy_first", state)
 
     @unittest.skipIf(app_server is None, f"app_server import failed: {APP_SERVER_IMPORT_ERROR}")
     def test_check_phone_returns_registered_from_login_methods(self):

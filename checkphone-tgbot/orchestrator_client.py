@@ -31,6 +31,17 @@ class OrchestratorGopayClient:
         pb2, stub = self._ensure_stub()
         return stub.GoPayUserClearState(pb2.GoPayUserClearStateRequest(state_key=state_key), timeout=self.timeout)
 
+    def set_wa_phone(self, state_key: str, *, wa_phone: str):
+        pb2, stub = self._ensure_stub()
+        return stub.GoPayUserSetWAPhone(
+            pb2.GoPayUserSetWAPhoneRequest(state_key=state_key, wa_phone=wa_phone),
+            timeout=self.timeout,
+        )
+
+    def get_wa_phone(self, state_key: str):
+        pb2, stub = self._ensure_stub()
+        return stub.GoPayUserGetWAPhone(pb2.GoPayUserGetWAPhoneRequest(state_key=state_key), timeout=self.timeout)
+
     def auth_start(self, state_key: str, *, phone: str, country_code: str, pin: str):
         pb2, stub = self._ensure_stub()
         return stub.GoPayUserAuthStart(

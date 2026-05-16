@@ -49,6 +49,10 @@ class FakeGopayClient:
         self.calls.append(("clear_state", state_key))
         return SimpleNamespace(success=True, error_message="")
 
+    def set_wa_phone(self, state_key, *, wa_phone):
+        self.calls.append(("set_wa_phone", state_key, wa_phone))
+        return SimpleNamespace(success=True, error_message="", state_key=state_key, wa_phone=wa_phone)
+
 
 class TelegramBotParsingTests(unittest.TestCase):
     def test_parse_plain_phone_uses_default_country_code(self):
@@ -248,6 +252,32 @@ class TelegramBotParsingTests(unittest.TestCase):
 
         self.assertIn("阶段：ready", text)
         self.assertIn("Token：有", text)
+
+    def test_set_gopay_wa_phone_uses_user_state_key(self):
+        gopay = FakeGopayClient()
+        bot = FakeTelegramBot(default_country_code="62", gopay=gopay)
+
+        bot.handle_update({
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "/set-gopay-wa-phone",
+            },
+        })
+        bot.handle_update({
+            "message": {
+                "message_id": 2,
+                "chat": {"id": 100},
+                "from": {"id": 200},
+                "text": "6281234567890",
+            },
+        })
+
+        self.assertEqual(gopay.calls, [("set_wa_phone", "tg:200", "6281234567890")])
+        messages = [payload["text"] for method, payload in bot.calls if method == "sendMessage"]
+        self.assertIn("请发送 WA 支付注册手机号", messages[0])
+        self.assertIn("已保存 WA 支付手机号", messages[-1])
 
 
 if __name__ == "__main__":

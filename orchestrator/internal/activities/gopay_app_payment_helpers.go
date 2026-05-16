@@ -31,32 +31,26 @@ func (s *Server) gopayAppUnlinkWaitTimeout() time.Duration {
 	return s.gopayAppUnlinkTimeout
 }
 
-func (s *Server) readyGoPayAccountToken(ctx context.Context) (string, string, error) {
+func (s *Server) readyGoPayAccountToken(ctx context.Context, stateJSON string) (string, string, string, error) {
 	if s.gopayClient == nil {
-		return "", "", fmt.Errorf("gopay-app client not configured")
-	}
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return "", "", err
+		return "", "", normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("gopay-app client not configured")
 	}
 	resp, err := s.gopayClient.GetReadyAccountToken(ctx, &pb.GetReadyAccountTokenRequest{StateJson: stateJSON})
-	if err == nil {
-		err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-	}
+	nextStateJSON := goPayWorkflowStateAfter(stateJSON, responseStateJSON(resp))
 	if err != nil {
-		return "", "", fmt.Errorf("GetReadyAccountToken: %w", err)
+		return "", "", nextStateJSON, fmt.Errorf("GetReadyAccountToken: %w", err)
 	}
 	if resp == nil {
-		return "", "", fmt.Errorf("GetReadyAccountToken returned empty response")
+		return "", "", nextStateJSON, fmt.Errorf("GetReadyAccountToken returned empty response")
 	}
 	if !resp.GetSuccess() {
-		return "", "", fmt.Errorf("GetReadyAccountToken: %s", resp.GetErrorMessage())
+		return "", "", nextStateJSON, fmt.Errorf("GetReadyAccountToken: %s", resp.GetErrorMessage())
 	}
 	token := strings.TrimSpace(resp.GetAccountToken())
 	if token == "" {
-		return "", "", fmt.Errorf("GetReadyAccountToken returned empty account token")
+		return "", "", nextStateJSON, fmt.Errorf("GetReadyAccountToken returned empty account token")
 	}
-	return token, strings.TrimSpace(resp.GetPhone()), nil
+	return token, strings.TrimSpace(resp.GetPhone()), nextStateJSON, nil
 }
 
 func paymentLinkFromGoPayResponse(resp *pb.GoPayResponse) (string, error) {
@@ -71,21 +65,17 @@ func paymentLinkFromGoPayResponse(resp *pb.GoPayResponse) (string, error) {
 	return "", fmt.Errorf("midtrans payment link is missing")
 }
 
-func (s *Server) replayGoPayPaymentLink(ctx context.Context, paymentResp *pb.GoPayResponse) (*pb.ReplayLinkPaymentResponse, error) {
+func (s *Server) replayGoPayPaymentLink(ctx context.Context, stateJSON string, paymentResp *pb.GoPayResponse) (*pb.ReplayLinkPaymentResponse, string, error) {
 	if s.gopayClient == nil {
-		return nil, fmt.Errorf("gopay-app client not configured")
+		return nil, normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("gopay-app client not configured")
 	}
 	paymentLink, err := paymentLinkFromGoPayResponse(paymentResp)
 	if err != nil {
-		return nil, err
+		return nil, normalizeGoPayWorkflowStateJSON(stateJSON), err
 	}
 	pin := configuredGoPayPIN()
 	if pin == "" {
-		return nil, fmt.Errorf("GOPAY_PIN is required")
-	}
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return nil, err
+		return nil, normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("GOPAY_PIN is required")
 	}
 	timeout := s.gopayAppLinkPaymentWaitTimeout()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -96,14 +86,12 @@ func (s *Server) replayGoPayPaymentLink(ctx context.Context, paymentResp *pb.GoP
 		Pin:         pin,
 		BodyLimit:   s.gopayAppStepResponseBodyLimit(),
 	})
-	if err == nil {
-		err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-	}
+	nextStateJSON := goPayWorkflowStateAfter(stateJSON, responseStateJSON(resp))
 	if err != nil {
-		return resp, fmt.Errorf("ReplayLinkPayment: %w", err)
+		return resp, nextStateJSON, fmt.Errorf("ReplayLinkPayment: %w", err)
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("ReplayLinkPayment returned empty response")
+		return nil, nextStateJSON, fmt.Errorf("ReplayLinkPayment returned empty response")
 	}
 	if !resp.GetSuccess() {
 		for _, step := range resp.GetSteps() {
@@ -114,37 +102,31 @@ func (s *Server) replayGoPayPaymentLink(ctx context.Context, paymentResp *pb.GoP
 				strings.TrimSpace(step.GetResponseText()),
 			)
 		}
-		return resp, fmt.Errorf("ReplayLinkPayment: %s", resp.GetErrorMessage())
+		return resp, nextStateJSON, fmt.Errorf("ReplayLinkPayment: %s", resp.GetErrorMessage())
 	}
-	return resp, nil
+	return resp, nextStateJSON, nil
 }
 
-func (s *Server) unlinkGoPayAccountToken(ctx context.Context) error {
+func (s *Server) unlinkGoPayAccountToken(ctx context.Context, stateJSON string) (string, error) {
 	if s.gopayClient == nil {
-		return fmt.Errorf("gopay-app client not configured")
-	}
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return err
+		return normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("gopay-app client not configured")
 	}
 	timeout := s.gopayAppUnlinkWaitTimeout()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	resp, err := s.gopayClient.Unlink(reqCtx, &pb.UnlinkRequest{StateJson: stateJSON})
-	if err == nil {
-		err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-	}
+	nextStateJSON := goPayWorkflowStateAfter(stateJSON, responseStateJSON(resp))
 	if err != nil {
-		return fmt.Errorf("Unlink: %w", err)
+		return nextStateJSON, fmt.Errorf("Unlink: %w", err)
 	}
 	if resp == nil {
-		return fmt.Errorf("Unlink returned empty response")
+		return nextStateJSON, fmt.Errorf("Unlink returned empty response")
 	}
 	if !resp.GetSuccess() {
-		return fmt.Errorf("Unlink: %s", resp.GetErrorMessage())
+		return nextStateJSON, fmt.Errorf("Unlink: %s", resp.GetErrorMessage())
 	}
 	log.Printf("[gopay-app] Unlinked token-linked apps count=%d", resp.GetUnlinkedCount())
-	return nil
+	return nextStateJSON, nil
 }
 
 func goPayStatusTokenReady(resp *pb.StatusResponse) bool {
@@ -152,29 +134,35 @@ func goPayStatusTokenReady(resp *pb.StatusResponse) bool {
 }
 
 func (s *Server) validateGoPayAccountToken(ctx context.Context) (*pb.CheckTokenValidResponse, error) {
-	if s.gopayClient == nil {
-		return nil, fmt.Errorf("gopay app client not configured")
-	}
 	stateJSON, err := s.loadGoPayAppState(ctx)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.gopayClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{StateJson: stateJSON})
-	if err == nil {
+	resp, _, err := s.validateGoPayAccountTokenForState(ctx, stateJSON)
+	if err == nil && resp != nil {
 		err = s.saveGoPayAppState(ctx, resp.GetStateJson())
 	}
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("empty response")
-	}
-	return resp, nil
+	return resp, err
 }
 
-func (s *Server) waitForGoPayMinBalance(ctx context.Context, step activityStep) error {
+func (s *Server) validateGoPayAccountTokenForState(ctx context.Context, stateJSON string) (*pb.CheckTokenValidResponse, string, error) {
 	if s.gopayClient == nil {
-		return fmt.Errorf("gopay app client not configured")
+		return nil, normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("gopay app client not configured")
+	}
+	resp, err := s.gopayClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{StateJson: stateJSON})
+	nextStateJSON := goPayWorkflowStateAfter(stateJSON, responseStateJSON(resp))
+	if err != nil {
+		return nil, nextStateJSON, err
+	}
+	if resp == nil {
+		return nil, nextStateJSON, fmt.Errorf("empty response")
+	}
+	return resp, nextStateJSON, nil
+}
+
+func (s *Server) waitForGoPayMinBalance(ctx context.Context, step activityStep, stateJSON string) (string, error) {
+	if s.gopayClient == nil {
+		return normalizeGoPayWorkflowStateJSON(stateJSON), fmt.Errorf("gopay app client not configured")
 	}
 	deadline := time.NewTimer(gopayBalanceWaitTimeout)
 	defer deadline.Stop()
@@ -192,16 +180,9 @@ func (s *Server) waitForGoPayMinBalance(ctx context.Context, step activityStep) 
 		})
 		var resp *pb.CheckTokenValidResponse
 		var err error
-		stateJSON, stateErr := s.loadGoPayAppState(ctx)
-		if stateErr != nil {
-			lastErr = stateErr.Error()
-			resp = nil
-			err = stateErr
-		} else {
-			resp, err = s.gopayClient.CheckTokenValid(ctx, &pb.CheckTokenValidRequest{StateJson: stateJSON})
-			if err == nil {
-				err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-			}
+		resp, stateJSON, err = s.validateGoPayAccountTokenForState(ctx, stateJSON)
+		if resp != nil {
+			stateJSON = goPayWorkflowStateAfter(stateJSON, resp.GetStateJson())
 		}
 		if err != nil {
 			lastErr = err.Error()
@@ -217,10 +198,10 @@ func (s *Server) waitForGoPayMinBalance(ctx context.Context, step activityStep) 
 				if message == "" {
 					message = "token invalid"
 				}
-				return fmt.Errorf("%s", message)
+				return stateJSON, fmt.Errorf("%s", message)
 			}
 			if resp.GetSuccess() && resp.GetHasMinBalance() {
-				return nil
+				return stateJSON, nil
 			}
 			lastErr = strings.TrimSpace(resp.GetErrorMessage())
 		}
@@ -230,11 +211,11 @@ func (s *Server) waitForGoPayMinBalance(ctx context.Context, step activityStep) 
 			continue
 		case <-deadline.C:
 			if lastErr != "" {
-				return fmt.Errorf("gopay balance not ready after %s: %d %s; last_error=%s", gopayBalanceWaitTimeout, lastAmount, lastCurrency, lastErr)
+				return stateJSON, fmt.Errorf("gopay balance not ready after %s: %d %s; last_error=%s", gopayBalanceWaitTimeout, lastAmount, lastCurrency, lastErr)
 			}
-			return fmt.Errorf("gopay balance not ready after %s: %d %s", gopayBalanceWaitTimeout, lastAmount, lastCurrency)
+			return stateJSON, fmt.Errorf("gopay balance not ready after %s: %d %s", gopayBalanceWaitTimeout, lastAmount, lastCurrency)
 		case <-ctx.Done():
-			return ctx.Err()
+			return stateJSON, ctx.Err()
 		}
 	}
 }

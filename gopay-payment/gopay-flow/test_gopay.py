@@ -486,6 +486,7 @@ class PassiveCaptchaTests(unittest.TestCase):
         charger = GoPayCharger.__new__(GoPayCharger)
         charger.log = lambda _msg: None
         charger.pre_solve_passive_captcha = False
+        charger.phone = "81234567890"
         charger._chatgpt_create_checkout = lambda: "cs_test"
 
         pm_calls = []
@@ -511,10 +512,11 @@ class PassiveCaptchaTests(unittest.TestCase):
 
         charger._chatgpt_approve = fake_approve
         charger._follow_redirect_to_midtrans = lambda _cs, _pk: "snap"
-        charger.start_linking_until_otp = lambda snap, cs, pk: {
+        charger.start_linking_until_otp = lambda snap, cs, pk, otp_channel="": {
             "snap_token": snap,
             "cs_id": cs,
             "stripe_pk": pk,
+            "otp_channel": otp_channel,
         }
 
         result = GoPayCharger.start_until_otp(charger, "pk_test", billing={})
@@ -522,6 +524,153 @@ class PassiveCaptchaTests(unittest.TestCase):
         self.assertEqual(confirm_calls, [("pm_1", False), ("pm_2", True)])
         self.assertEqual(len(approve_calls), 2)
         self.assertEqual(result["snap_token"], "snap")
+
+    def test_prepare_until_linking_stops_before_user_link(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.log = lambda _msg: None
+        charger.pre_solve_passive_captcha = False
+        charger.checkout_url = ""
+
+        calls = []
+        charger._stripe_create_pm = lambda cs, pk, billing: calls.append(("pm", cs, pk, billing)) or "pm_test"
+        charger._stripe_confirm = lambda cs, pm, pk, **kwargs: calls.append(("confirm", cs, pm, pk, kwargs)) or {}
+        charger._extract_redirect_to_url = lambda _data: ""
+        charger._chatgpt_approve = lambda cs: calls.append(("approve", cs))
+        charger._follow_redirect_to_midtrans = lambda cs, pk: calls.append(("midtrans", cs, pk)) or "snap_test"
+        charger.start_linking_until_otp = lambda *_args, **_kwargs: self.fail("user link should not start")
+
+        result = GoPayCharger.prepare_until_linking(
+            charger,
+            "pk_test",
+            billing={"name": "Test"},
+            checkout_session_id="cs_test",
+            checkout_url="https://checkout.stripe.com/c/pay/cs_test",
+        )
+
+        self.assertEqual(result["state"], "prepared")
+        self.assertEqual(result["cs_id"], "cs_test")
+        self.assertEqual(result["snap_token"], "snap_test")
+        self.assertEqual(calls[0], ("pm", "cs_test", "pk_test", {"name": "Test"}))
+        self.assertIn(("approve", "cs_test"), calls)
+        self.assertIn(("midtrans", "cs_test", "pk_test"), calls)
+
+    def test_start_prepared_linking_uses_current_phone(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.phone = ""
+        charger.checkout_url = ""
+        calls = []
+        charger.start_linking_until_otp = lambda snap, cs, pk, otp_channel="": calls.append((snap, cs, pk, otp_channel)) or {
+            "state": "otp",
+            "snap_token": snap,
+            "cs_id": cs,
+            "stripe_pk": pk,
+            "otp_channel": otp_channel,
+        }
+
+        result = GoPayCharger.start_prepared_linking_until_otp(
+            charger,
+            {
+                "snap_token": "snap_test",
+                "cs_id": "cs_test",
+                "stripe_pk": "pk_test",
+                "checkout_url": "https://checkout.stripe.com/c/pay/cs_test",
+            },
+            otp_channel="sms",
+            gopay_phone="+62 812-3456",
+        )
+
+        self.assertEqual(charger.phone, "628123456")
+        self.assertEqual(charger.checkout_url, "https://checkout.stripe.com/c/pay/cs_test")
+        self.assertEqual(calls, [("snap_test", "cs_test", "pk_test", "sms")])
+        self.assertEqual(result["otp_channel"], "sms")
+
+    def test_resend_linking_otp_updates_state(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        calls = []
+        charger._gopay_resend_otp = lambda ref: calls.append(ref) or {"success": True}
+
+        result = GoPayCharger.resend_linking_otp(charger, {
+            "reference_id": "reference-id",
+            "issued_after_unix": 1,
+            "otp_resend_count": 1,
+        })
+
+        self.assertEqual(calls, ["reference-id"])
+        self.assertGreater(result["issued_after_unix"], 1)
+        self.assertEqual(result["otp_resend_count"], 2)
+        self.assertTrue(result["otp_required"])
+
+    def test_start_linking_resends_otp_only_for_sms_channel(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.checkout_url = "https://checkout.stripe.com/c/pay/cs_test"
+        calls = []
+
+        charger._midtrans_load_transaction = lambda _snap: calls.append("load")
+        charger._midtrans_init_linking = lambda _snap: "reference-id"
+        charger._gopay_validate_reference = lambda _ref: calls.append("validate")
+        charger._gopay_user_consent = lambda _ref: calls.append("consent")
+        charger._gopay_resend_otp = lambda _ref: calls.append("resend")
+
+        result = GoPayCharger.start_linking_until_otp(
+            charger,
+            "snap",
+            "cs_test",
+            "pk_test",
+            otp_channel="sms",
+        )
+
+        self.assertIn("resend", calls)
+        self.assertEqual(result["otp_channel"], "sms")
+
+    def test_start_linking_does_not_resend_otp_for_wa_channel(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.checkout_url = "https://checkout.stripe.com/c/pay/cs_test"
+        calls = []
+
+        charger._midtrans_load_transaction = lambda _snap: calls.append("load")
+        charger._midtrans_init_linking = lambda _snap: "reference-id"
+        charger._gopay_validate_reference = lambda _ref: calls.append("validate")
+        charger._gopay_user_consent = lambda _ref: calls.append("consent")
+        charger._gopay_resend_otp = lambda _ref: calls.append("resend")
+
+        result = GoPayCharger.start_linking_until_otp(
+            charger,
+            "snap",
+            "cs_test",
+            "pk_test",
+            otp_channel="wa",
+        )
+
+        self.assertNotIn("resend", calls)
+        self.assertEqual(result["otp_channel"], "wa")
+
+    def test_start_linking_skips_otp_when_consent_says_not_required(self):
+        charger = GoPayCharger.__new__(GoPayCharger)
+        charger.checkout_url = "https://checkout.stripe.com/c/pay/cs_test"
+        calls = []
+
+        charger._midtrans_load_transaction = lambda _snap: calls.append("load")
+        charger._midtrans_init_linking = lambda _snap: "reference-id"
+        charger._gopay_validate_reference = lambda _ref: calls.append("validate")
+        charger._gopay_user_consent = lambda _ref: {"success": True, "data": {"otp_required": False}}
+        charger._gopay_resend_otp = lambda _ref: calls.append("resend")
+        charger._midtrans_create_charge_data = lambda _snap: {
+            "charge_ref": "charge-ref",
+            "snap_token": "snap",
+        }
+
+        result = GoPayCharger.start_linking_until_otp(
+            charger,
+            "snap",
+            "cs_test",
+            "pk_test",
+            otp_channel="sms",
+        )
+
+        self.assertNotIn("resend", calls)
+        self.assertFalse(result["otp_required"])
+        self.assertEqual(result["state"], "awaiting_manual_confirmation")
+        self.assertEqual(result["charge_ref"], "charge-ref")
 
 
 class PlusTrialProbeTests(unittest.TestCase):

@@ -105,9 +105,10 @@ class PaymentServiceTests(unittest.TestCase):
                 captured["gopay_cfg"] = dict(gopay_cfg)
                 captured["charger_kwargs"] = dict(kwargs)
 
-            def start_until_otp(self, stripe_pk="", billing=None, checkout_session_id="", checkout_url=""):
+            def start_until_otp(self, stripe_pk="", billing=None, checkout_session_id="", checkout_url="", otp_channel=""):
                 captured["checkout_session_id"] = checkout_session_id
                 captured["checkout_url"] = checkout_url
+                captured["otp_channel"] = otp_channel
                 return {"snap_token": "snap", "issued_after_unix": 123}
 
             def close(self):
@@ -129,16 +130,19 @@ class PaymentServiceTests(unittest.TestCase):
                     access_token="test-token",
                     use_account_token=True,
                     gopay_phone=TEST_ACCOUNT_PHONE,
+                    otp_channel="sms",
                 ),
                 None,
             )
 
         self.assertTrue(resp.success)
+        self.assertTrue(resp.otp_required)
         self.assertEqual(captured["auth_cfg"]["access_token"], "test-token")
         self.assertEqual(captured["gopay_cfg"]["phone_number"], TEST_ACCOUNT_PHONE)
         self.assertEqual(captured["build_proxy"], "socks5://checkout")
         self.assertEqual(captured["charger_kwargs"]["checkout_proxy"], "socks5://checkout")
         self.assertEqual(captured["charger_kwargs"]["payment_proxy"], "socks5://payment")
+        self.assertEqual(captured["otp_channel"], "sms")
 
     def test_start_gopay_passes_tokenization_override(self):
         captured = {}
@@ -153,7 +157,7 @@ class PaymentServiceTests(unittest.TestCase):
             def __init__(self, chatgpt_session, gopay_cfg, **kwargs):
                 captured["gopay_cfg"] = dict(gopay_cfg)
 
-            def start_until_otp(self, stripe_pk="", billing=None, checkout_session_id="", checkout_url=""):
+            def start_until_otp(self, stripe_pk="", billing=None, checkout_session_id="", checkout_url="", otp_channel=""):
                 captured["checkout_session_id"] = checkout_session_id
                 captured["checkout_url"] = checkout_url
                 return {"snap_token": "snap", "issued_after_unix": 123}
@@ -174,6 +178,124 @@ class PaymentServiceTests(unittest.TestCase):
 
         self.assertTrue(resp.success)
         self.assertEqual(captured["gopay_cfg"]["tokenization"], "false")
+
+    def test_prepare_then_start_prepared_gopay(self):
+        captured = {}
+
+        class FakeChatGPTSession:
+            headers = {}
+
+            def close(self):
+                captured["session_closed"] = True
+
+        class FakeGoPayCharger:
+            def __init__(self, chatgpt_session, gopay_cfg, **kwargs):
+                captured["gopay_cfg"] = dict(gopay_cfg)
+                captured["charger_kwargs"] = dict(kwargs)
+                self.closed = False
+                self.midtrans_tokenization = gopay_cfg.get("tokenization", "true")
+
+            def prepare_until_linking(self, stripe_pk="", billing=None, checkout_session_id="", checkout_url=""):
+                captured["prepare"] = {
+                    "stripe_pk": stripe_pk,
+                    "billing": dict(billing or {}),
+                    "checkout_session_id": checkout_session_id,
+                    "checkout_url": checkout_url,
+                }
+                return {
+                    "state": "prepared",
+                    "snap_token": "snap_prepared",
+                    "cs_id": checkout_session_id or "cs_prepared",
+                    "checkout_url": checkout_url or "https://checkout.stripe.com/c/pay/cs_prepared",
+                }
+
+            def start_prepared_linking_until_otp(self, state, otp_channel="", gopay_phone=""):
+                captured["start_prepared"] = {
+                    "state": dict(state),
+                    "otp_channel": otp_channel,
+                    "gopay_phone": gopay_phone,
+                }
+                return {
+                    **state,
+                    "state": "otp",
+                    "issued_after_unix": 456,
+                    "otp_required": True,
+                }
+
+            def close(self):
+                self.closed = True
+                captured["charger_closed"] = True
+
+        def fake_build_chatgpt_session(auth_cfg, proxy=None):
+            captured["auth_cfg"] = dict(auth_cfg)
+            captured["build_proxy"] = proxy
+            return FakeChatGPTSession()
+
+        svc = PaymentService({"fresh_checkout": {"auth": {}}, "gopay": {"country_code": "62", "phone_number": "", "pin": TEST_PIN}})
+
+        with patch.object(payment_server, "_build_chatgpt_session", fake_build_chatgpt_session), \
+                patch.object(payment_server, "resolve_checkout_proxy", return_value="socks5://checkout"), \
+                patch.object(payment_server, "resolve_payment_proxy", return_value="socks5://payment"), \
+                patch.object(payment_server, "GoPayCharger", FakeGoPayCharger):
+            prepared = svc.PrepareGoPay(
+                payment_pb2.PrepareGoPayRequest(
+                    access_token="chatgpt-token",
+                    tokenization="true",
+                    checkout_session_id="cs_probe",
+                    checkout_url="https://checkout.stripe.com/c/pay/cs_probe",
+                    gopay_phone=TEST_ACCOUNT_PHONE,
+                ),
+                None,
+            )
+            started = svc.StartPreparedGoPay(
+                payment_pb2.StartPreparedGoPayRequest(
+                    flow_id=prepared.flow_id,
+                    gopay_phone="81234567890",
+                    otp_channel="sms",
+                ),
+                None,
+            )
+
+        self.assertTrue(prepared.success)
+        self.assertEqual(prepared.snap_token, "snap_prepared")
+        self.assertEqual(prepared.checkout_session_id, "cs_probe")
+        self.assertTrue(started.success)
+        self.assertTrue(started.otp_required)
+        self.assertEqual(started.flow_id, prepared.flow_id)
+        self.assertEqual(started.issued_after_unix, 456)
+        self.assertEqual(captured["auth_cfg"]["access_token"], "chatgpt-token")
+        self.assertEqual(captured["gopay_cfg"]["phone_number"], TEST_ACCOUNT_PHONE)
+        self.assertEqual(captured["gopay_cfg"]["tokenization"], "true")
+        self.assertEqual(captured["prepare"]["checkout_session_id"], "cs_probe")
+        self.assertEqual(captured["start_prepared"]["otp_channel"], "sms")
+        self.assertEqual(captured["start_prepared"]["gopay_phone"], "81234567890")
+        self.assertFalse(captured.get("charger_closed", False))
+        self.assertIsNotNone(svc._flows.get(prepared.flow_id))
+        svc.close()
+        self.assertTrue(captured["charger_closed"])
+
+    def test_resend_gopay_otp_keeps_flow_open(self):
+        class FakeResendCharger(FakeCharger):
+            def resend_linking_otp(self, state):
+                self.resend_state = dict(state)
+                return {
+                    **state,
+                    "issued_after_unix": 789,
+                    "otp_resend_count": int(state.get("otp_resend_count") or 0) + 1,
+                }
+
+        svc = PaymentService({"fresh_checkout": {"auth": {}}, "gopay": {"country_code": "62", "phone_number": "81234567890", "pin": TEST_PIN}})
+        charger = FakeResendCharger()
+        flow_id = svc._flows.put(charger, {"snap_token": "snap", "reference_id": "ref"})
+
+        resp = svc.ResendGoPayOTP(payment_pb2.ResendGoPayOTPRequest(flow_id=flow_id), None)
+
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.flow_id, flow_id)
+        self.assertEqual(resp.issued_after_unix, 789)
+        self.assertEqual(charger.resend_state["reference_id"], "ref")
+        self.assertFalse(charger.closed)
+        self.assertIsNotNone(svc._flows.get(flow_id))
 
     def test_complete_gopay_waits_for_manual_confirmation_then_confirms(self):
         class FakeSplitCharger(FakeCharger):
@@ -248,6 +370,37 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertEqual(calls, [("otp", "123456")])
         self.assertFalse(charger.closed)
         self.assertIsNotNone(svc._flows.get(flow_id))
+
+    def test_complete_gopay_without_otp_continues_when_otp_not_required(self):
+        class FakeNoOTPCharger(FakeCharger):
+            def complete_after_otp(self, state, otp):
+                raise AssertionError("otp path should not run")
+
+            def complete_after_manual_confirmation(self, state):
+                self.confirm_state = dict(state)
+                return {
+                    **state,
+                    "state": "succeeded",
+                    "charge_ref": state["charge_ref"],
+                    "snap_token": state["snap_token"],
+                }
+
+        svc = PaymentService({"fresh_checkout": {"auth": {}}, "gopay": {"country_code": "62", "phone_number": "81234567890", "pin": TEST_PIN}})
+        charger = FakeNoOTPCharger()
+        charger.midtrans_tokenization = "true"
+        flow_id = svc._flows.put(charger, {
+            "snap_token": "snap",
+            "charge_ref": "A123",
+            "otp_required": False,
+        })
+
+        done = svc.CompleteGoPay(payment_pb2.CompleteGoPayRequest(flow_id=flow_id), None)
+
+        self.assertTrue(done.success)
+        self.assertEqual(done.charge_ref, "A123")
+        self.assertEqual(charger.confirm_state["charge_ref"], "A123")
+        self.assertTrue(charger.closed)
+        self.assertIsNone(svc._flows.get(flow_id))
 
     def test_complete_gopay_tokenization_true_keeps_single_step_flow(self):
         class FakeLegacyCharger(FakeCharger):

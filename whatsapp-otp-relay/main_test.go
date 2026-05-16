@@ -93,6 +93,25 @@ func TestHTTPSubmitAndWait(t *testing.T) {
 	}
 }
 
+func TestHTTPSubmitIgnoresForwarderTestOTP(t *testing.T) {
+	store := newOTPStore(10, 600)
+	handler := newHTTPHandler(store)
+	req := httptest.NewRequest(http.MethodPost, "/local/gopay", strings.NewReader(`{"otp":"123456","source":"whatsapp"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if item, ok := store.wait(ctx, "local/gopay", 30*time.Millisecond, 0); ok {
+		t.Fatalf("unexpected test otp item: %+v", item)
+	}
+}
+
 func TestHTTPSubmitUsesSourcePathAsPurpose(t *testing.T) {
 	store := newOTPStore(10, 600)
 	handler := newHTTPHandler(store)

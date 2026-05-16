@@ -26,7 +26,6 @@ type Config struct {
 	GoPayAppUnlinkTimeout             time.Duration
 	ChangePhoneMaxFailures            int
 	ChangePhoneDisabled               bool
-	ChangePhoneOTPWaitSeconds         int32
 	ChangePhoneOTPRetryAttempts       int
 	ChangePhoneGetNumberRetryDelay    time.Duration
 	ChangePhoneSMSCancelTimeout       time.Duration
@@ -51,7 +50,6 @@ type Server struct {
 	gopayAppUnlinkTimeout             time.Duration
 	changePhoneMaxFailures            int
 	changePhoneDisabled               bool
-	changePhoneOTPWaitSeconds         int32
 	changePhoneOTPRetryAttempts       int
 	changePhoneGetNumberRetryDelay    time.Duration
 	changePhoneSMSCancelTimeout       time.Duration
@@ -77,7 +75,6 @@ func NewServer(cfg Config) *Server {
 		gopayAppUnlinkTimeout:             cfg.GoPayAppUnlinkTimeout,
 		changePhoneMaxFailures:            cfg.ChangePhoneMaxFailures,
 		changePhoneDisabled:               cfg.ChangePhoneDisabled,
-		changePhoneOTPWaitSeconds:         cfg.ChangePhoneOTPWaitSeconds,
 		changePhoneOTPRetryAttempts:       cfg.ChangePhoneOTPRetryAttempts,
 		changePhoneGetNumberRetryDelay:    cfg.ChangePhoneGetNumberRetryDelay,
 		changePhoneSMSCancelTimeout:       cfg.ChangePhoneSMSCancelTimeout,

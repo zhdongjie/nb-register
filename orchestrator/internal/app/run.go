@@ -27,15 +27,17 @@ func Run() {
 
 	activityServer := newActivityServer(cfg, deps)
 	apiServer := api.NewServer(api.Config{
-		DB:                          deps.db,
-		JobStore:                    deps.jobStore,
-		JobEvents:                   deps.jobEvents,
-		Temporal:                    deps.temporal,
-		TaskQueue:                   cfg.TemporalTaskQueue,
-		AccountClient:               deps.accountClient,
-		EmailClient:                 deps.emailClient,
-		GoPayClient:                 deps.gopayClient,
-		OutlookRegisterEnableOAuth2: cfg.OutlookRegisterEnableOAuth2,
+		DB:                                   deps.db,
+		JobStore:                             deps.jobStore,
+		JobEvents:                            deps.jobEvents,
+		Temporal:                             deps.temporal,
+		TaskQueue:                            cfg.TemporalTaskQueue,
+		AccountClient:                        deps.accountClient,
+		EmailClient:                          deps.emailClient,
+		GoPayClient:                          deps.gopayClient,
+		DefaultGoPayAddBalance:               defaultGoPayAddBalance(cfg),
+		GoPayAddBalanceConfirmTimeoutSeconds: cfg.GoPayAddBalanceConfirmTimeoutSeconds,
+		OutlookRegisterEnableOAuth2:          cfg.OutlookRegisterEnableOAuth2,
 	})
 
 	temporalWorker := temporalworker.New(deps.temporal, cfg.TemporalTaskQueue, temporalworker.Options{})

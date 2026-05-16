@@ -221,6 +221,11 @@ func handleSubmit(w http.ResponseWriter, r *http.Request, store *otpStore, purpo
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": false, "message": "otp not found"})
 		return
 	}
+	if isForwarderTestOTP(payload, code, source) {
+		log.Printf("[otp-relay] test OTP ignored source=%s", truncate(source, 80, "webhook"))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": false, "message": "test otp ignored"})
+		return
+	}
 	if err := store.submit(code, source, purpose, payloadTS, payloadHint(payload)); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -264,6 +269,26 @@ func requestPayload(r *http.Request) (any, error) {
 		}
 	}
 	return raw, nil
+}
+
+func isForwarderTestOTP(payload any, code string, source string) bool {
+	if code != "123456" || strings.ToLower(strings.TrimSpace(source)) != "whatsapp" {
+		return false
+	}
+	obj, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	if len(obj) > 2 {
+		return false
+	}
+	if _, ok := obj["otp"]; !ok {
+		return false
+	}
+	if _, ok := obj["source"]; !ok {
+		return false
+	}
+	return true
 }
 
 func valuesToMap(values url.Values) map[string]any {

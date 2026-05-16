@@ -18,95 +18,114 @@ func (s *Server) GoPayAppAcquireSignupPhoneActivity(ctx context.Context, input G
 			return data, err
 		}
 
-		maxFailures := s.changePhoneMaxFailureCount()
 		failures := int(input.GetFailureCount())
 		if failures < 0 {
 			failures = 0
 		}
-		otpWaitSeconds := s.changePhoneOTPWaitTimeoutSeconds()
+		otpWaitSeconds := s.paymentOtpTimeout()
 		data["failure_count"] = failures
-		data["max_failures"] = maxFailures
 		data["otp_timeout_seconds"] = otpWaitSeconds
 
-		for failures < maxFailures {
-			step.progress("acquiring unregistered gopay phone", map[string]any{
-				"failures":     failures,
-				"max_failures": maxFailures,
-			})
-			numResp, err := s.smsClient.AcquireNumber(ctx, &pb.AcquireNumberRequest{})
-			if err != nil {
-				err = fmt.Errorf("AcquireNumber: %w", err)
-				data["error_message"] = err.Error()
-				return data, err
+		step.progress("acquiring unregistered gopay phone", map[string]any{
+			"failure_count": failures,
+		})
+		numResp, err := s.smsClient.AcquireNumber(ctx, &pb.AcquireNumberRequest{})
+		if err != nil {
+			err = fmt.Errorf("AcquireNumber: %w", err)
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		if numResp == nil || !numResp.GetSuccess() {
+			message := ""
+			if numResp != nil {
+				message = numResp.GetErrorMessage()
 			}
-			if numResp == nil || !numResp.GetSuccess() {
-				message := ""
-				if numResp != nil {
-					message = numResp.GetErrorMessage()
-				}
-				if message == "" {
-					message = "empty response"
-				}
-				failures++
-				data["failure_count"] = failures
-				data["last_error"] = fmt.Sprintf("AcquireNumber: %s", message)
-				if delay := s.changePhoneGetNumberRetryInterval(); delay > 0 {
-					if err := sleepContext(ctx, delay); err != nil {
-						err = fmt.Errorf("waiting to retry AcquireNumber: %w", err)
-						data["error_message"] = err.Error()
-						return data, err
-					}
-				}
-				continue
+			if message == "" {
+				message = "empty response"
 			}
-
-			phone := normalizeIndonesiaPhone(numResp.GetPhone())
-			activationID := numResp.GetActivationId()
-			data["activation_id"] = activationID
-			data["phone_present"] = phone != ""
-			if phone == "" {
-				s.cancelSMSActivation(ctx, activationID)
-				failures++
-				data["failure_count"] = failures
-				continue
-			}
-
-			checkResp, err := s.gopayClient.CheckPhone(ctx, &pb.CheckPhoneRequest{Phone: phone})
-			if err != nil {
-				s.cancelSMSActivation(ctx, activationID)
-				failures++
-				data["failure_count"] = failures
-				data["phone_status"] = "error"
-				data["last_error"] = fmt.Sprintf("CheckPhone: %v", err)
-				continue
-			}
-			status := checkPhoneStatus(checkResp)
-			data["phone_status"] = status
-			step.progress("gopay phone availability checked", map[string]any{
-				"activation_id": activationID,
-				"status":        status,
-			})
-			if status != "available" {
-				s.cancelSMSActivation(ctx, activationID)
-				failures++
-				data["failure_count"] = failures
-				continue
-			}
-
-			output.ActivationId = activationID
-			output.Phone = phone
-			output.FailureCount = int32(failures)
-			output.MaxFailures = int32(maxFailures)
-			output.OtpTimeoutSeconds = otpWaitSeconds
-			data["signup_phone_acquired"] = true
-			data["failure_count"] = failures
-			return data, nil
+			err := fmt.Errorf("AcquireNumber: %s", message)
+			data["error_message"] = err.Error()
+			return data, err
 		}
 
-		err := fmt.Errorf("failed to acquire unregistered gopay phone after %d failures", maxFailures)
+		phone := normalizeIndonesiaPhone(numResp.GetPhone())
+		activationID := numResp.GetActivationId()
+		failures++
+		output.ActivationId = activationID
+		output.Phone = phone
+		output.FailureCount = int32(failures)
+		output.OtpTimeoutSeconds = otpWaitSeconds
+		data["activation_id"] = activationID
+		data["phone_present"] = phone != ""
 		data["failure_count"] = failures
-		data["error_message"] = err.Error()
-		return data, err
+		if phone == "" {
+			s.cancelSMSActivationAsync(activationID, "discard signup phone")
+			data["async_cancel_scheduled"] = true
+			err := fmt.Errorf("signup phone missing")
+			data["error_message"] = err.Error()
+			return data, err
+		}
+
+		checkResp, err := s.gopayClient.CheckPhone(ctx, &pb.CheckPhoneRequest{Phone: phone})
+		if err != nil {
+			s.cancelSMSActivationAsync(activationID, "discard signup phone")
+			data["async_cancel_scheduled"] = true
+			data["phone_status"] = "error"
+			err = fmt.Errorf("CheckPhone: %w", err)
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		status := checkPhoneStatus(checkResp)
+		data["phone_status"] = status
+		step.progress("gopay phone availability checked", map[string]any{
+			"activation_id": activationID,
+			"status":        status,
+		})
+		if status == "registered" {
+			s.cancelSMSActivationAsync(activationID, "signup phone already registered")
+			data["async_cancel_scheduled"] = true
+			err := fmt.Errorf("signup phone already registered")
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		if status != "available" {
+			s.cancelSMSActivationAsync(activationID, "discard signup phone")
+			data["async_cancel_scheduled"] = true
+			err := fmt.Errorf("signup phone unavailable: %s", status)
+			data["error_message"] = err.Error()
+			return data, err
+		}
+
+		data["signup_phone_acquired"] = true
+		return data, nil
+	})
+	output.Data = protoData(data)
+	return output, err
+}
+
+func (s *Server) GoPayAppDiscardSignupPhoneActivity(ctx context.Context, input GoPayAppSMSActivationInput) (GoPayAppSMSActivationOutput, error) {
+	output := GoPayAppSMSActivationOutput{
+		ActivationId: input.GetActivationId(),
+		FailureCount: input.GetFailureCount(),
+	}
+	data := map[string]any{
+		"activation_id": input.GetActivationId(),
+		"reason":        input.GetReason(),
+	}
+	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppSignupPhoneCancel, false, true)
+	_, err := step.run(func() (any, error) {
+		if input.GetActivationId() == "" {
+			err := fmt.Errorf("activation id missing")
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		reason := input.GetReason()
+		if reason == "" {
+			reason = "discard signup phone"
+		}
+		s.cancelSMSActivationAsync(input.GetActivationId(), reason)
+		data["async_cancel_scheduled"] = true
+		return data, nil
 	})
 	output.Data = protoData(data)
 	return output, err

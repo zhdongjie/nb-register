@@ -7,6 +7,8 @@ import (
 	"orchestrator/internal/workflows"
 	"orchestrator/pb"
 	"strings"
+
+	proto "google.golang.org/protobuf/proto"
 )
 
 func (s *Server) RegisterAccount(ctx context.Context, req *pb.RegisterAccountRequest) (*pb.RegisterAccountResponse, error) {
@@ -139,16 +141,89 @@ func (s *Server) RunGoPayPayment(ctx context.Context, req *pb.GoPayPaymentReques
 	if otpChannel == "" {
 		otpChannel = "sms"
 	}
+	addBalance := cloneGoPayAddBalance(req.GetAddBalance())
+	if addBalance == nil {
+		addBalance = cloneGoPayAddBalance(s.defaultGoPayAddBalance)
+	}
+	addBalanceConfirmTimeoutSeconds := req.GetAddBalanceConfirmTimeoutSeconds()
+	if addBalanceConfirmTimeoutSeconds <= 0 {
+		addBalanceConfirmTimeoutSeconds = s.goPayAddBalanceConfirmTimeoutSeconds
+	}
+	if addBalanceConfirmTimeoutSeconds <= 0 {
+		addBalanceConfirmTimeoutSeconds = 1800
+	}
 	_, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions(workflowIDForAction(actionGoPayPayment, jobID)), workflows.GoPayPaymentWorkflow, workflows.GoPayPaymentWorkflowInput{
-		JobId:       jobID,
-		AccountId:   strings.TrimSpace(req.GetAccountId()),
-		SourceJobId: strings.TrimSpace(req.GetSourceJobId()),
-		OtpChannel:  otpChannel,
+		JobId:                           jobID,
+		AccountId:                       strings.TrimSpace(req.GetAccountId()),
+		SourceJobId:                     strings.TrimSpace(req.GetSourceJobId()),
+		OtpChannel:                      otpChannel,
+		SmsActivationId:                 strings.TrimSpace(req.GetSmsActivationId()),
+		AddBalance:                      addBalance,
+		AddBalanceConfirmTimeoutSeconds: addBalanceConfirmTimeoutSeconds,
+		StateKey:                        strings.TrimSpace(req.GetStateKey()),
+		WaPhone:                         strings.TrimSpace(req.GetWaPhone()),
 	})
 	if err != nil {
 		return &pb.GoPayPaymentResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
 	}
 	return &pb.GoPayPaymentResponse{JobId: jobID, Started: true}, nil
+}
+
+func (s *Server) RetryGoPayPaymentRebind(ctx context.Context, req *pb.GoPayPaymentRebindRequest) (*pb.GoPayPaymentResponse, error) {
+	jobID := uuid.NewString()
+	sourceJobID := strings.TrimSpace(req.GetSourceJobId())
+	if sourceJobID == "" {
+		return &pb.GoPayPaymentResponse{JobId: jobID, ErrorMessage: "source_job_id is required"}, nil
+	}
+	_, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions(workflowIDForAction(actionGoPayPaymentRebind, jobID)), workflows.GoPayPaymentRebindWorkflow, workflows.GoPayPaymentRebindWorkflowInput{
+		JobId:       jobID,
+		SourceJobId: sourceJobID,
+		AccountId:   strings.TrimSpace(req.GetAccountId()),
+		StateKey:    strings.TrimSpace(req.GetStateKey()),
+	})
+	if err != nil {
+		return &pb.GoPayPaymentResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	return &pb.GoPayPaymentResponse{JobId: jobID, Started: true}, nil
+}
+
+func (s *Server) ConfirmManualAddBalance(ctx context.Context, req *pb.ConfirmManualAddBalanceRequest) (*pb.ConfirmManualAddBalanceResponse, error) {
+	jobID := strings.TrimSpace(req.GetJobId())
+	if jobID == "" {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, ErrorMessage: "job_id is required"}, nil
+	}
+	job, err := s.getJob(ctx, jobID)
+	if err != nil {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	if job.Status != statusRunning {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: "job is not running: " + job.Status}, nil
+	}
+	if job.Action != actionGoPayPayment {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: "job does not accept add_balance confirmation: " + job.Action}, nil
+	}
+	if job.LastStep != stepGoPayAppAddBalance {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: "job is not waiting for add_balance confirmation: " + job.LastStep}, nil
+	}
+	workflowID, ok := contracts.WorkflowID(job.Action, job.ID)
+	if !ok || workflowID == "" {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: "workflow id not found"}, nil
+	}
+	if err := s.temporal.SignalWorkflow(ctx, workflowID, "", manualAddBalanceSignalName, ManualAddBalanceSignal{Kind: "manual_transfer_confirmed"}); err != nil {
+		return &pb.ConfirmManualAddBalanceResponse{Success: false, JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	return &pb.ConfirmManualAddBalanceResponse{Success: true, JobId: jobID}, nil
+}
+
+func cloneGoPayAddBalance(value *pb.GoPayAddBalance) *pb.GoPayAddBalance {
+	if value == nil {
+		return nil
+	}
+	cloned, ok := proto.Clone(value).(*pb.GoPayAddBalance)
+	if !ok {
+		return nil
+	}
+	return cloned
 }
 
 func (s *Server) RegisterAndActivateAccount(ctx context.Context, req *pb.RegisterAndActivateAccountRequest) (*pb.RegisterAndActivateAccountResponse, error) {

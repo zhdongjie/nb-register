@@ -62,6 +62,14 @@ export interface GoPayActivityInput {
   tokenization: string;
   checkout_url: string;
   checkout_session_id: string;
+  /** sms 时 payment 触发 resend-otp；wa/空值不触发 */
+  otp_channel: string;
+  state_json: string;
+  prepared_flow_id: string;
+  gopay_phone: string;
+  sms_activation_id: string;
+  /** WA 接码来源；local 或 tg:<user_id> */
+  state_key: string;
 }
 
 export interface GoPayActivityOutput {
@@ -71,6 +79,7 @@ export interface GoPayActivityOutput {
   plus_trial_checked: boolean;
   plus_active: boolean;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayPaymentStartOutput {
@@ -79,6 +88,18 @@ export interface GoPayPaymentStartOutput {
   otp_timeout_seconds: number;
   use_account_token: boolean;
   data: { [key: string]: any } | undefined;
+  otp_required: boolean;
+  state_json: string;
+}
+
+export interface GoPayPaymentPrepareOutput {
+  flow_id: string;
+  snap_token: string;
+  checkout_url: string;
+  checkout_session_id: string;
+  use_account_token: boolean;
+  data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayPaymentCompleteInput {
@@ -90,6 +111,21 @@ export interface GoPayPaymentCompleteInput {
   otp_issued_after_unix: number;
   otp_source: string;
   use_account_token: boolean;
+  data: { [key: string]: any } | undefined;
+  state_json: string;
+}
+
+export interface GoPayPaymentOTPResendInput {
+  job_id: string;
+  account_id: string;
+  flow_id: string;
+  data: { [key: string]: any } | undefined;
+}
+
+export interface GoPayPaymentOTPResendOutput {
+  success: boolean;
+  flow_id: string;
+  issued_after_unix: number;
   data: { [key: string]: any } | undefined;
 }
 

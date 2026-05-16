@@ -96,7 +96,7 @@ func (s *Server) waitEmailOTP(ctx context.Context, input OTPWaitInput) (OTPWaitO
 func (s *Server) waitPaymentWebhookOTP(ctx context.Context, input OTPWaitInput) (OTPWaitOutput, error) {
 	target := input.GetPayment()
 	if target == nil {
-		return OTPWaitOutput{}, fmt.Errorf("payment otp target missing")
+		return OTPWaitOutput{}, fmt.Errorf("gopay otp target missing")
 	}
 	addr := s.otpAddr
 	if addr == "" {
@@ -174,6 +174,8 @@ func (s *Server) waitPaymentWebhookOTP(ctx context.Context, input OTPWaitInput) 
 		"issued_after_unix": input.GetIssuedAfterUnix(),
 	}
 	step := s.activityStep(ctx, input.GetJobId(), input.GetStepName(), false, true)
+	waitMessage := goPayWebhookOTPWaitMessage(input.GetStepName())
+	notReceivedMessage := goPayWebhookOTPNotReceivedMessage(input.GetStepName())
 
 	for {
 		select {
@@ -195,19 +197,45 @@ func (s *Server) waitPaymentWebhookOTP(ctx context.Context, input OTPWaitInput) 
 			}
 			otpCh = nil
 		case <-ticker.C:
-			step.progressEvery(&heartbeatAt, "waiting for payment otp", data)
+			step.progressEvery(&heartbeatAt, waitMessage, data)
 		case <-deadline.C:
 			if lastErr != nil {
-				err := fmt.Errorf("payment otp not received after %ds: %w", timeoutSeconds, lastErr)
+				err := fmt.Errorf("%s after %ds: %w", notReceivedMessage, timeoutSeconds, lastErr)
 				data["error_message"] = err.Error()
 				return OTPWaitOutput{Data: protoData(data)}, err
 			}
-			err := fmt.Errorf("payment otp not received after %ds", timeoutSeconds)
+			err := fmt.Errorf("%s after %ds", notReceivedMessage, timeoutSeconds)
 			data["error_message"] = err.Error()
 			return OTPWaitOutput{Data: protoData(data)}, err
 		case <-ctx.Done():
 			return OTPWaitOutput{Data: protoData(data)}, ctx.Err()
 		}
+	}
+}
+
+func goPayWebhookOTPWaitMessage(stepName string) string {
+	switch strings.TrimSpace(stepName) {
+	case stepGoPayAppSignup:
+		return "waiting for gopay signup otp"
+	case stepGoPayAppCreatePin:
+		return "waiting for gopay create pin otp"
+	case stepGoPayPayment:
+		return "waiting for gopay payment otp"
+	default:
+		return "waiting for gopay otp"
+	}
+}
+
+func goPayWebhookOTPNotReceivedMessage(stepName string) string {
+	switch strings.TrimSpace(stepName) {
+	case stepGoPayAppSignup:
+		return "gopay signup otp not received"
+	case stepGoPayAppCreatePin:
+		return "gopay create pin otp not received"
+	case stepGoPayPayment:
+		return "gopay payment otp not received"
+	default:
+		return "gopay otp not received"
 	}
 }
 
@@ -243,7 +271,7 @@ func (s *Server) waitSMSOTP(ctx context.Context, input OTPWaitInput) (OTPWaitOut
 		}
 		timeoutSeconds := input.GetTimeoutSeconds()
 		if timeoutSeconds <= 0 {
-			timeoutSeconds = defaultChangePhoneOTPWaitSeconds
+			timeoutSeconds = s.paymentOtpTimeout()
 		}
 		data["timeout_seconds"] = timeoutSeconds
 		step.progress("waiting for sms otp", data)

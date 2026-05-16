@@ -16,7 +16,6 @@ func TestNewOrchestratorServerInjectsConfigAndDependencies(t *testing.T) {
 		OutlookRegisterEnableOAuth2:       true,
 		ChangePhoneMaxFailures:            5,
 		ChangePhoneDisabled:               true,
-		ChangePhoneOTPWaitSeconds:         130,
 		ChangePhoneOTPRetryAttempts:       3,
 		ChangePhoneGetNumberRetryDelay:    7 * time.Second,
 		ChangePhoneSMSCancelTimeout:       140 * time.Second,
@@ -40,7 +39,6 @@ func TestNewOrchestratorServerInjectsConfigAndDependencies(t *testing.T) {
 	}
 	if activityCfg.ChangePhoneMaxFailures != cfg.ChangePhoneMaxFailures ||
 		activityCfg.ChangePhoneDisabled != cfg.ChangePhoneDisabled ||
-		activityCfg.ChangePhoneOTPWaitSeconds != cfg.ChangePhoneOTPWaitSeconds ||
 		activityCfg.ChangePhoneOTPRetryAttempts != cfg.ChangePhoneOTPRetryAttempts ||
 		activityCfg.ChangePhoneGetNumberRetryDelay != cfg.ChangePhoneGetNumberRetryDelay ||
 		activityCfg.ChangePhoneSMSCancelTimeout != cfg.ChangePhoneSMSCancelTimeout ||

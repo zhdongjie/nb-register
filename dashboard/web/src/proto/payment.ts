@@ -16,6 +16,33 @@ export interface StartGoPayRequest {
   checkout_url: string;
   checkout_session_id: string;
   gopay_phone: string;
+  /** sms 时调用 resend-otp；wa/空值只走 user-consent */
+  otp_channel: string;
+}
+
+export interface PrepareGoPayRequest {
+  session_token: string;
+  access_token: string;
+  tokenization: string;
+  checkout_url: string;
+  checkout_session_id: string;
+  gopay_phone: string;
+}
+
+export interface PrepareGoPayResponse {
+  success: boolean;
+  error_message: string;
+  flow_id: string;
+  snap_token: string;
+  checkout_url: string;
+  checkout_session_id: string;
+}
+
+export interface StartPreparedGoPayRequest {
+  flow_id: string;
+  gopay_phone: string;
+  /** sms 时调用 resend-otp；wa/空值只走 user-consent */
+  otp_channel: string;
 }
 
 export interface StartGoPayResponse {
@@ -27,6 +54,7 @@ export interface StartGoPayResponse {
   expires_at_unix: number;
   checkout_url: string;
   checkout_session_id: string;
+  otp_required: boolean;
 }
 
 export interface ProbePlusTrialPaymentRequest {
@@ -76,6 +104,17 @@ export interface ProbeTierPaymentResponse {
 export interface CompleteGoPayRequest {
   flow_id: string;
   otp: string;
+}
+
+export interface ResendGoPayOTPRequest {
+  flow_id: string;
+}
+
+export interface ResendGoPayOTPResponse {
+  success: boolean;
+  error_message: string;
+  flow_id: string;
+  issued_after_unix: number;
 }
 
 export interface ConfirmGoPayPaymentRequest {

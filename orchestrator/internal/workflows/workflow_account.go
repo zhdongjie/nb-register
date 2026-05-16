@@ -212,7 +212,6 @@ func RegisterAndActivateWorkflow(ctx workflow.Context, input RegisterAndActivate
 	atomicCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(15*time.Minute))
 	browserCtx := workflow.WithActivityOptions(ctx, heartbeatingActivityOptions(5*time.Minute, 30*time.Second))
 	paymentCtx := workflow.WithActivityOptions(ctx, paymentActivityOptions())
-	ensureLogonCtx := workflow.WithActivityOptions(ctx, atomicActivityOptions(30*time.Minute))
 
 	setWorkflowProgress(ctx, progress, "create_job")
 	if err := workflow.ExecuteActivity(retryCtx, createJobActivityName, CreateJobInput{
@@ -312,18 +311,9 @@ func RegisterAndActivateWorkflow(ctx workflow.Context, input RegisterAndActivate
 		combined := map[string]any{"register_account": registerData(), "probe_plus_trial": protoDataMap(probe.GetData()), "gopay_login": protoDataMap(logon.GetData())}
 		return failRegisterAndActivateWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppLogin, statusFailedRetryable, false, true, err, combined), nil
 	}
-
-	var ensureLogon pb.EnsureLogonResponse
-	setWorkflowProgress(ctx, progress, stepEnsureLogon)
-	if err := workflow.ExecuteActivity(ensureLogonCtx, ensureLogonActivityName, &pb.EnsureLogonRequest{
-		JobId:     input.GetJobId(),
-		AccountId: account.GetAccountId(),
-	}).Get(ctx, &ensureLogon); err != nil {
+	if !logon.GetAccountTokenReady() {
 		combined := map[string]any{"register_account": registerData(), "probe_plus_trial": protoDataMap(probe.GetData()), "gopay_login": protoDataMap(logon.GetData())}
-		if logonData := ensureLogonData(&ensureLogon); logonData != nil {
-			combined["ensure_logon"] = logonData
-		}
-		return failRegisterAndActivateWorkflow(ctx, retryCtx, result, input.GetJobId(), stepEnsureLogon, statusFailedRetryable, false, true, err, combined), nil
+		return failRegisterAndActivateWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppLogin, statusFailedRetryable, false, true, fmt.Errorf("gopay account token is not ready after login"), combined), nil
 	}
 
 	var payment GoPayActivityOutput
@@ -333,22 +323,18 @@ func RegisterAndActivateWorkflow(ctx workflow.Context, input RegisterAndActivate
 		AccountId:         account.GetAccountId(),
 		SessionToken:      register.GetSessionToken(),
 		AccessToken:       register.GetAccessToken(),
-		UseAccountToken:   ensureLogon.GetAccountTokenReady(),
+		UseAccountToken:   logon.GetAccountTokenReady(),
 		CheckoutUrl:       probe.GetCheckoutUrl(),
 		CheckoutSessionId: probe.GetCheckoutSessionId(),
+		StateJson:         logon.GetStateJson(),
 	})
 	if err != nil {
 		combined := map[string]any{"register_account": registerData(), "probe_plus_trial": protoDataMap(probe.GetData()), "gopay_payment": protoDataMap(payment.GetData())}
-		if logonData := ensureLogonData(&ensureLogon); logonData != nil {
-			combined["ensure_logon"] = logonData
-		}
+		combined["gopay_login"] = protoDataMap(logon.GetData())
 		return failRegisterAndActivateWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayPayment, statusFailedRetryable, false, true, err, combined), nil
 	}
 
 	combined := map[string]any{"register_account": registerData(), "probe_plus_trial": protoDataMap(probe.GetData()), "gopay_login": protoDataMap(logon.GetData()), "gopay_payment": protoDataMap(payment.GetData())}
-	if logonData := ensureLogonData(&ensureLogon); logonData != nil {
-		combined["ensure_logon"] = logonData
-	}
 	if err := workflow.ExecuteActivity(retryCtx, persistActivatedActivityName, PersistActivatedInput{
 		AccountId:         account.GetAccountId(),
 		SessionToken:      register.GetSessionToken(),

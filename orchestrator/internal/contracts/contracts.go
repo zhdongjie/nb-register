@@ -8,6 +8,7 @@ const (
 	ActionAutopay             = "AUTOPAY"
 	ActionGoPayApp            = "GOPAY_APP"
 	ActionGoPayPayment        = "GOPAY_PAYMENT"
+	ActionGoPayPaymentRebind  = "GOPAY_PAYMENT_REBIND"
 	ActionProbeAccount        = "PROBE_ACCOUNT"
 	ActionLoginSession        = "LOGIN_SESSION"
 	ActionRegisterAndActivate = "REGISTER_AND_ACTIVATE"
@@ -27,12 +28,25 @@ const (
 	WaitOTPActivityName                          = "OTPWaitActivity"
 	FetchManualOTPActivityName                   = "FetchManualOTPActivity"
 	EnsureLogonActivityName                      = "EnsureLogonActivity"
+	GoPayPaymentPrepareActivityName              = "GoPayPaymentPrepareActivity"
 	GoPayPaymentStartActivityName                = "GoPayPaymentStartActivity"
+	GoPayPaymentOTPResendActivityName            = "GoPayPaymentOTPResendActivity"
 	GoPayPaymentCompleteActivityName             = "GoPayPaymentCompleteActivity"
 	GoPayPaymentCancelActivityName               = "GoPayPaymentCancelActivity"
+	GoPayResolveWAPhoneActivityName              = "GoPayResolveWAPhoneActivity"
+	GoPayAppLoadStateActivityName                = "GoPayAppLoadStateActivity"
+	GoPayAppSaveStateActivityName                = "GoPayAppSaveStateActivity"
+	GoPayPaymentRebindSourceActivityName         = "GoPayPaymentRebindSourceActivity"
 	GoPayAppOTPStartActivityName                 = "GoPayAppOTPStartActivity"
 	GoPayAppOTPCompleteActivityName              = "GoPayAppOTPCompleteActivity"
+	GoPayAppOTPRetryActivityName                 = "GoPayAppOTPRetryActivity"
+	GoPayAppStatusActivityName                   = "GoPayAppStatusActivity"
+	GoPayAppCreatePinStartActivityName           = "GoPayAppCreatePinStartActivity"
+	GoPayAppCreatePinRetryActivityName           = "GoPayAppCreatePinRetryActivity"
+	GoPayAppCreatePinCompleteActivityName        = "GoPayAppCreatePinCompleteActivity"
 	GoPayAppAcquireSignupPhoneActivityName       = "GoPayAppAcquireSignupPhoneActivity"
+	GoPayAppDiscardSignupPhoneActivityName       = "GoPayAppDiscardSignupPhoneActivity"
+	GoPayAppAddBalanceActivityName               = "GoPayAppAddBalanceActivity"
 	GoPayAppChangePhoneStartActivityName         = "GoPayAppChangePhoneStartActivity"
 	GoPayAppChangePhoneRetryActivityName         = "GoPayAppChangePhoneRetryActivity"
 	GoPayAppSMSCancelBeforeRotationActivityName  = "GoPayAppSMSCancelBeforeRotationActivity"
@@ -50,8 +64,9 @@ const (
 	MarkJobFailedActivityName                    = "MarkJobFailedActivity"
 	MarkJobSucceededActivityName                 = "MarkJobSucceededActivity"
 
-	ManualOTPSignalName       = "manual_otp_available"
-	WorkflowProgressQueryName = "progress"
+	ManualOTPSignalName        = "manual_otp_available"
+	ManualAddBalanceSignalName = "manual_add_balance_confirmed"
+	WorkflowProgressQueryName  = "progress"
 )
 
 func WorkflowID(action string, jobID string) (string, bool) {
@@ -70,6 +85,8 @@ func WorkflowID(action string, jobID string) (string, bool) {
 		return "gopay-app-" + jobID, true
 	case ActionGoPayPayment:
 		return "gopay-payment-" + jobID, true
+	case ActionGoPayPaymentRebind:
+		return "gopay-payment-rebind-" + jobID, true
 	case ActionProbeAccount:
 		return "probe-" + jobID, true
 	case ActionLoginSession:
@@ -87,7 +104,7 @@ func WorkflowID(action string, jobID string) (string, bool) {
 
 func ManualOTPWorkflowID(action string, jobID string) (string, bool) {
 	switch strings.TrimSpace(action) {
-	case ActionRegister, ActionActivate, ActionAutopay, ActionGoPayApp, ActionGoPayPayment, ActionRegisterAndActivate, ActionLoginSession:
+	case ActionRegister, ActionActivate, ActionAutopay, ActionGoPayApp, ActionGoPayPayment, ActionGoPayPaymentRebind, ActionRegisterAndActivate, ActionLoginSession:
 		return WorkflowID(action, jobID)
 	default:
 		return "", false

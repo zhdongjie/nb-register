@@ -9,6 +9,47 @@ import (
 	pb "orchestrator/pb"
 )
 
+func normalizeGoPayWorkflowStateJSON(stateJSON string) string {
+	stateJSON = strings.TrimSpace(stateJSON)
+	if stateJSON == "" {
+		return "{}"
+	}
+	return stateJSON
+}
+
+func goPayWorkflowStateAfter(current, next string) string {
+	next = strings.TrimSpace(next)
+	if next != "" {
+		return next
+	}
+	return normalizeGoPayWorkflowStateJSON(current)
+}
+
+type goPayStateJSONResponse interface {
+	GetStateJson() string
+}
+
+func responseStateJSON(resp goPayStateJSONResponse) string {
+	if resp == nil {
+		return ""
+	}
+	return strings.TrimSpace(resp.GetStateJson())
+}
+
+func (s *Server) goPayStatusForState(ctx context.Context, stateJSON string) (*pb.StatusResponse, error) {
+	if s.gopayClient == nil {
+		return nil, fmt.Errorf("gopay app client not configured")
+	}
+	resp, err := s.gopayClient.Status(ctx, &pb.StatusRequest{StateJson: normalizeGoPayWorkflowStateJSON(stateJSON)})
+	if err != nil {
+		return resp, fmt.Errorf("Status: %w", err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("Status returned empty response")
+	}
+	return resp, nil
+}
+
 func (s *Server) goPayStatus(ctx context.Context) (*pb.StatusResponse, error) {
 	if s.gopayClient == nil {
 		return nil, fmt.Errorf("gopay app client not configured")
@@ -102,6 +143,10 @@ func (s *Server) deleteGoPayAppStateForKey(ctx context.Context, stateKey string)
 
 func configuredGoPayPhone() string {
 	return normalizeIndonesiaPhone(os.Getenv("GOPAY_PHONE_NUMBER"))
+}
+
+func configuredGoPayWAPhone() string {
+	return normalizeIndonesiaPhone(os.Getenv("GOPAY_WA_PHONE_NUMBER"))
 }
 
 func configuredGoPayPIN() string {

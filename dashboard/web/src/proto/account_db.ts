@@ -26,6 +26,7 @@ export interface Account {
   plus_trial_eligible?: boolean | undefined;
   plus_active?: boolean | undefined;
   tier: string;
+  activation_channel?: string | undefined;
 }
 
 export interface CreateAccountRequest {

@@ -36,6 +36,7 @@ class SettingsStore(context: Context) {
             "one-time",
             "sekali pakai",
         )
+        val GOPAY_ISSUER_KEYWORDS = setOf("gopay", "gojek")
 
         private const val KEY_WEBHOOK_URL = "webhook_url"
     }

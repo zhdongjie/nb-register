@@ -75,8 +75,9 @@ type submitJobOTPRequest struct {
 }
 
 type updateAccountRequest struct {
-	SessionToken string `json:"session_token"`
-	AccessToken  string `json:"access_token"`
+	SessionToken      string  `json:"session_token"`
+	AccessToken       string  `json:"access_token"`
+	ActivationChannel *string `json:"activation_channel"`
 }
 
 const (
@@ -141,6 +142,7 @@ func main() {
 	mux.HandleFunc("/api/workflows/login", s.handleLogin)
 	mux.HandleFunc("/api/workflows/probe", s.handleProbeAccount)
 	mux.HandleFunc("/api/workflows/gopay-app", s.handleGoPayApp)
+	mux.HandleFunc("/api/workflows/gopay-payment/rebind", s.handleGoPayPaymentRebind)
 	mux.HandleFunc("/api/workflows/gopay-payment", s.handleGoPayPayment)
 	mux.HandleFunc("/api/workflows/register-and-activate", s.handleRegisterAndActivate)
 	mux.HandleFunc("/", s.handleStatic)
@@ -433,15 +435,20 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sessionToken, accessToken := normalizeAccountAuthInput(req.SessionToken, req.AccessToken)
-		if sessionToken == "" && accessToken == "" {
-			writeError(w, http.StatusBadRequest, errors.New("session_token or access_token is required"))
+		if sessionToken == "" && accessToken == "" && req.ActivationChannel == nil {
+			writeError(w, http.StatusBadRequest, errors.New("session_token, access_token, or activation_channel is required"))
 			return
 		}
-		resp, err := s.accountClient.UpdateAccount(r.Context(), &pb.UpdateAccountRequest{Account: &pb.Account{
+		account := &pb.Account{
 			AccountId:    accountID,
 			SessionToken: sessionToken,
 			AccessToken:  accessToken,
-		}})
+		}
+		if req.ActivationChannel != nil {
+			activationChannel := strings.TrimSpace(*req.ActivationChannel)
+			account.ActivationChannel = &activationChannel
+		}
+		resp, err := s.accountClient.UpdateAccount(r.Context(), &pb.UpdateAccountRequest{Account: account})
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
@@ -803,6 +810,17 @@ func (s *server) handleJob(w http.ResponseWriter, r *http.Request) {
 			}
 			s.submitJobOTP(w, r, jobID)
 			return
+		case "add-balance":
+			if len(parts) != 3 || parts[2] != "confirm" {
+				writeError(w, http.StatusNotFound, fmt.Errorf("unsupported job add-balance action: %s", strings.Join(parts[1:], "/")))
+				return
+			}
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			s.confirmManualAddBalance(w, r, jobID)
+			return
 		default:
 			writeError(w, http.StatusNotFound, fmt.Errorf("unsupported job action: %s", parts[1]))
 			return
@@ -928,6 +946,21 @@ func (s *server) submitJobOTP(w http.ResponseWriter, r *http.Request, jobID stri
 	resp, err := s.otpClient.SubmitOTP(r.Context(), &pb.SubmitOTPRequest{
 		JobId: jobID,
 		Otp:   req.OTP,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if resp.GetErrorMessage() != "" {
+		writeError(w, http.StatusBadRequest, errors.New(resp.GetErrorMessage()))
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) confirmManualAddBalance(w http.ResponseWriter, r *http.Request, jobID string) {
+	resp, err := s.gopayAppClient.ConfirmManualAddBalance(r.Context(), &pb.ConfirmManualAddBalanceRequest{
+		JobId: jobID,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -1071,6 +1104,28 @@ func (s *server) handleGoPayPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := s.gopayAppClient.RunGoPayPayment(r.Context(), &req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	statusCode := http.StatusAccepted
+	if !resp.GetStarted() || resp.GetErrorMessage() != "" {
+		statusCode = http.StatusBadGateway
+	}
+	writeJSON(w, statusCode, resp)
+}
+
+func (s *server) handleGoPayPaymentRebind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req pb.GoPayPaymentRebindRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	resp, err := s.gopayAppClient.RetryGoPayPaymentRebind(r.Context(), &req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

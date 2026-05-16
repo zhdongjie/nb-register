@@ -53,8 +53,19 @@ type JobEvent struct {
 	CreatedAt    int64 `gorm:"autoCreateTime"`
 }
 
+type GoPayUserProfile struct {
+	StateKey  string `gorm:"primaryKey;column:state_key"`
+	WAPhone   string `gorm:"column:wa_phone"`
+	CreatedAt int64  `gorm:"autoCreateTime"`
+	UpdatedAt int64  `gorm:"autoUpdateTime"`
+}
+
 func (JobEvent) TableName() string {
 	return "job_events"
+}
+
+func (GoPayUserProfile) TableName() string {
+	return "gopay_user_profiles"
 }
 
 func DSN() string {
@@ -75,6 +86,6 @@ func InitDB() *gorm.DB {
 	if err != nil {
 		log.Fatalf("failed to connect to PostgreSQL database: %v", err)
 	}
-	db.AutoMigrate(&Job{}, &JobParam{}, &JobStep{}, &JobEvent{})
+	db.AutoMigrate(&Job{}, &JobParam{}, &JobStep{}, &JobEvent{}, &GoPayUserProfile{})
 	return db
 }

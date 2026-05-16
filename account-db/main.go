@@ -232,6 +232,9 @@ func updateMap(account *pb.Account) map[string]interface{} {
 	if value := normalizeTier(account.GetTier()); value != "" {
 		updates["tier"] = value
 	}
+	if account.ActivationChannel != nil {
+		updates["activation_channel"] = strings.TrimSpace(account.GetActivationChannel())
+	}
 	return updates
 }
 
@@ -256,6 +259,7 @@ func accountToProto(account *db.Account) *pb.Account {
 		PlusTrialEligible: account.PlusTrialEligible,
 		PlusActive:        account.PlusActive,
 		Tier:              account.Tier,
+		ActivationChannel: &account.ActivationChannel,
 	}
 }
 

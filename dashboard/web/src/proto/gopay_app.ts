@@ -112,7 +112,7 @@ export interface SignupStartRequest {
   email: string;
   /** 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62 */
   country_code: string;
-  /** sms 或 wa；由服务映射为 otp_sms / otp_wa */
+  /** sms 或 wa；为空默认 sms；由服务映射为 otp_sms / otp_wa */
   otp_channel: string;
   state_json: string;
 }
@@ -123,6 +123,22 @@ export interface SignupStartResponse {
   otp_sent: boolean;
   verification_id: string;
   verification_method: string;
+  /** 上游原始响应 JSON */
+  raw_json: string;
+  retry_timer_seconds: number[];
+  state_json: string;
+}
+
+export interface SignupRetryRequest {
+  state_json: string;
+}
+
+export interface SignupRetryResponse {
+  success: boolean;
+  error_message: string;
+  otp_sent: boolean;
+  /** 上游原始响应 JSON */
+  raw_json: string;
   state_json: string;
 }
 
@@ -136,12 +152,14 @@ export interface SignupCompleteResponse {
   error_message: string;
   phone: string;
   pin_setup_required: boolean;
+  /** 上游原始响应 JSON */
+  raw_json: string;
   state_json: string;
 }
 
 export interface CreatePinStartRequest {
   pin: string;
-  /** sms 或 wa；由服务映射为 otp_sms / otp_wa */
+  /** sms 或 wa；为空默认 sms；由服务映射为 otp_sms / otp_wa */
   otp_channel: string;
   state_json: string;
 }
@@ -152,6 +170,17 @@ export interface CreatePinStartResponse {
   otp_sent: boolean;
   verification_id: string;
   verification_method: string;
+  state_json: string;
+}
+
+export interface CreatePinRetryRequest {
+  state_json: string;
+}
+
+export interface CreatePinRetryResponse {
+  success: boolean;
+  error_message: string;
+  otp_sent: boolean;
   state_json: string;
 }
 
@@ -233,7 +262,7 @@ export interface CheckTokenValidResponse {
 }
 
 export interface ClaimEnvelopeRequest {
-  /** 例如 6a070b928feaf260b5a0b201；为空时从 link 提取 */
+  /** 为空时从 link 提取 */
   envelope_request_id: string;
   /** app.gopay 短链、gopay:// deeplink 或 customer API URL */
   link: string;
@@ -307,6 +336,17 @@ export interface CheckDeactivationRequest {
 export interface CheckDeactivationResponse {
   completed: boolean;
   remaining_seconds: number;
+  state_json: string;
+}
+
+export interface GetQrIdRequest {
+  state_json: string;
+}
+
+export interface GetQrIdResponse {
+  success: boolean;
+  error_message: string;
+  qr_id: string;
   state_json: string;
 }
 

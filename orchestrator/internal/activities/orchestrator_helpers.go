@@ -6,7 +6,7 @@ import (
 
 func (s *Server) paymentOtpTimeout() int32 {
 	if s.otpTimeout <= 0 {
-		return 60
+		return 180
 	}
 	return s.otpTimeout
 }

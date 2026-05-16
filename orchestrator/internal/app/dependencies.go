@@ -49,7 +49,11 @@ func newOrchestratorDependencies(cfg orchestratorConfig) (*orchestratorDependenc
 	}
 	deps.addCloser(paymentConn.Close)
 
-	gopayConn, err := newGRPCClientConn("gopay-app service", cfg.GoPayAppAddr)
+	gopayConn, err := newGRPCClientConn(
+		"gopay-app service",
+		cfg.GoPayAppAddr,
+		grpc.WithDefaultServiceConfig(gopayAppGRPCRetryServiceConfig()),
+	)
 	if err != nil {
 		deps.Close()
 		return nil, err
@@ -111,12 +115,29 @@ func newOrchestratorDependencies(cfg orchestratorConfig) (*orchestratorDependenc
 	return deps, nil
 }
 
-func newGRPCClientConn(name string, addr string) (*grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func newGRPCClientConn(name string, addr string, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	opts = append(opts, extraOpts...)
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", name, err)
 	}
 	return conn, nil
+}
+
+func gopayAppGRPCRetryServiceConfig() string {
+	return `{
+		"methodConfig": [{
+			"name": [{"service": "gopay_app.GopayAppService"}],
+			"retryPolicy": {
+				"MaxAttempts": 3,
+				"InitialBackoff": "0.3s",
+				"MaxBackoff": "2s",
+				"BackoffMultiplier": 2,
+				"RetryableStatusCodes": ["UNAVAILABLE"]
+			}
+		}]
+	}`
 }
 
 func (d *orchestratorDependencies) addCloser(closeFn func() error) {

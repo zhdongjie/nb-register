@@ -9,7 +9,7 @@ import (
 )
 
 func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoPayAppChangePhoneStartInput) (GoPayAppChangePhoneStartOutput, error) {
-	output := GoPayAppChangePhoneStartOutput{}
+	output := GoPayAppChangePhoneStartOutput{StateJson: normalizeGoPayWorkflowStateJSON(input.GetStateJson())}
 	data := map[string]any{}
 	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppChangePhoneStart, false, true)
 	_, err := step.run(func() (any, error) {
@@ -24,7 +24,8 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 			return data, err
 		}
 
-		statusBefore, statusErr := s.goPayStatus(ctx)
+		statusBefore, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusBefore))
 		data["status_before"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusBefore, statusErr))
 		if statusErr != nil {
 			data["error_message"] = statusErr.Error()
@@ -36,7 +37,7 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 		if failures < 0 {
 			failures = 0
 		}
-		otpWaitSeconds := s.changePhoneOTPWaitTimeoutSeconds()
+		otpWaitSeconds := s.paymentOtpTimeout()
 		otpRetryAttempts := s.changePhoneOTPRetryCount()
 		data["failure_count"] = failures
 		data["max_failures"] = maxFailures
@@ -126,15 +127,9 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 				continue
 			}
 
-			stateJSON, err := s.loadGoPayAppState(ctx)
-			if err != nil {
-				s.cancelSMSActivation(ctx, activationID)
-				data["error_message"] = err.Error()
-				return data, err
-			}
 			pin := configuredGoPayPIN()
 			if pin == "" {
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				err := fmt.Errorf("GOPAY_PIN is required")
 				data["error_message"] = err.Error()
 				return data, err
@@ -142,19 +137,17 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 			changeResp, err := s.gopayClient.ChangePhoneStart(ctx, &pb.ChangePhoneStartRequest{
 				NewPhone:  phone,
 				Pin:       pin,
-				StateJson: stateJSON,
+				StateJson: output.GetStateJson(),
 			})
-			if err == nil && changeResp != nil {
-				err = s.saveGoPayAppState(ctx, changeResp.GetStateJson())
-			}
+			output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(changeResp))
 			if err != nil {
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				err = fmt.Errorf("ChangePhoneStart: %w", err)
 				data["error_message"] = err.Error()
 				return data, err
 			}
 			if changeResp == nil {
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				err := fmt.Errorf("ChangePhoneStart returned empty response")
 				data["error_message"] = err.Error()
 				return data, err
@@ -169,7 +162,7 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 					data["failure_count"] = failures
 					continue
 				}
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				err := fmt.Errorf("ChangePhoneStart: %s", changeResp.GetErrorMessage())
 				data["error_message"] = err.Error()
 				return data, err
@@ -179,12 +172,12 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 				"activation_id": activationID,
 			})
 			if sentResp, err := s.smsClient.MarkMessageSent(ctx, &pb.MarkMessageSentRequest{ActivationId: activationID}); err != nil {
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				err = fmt.Errorf("MarkMessageSent: %w", err)
 				data["error_message"] = err.Error()
 				return data, err
 			} else if sentResp == nil || !sentResp.GetSuccess() {
-				s.cancelSMSActivation(ctx, activationID)
+				s.cancelSMSActivationAsync(activationID, "discard change phone activation")
 				message := ""
 				if sentResp != nil {
 					message = sentResp.GetErrorMessage()
@@ -218,7 +211,7 @@ func (s *Server) GoPayAppChangePhoneStartActivity(ctx context.Context, input GoP
 }
 
 func (s *Server) GoPayAppChangePhoneRetryActivity(ctx context.Context, input GoPayAppChangePhoneRetryInput) (GoPayAppChangePhoneRetryOutput, error) {
-	output := GoPayAppChangePhoneRetryOutput{ActivationId: input.GetActivationId()}
+	output := GoPayAppChangePhoneRetryOutput{ActivationId: input.GetActivationId(), StateJson: normalizeGoPayWorkflowStateJSON(input.GetStateJson())}
 	data := map[string]any{
 		"activation_id": input.GetActivationId(),
 		"otp_attempt":   input.GetOtpAttempt(),
@@ -230,15 +223,8 @@ func (s *Server) GoPayAppChangePhoneRetryActivity(ctx context.Context, input GoP
 			data["error_message"] = err.Error()
 			return data, err
 		}
-		stateJSON, err := s.loadGoPayAppState(ctx)
-		if err != nil {
-			data["error_message"] = err.Error()
-			return data, err
-		}
-		retryResp, err := s.gopayClient.ChangePhoneRetry(ctx, &pb.ChangePhoneRetryRequest{StateJson: stateJSON})
-		if err == nil && retryResp != nil {
-			err = s.saveGoPayAppState(ctx, retryResp.GetStateJson())
-		}
+		retryResp, err := s.gopayClient.ChangePhoneRetry(ctx, &pb.ChangePhoneRetryRequest{StateJson: output.GetStateJson()})
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(retryResp))
 		if err != nil {
 			err = fmt.Errorf("ChangePhoneRetry: %w", err)
 			data["error_message"] = err.Error()
@@ -358,7 +344,10 @@ func (s *Server) GoPayAppSMSRequestAdditionalCodeActivity(ctx context.Context, i
 }
 
 func (s *Server) GoPayAppChangePhoneCompleteActivity(ctx context.Context, input GoPayAppChangePhoneCompleteInput) (GoPayAppChangePhoneCompleteOutput, error) {
-	output := GoPayAppChangePhoneCompleteOutput{ActivationId: input.GetActivationId()}
+	output := GoPayAppChangePhoneCompleteOutput{
+		ActivationId: input.GetActivationId(),
+		StateJson:    normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	data := map[string]any{
 		"activation_id": input.GetActivationId(),
 	}
@@ -380,16 +369,8 @@ func (s *Server) GoPayAppChangePhoneCompleteActivity(ctx context.Context, input 
 			data["error_message"] = err.Error()
 			return data, err
 		}
-		stateJSON, err := s.loadGoPayAppState(ctx)
-		if err != nil {
-			s.finishSMSActivation(ctx, input.GetActivationId())
-			data["error_message"] = err.Error()
-			return data, err
-		}
-		completeResp, err := s.gopayClient.ChangePhoneComplete(ctx, &pb.ChangePhoneCompleteRequest{Otp: input.GetCode(), StateJson: stateJSON})
-		if err == nil && completeResp != nil {
-			err = s.saveGoPayAppState(ctx, completeResp.GetStateJson())
-		}
+		completeResp, err := s.gopayClient.ChangePhoneComplete(ctx, &pb.ChangePhoneCompleteRequest{Otp: input.GetCode(), StateJson: output.GetStateJson()})
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(completeResp))
 		if err != nil {
 			s.finishSMSActivation(ctx, input.GetActivationId())
 			err = fmt.Errorf("ChangePhoneComplete: %w", err)
@@ -427,7 +408,8 @@ func (s *Server) GoPayAppChangePhoneCompleteActivity(ctx context.Context, input 
 			return data, nil
 		}
 
-		statusAfter, statusErr := s.goPayStatus(ctx)
+		statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 		data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 		if statusErr != nil {
 			data["error_message"] = statusErr.Error()

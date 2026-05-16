@@ -673,6 +673,41 @@ def _response_excerpt(response: Any, limit: int = 600) -> str:
         return _redact_text_for_log(text)[:limit]
 
 
+def _normalize_otp_channel(value: str) -> str:
+    value = str(value or "").strip().lower()
+    if value in {"sms", "otp_sms"}:
+        return "sms"
+    if value in {"wa", "whatsapp", "otp_wa"}:
+        return "wa"
+    return ""
+
+
+def _find_bool_field(value: Any, field_names: set[str]) -> Optional[bool]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in field_names and isinstance(item, bool):
+                return item
+            found = _find_bool_field(item, field_names)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_bool_field(item, field_names)
+            if found is not None:
+                return found
+    return None
+
+
+def _linking_consent_requires_otp(value: Any) -> bool:
+    found = _find_bool_field(
+        value,
+        {"otp_required", "is_otp_required", "requires_otp", "need_otp", "needs_otp"},
+    )
+    if found is not None:
+        return found
+    return True
+
+
 def _redact_for_log(value: Any, key: str = "") -> Any:
     if isinstance(value, dict):
         return {item_key: _redact_for_log(item_value, str(item_key)) for item_key, item_value in value.items()}
@@ -1915,11 +1950,16 @@ class GoPayCharger:
         )
         if r.status_code != 200:
             raise GoPayError(f"user-consent {r.status_code}: {_response_excerpt(r)}")
-        if not r.json().get("success"):
+        payload = r.json()
+        if not payload.get("success"):
             raise GoPayError(f"user-consent failed: {_response_excerpt(r)}")
-        self.log("[gopay] consent ok, OTP sent via WhatsApp")
+        if _linking_consent_requires_otp(payload):
+            self.log("[gopay] consent ok, OTP required")
+        else:
+            self.log("[gopay] consent ok, OTP not required")
+        return payload
 
-    def _gopay_resend_otp(self, reference_id: str):
+    def _gopay_resend_otp(self, reference_id: str) -> dict:
         """Try resend-otp to trigger SMS delivery."""
         try:
             r = self._ext_request(
@@ -1930,8 +1970,17 @@ class GoPayCharger:
                 timeout=DEFAULT_TIMEOUT,
             )
             self.log(f"[gopay] resend-otp status={r.status_code} body={_response_excerpt(r, limit=200)}")
+            return {
+                "success": 200 <= int(r.status_code) < 300,
+                "status_code": int(r.status_code),
+                "response_text": _response_excerpt(r, limit=400),
+            }
         except Exception as e:
             self.log(f"[gopay] resend-otp failed: {_redact_text_for_log(e)}")
+            return {
+                "success": False,
+                "error_message": str(e),
+            }
 
     def _gopay_validate_otp(self, reference_id: str, otp: str) -> tuple[str, str]:
         """Returns (challenge_id, client_id) for PIN tokenization."""
@@ -2231,8 +2280,25 @@ class GoPayCharger:
         billing: Optional[dict] = None,
         checkout_session_id: str = "",
         checkout_url: str = "",
+        otp_channel: str = "",
     ) -> dict:
-        """Run checkout/linking until GoPay has sent the WhatsApp OTP."""
+        """Run checkout/linking until GoPay has sent the requested OTP."""
+        prepared = self.prepare_until_linking(
+            stripe_pk,
+            billing=billing,
+            checkout_session_id=checkout_session_id,
+            checkout_url=checkout_url,
+        )
+        return self.start_prepared_linking_until_otp(prepared, otp_channel=otp_channel)
+
+    def prepare_until_linking(
+        self,
+        stripe_pk: str,
+        billing: Optional[dict] = None,
+        checkout_session_id: str = "",
+        checkout_url: str = "",
+    ) -> dict:
+        """Run checkout/Stripe/Midtrans redirect setup, but do not trigger GoPay linking."""
         billing = billing or {}
         checkout_url = str(checkout_url or "").strip()
         cs_id = str(checkout_session_id or "").strip()
@@ -2281,18 +2347,78 @@ class GoPayCharger:
                     self._chatgpt_approve(cs_id)
                     snap_token = self._follow_redirect_to_midtrans(cs_id, stripe_pk)
         self.log("[gopay] midtrans snap_token=present")
-        return self.start_linking_until_otp(snap_token, cs_id, stripe_pk)
+        return {
+            "state": "prepared",
+            "cs_id": cs_id,
+            "checkout_url": getattr(self, "checkout_url", ""),
+            "stripe_pk": stripe_pk,
+            "snap_token": snap_token,
+        }
+
+    def start_prepared_linking_until_otp(
+        self,
+        state: dict,
+        otp_channel: str = "",
+        gopay_phone: str = "",
+    ) -> dict:
+        """Trigger GoPay user-linking from a prepared Midtrans snap state."""
+        snap_token = str(state.get("snap_token") or "").strip()
+        cs_id = str(state.get("cs_id") or state.get("checkout_session_id") or "").strip()
+        stripe_pk = str(state.get("stripe_pk") or "").strip()
+        checkout_url = str(state.get("checkout_url") or "").strip()
+        if not snap_token:
+            raise GoPayError("prepared payment is missing snap_token")
+        if checkout_url:
+            self.checkout_url = checkout_url
+        phone = re.sub(r"\D", "", str(gopay_phone or "").strip())
+        if phone:
+            self.phone = phone
+        if not getattr(self, "phone", ""):
+            raise GoPayError("gopay_phone is required before linking")
+        return self.start_linking_until_otp(snap_token, cs_id, stripe_pk, otp_channel=otp_channel)
+
+    def resend_linking_otp(self, state: dict) -> dict:
+        reference_id = str(state.get("reference_id") or "").strip()
+        if not reference_id:
+            raise GoPayError("prepared payment is missing reference_id")
+        result = self._gopay_resend_otp(reference_id)
+        if not result.get("success"):
+            message = str(result.get("error_message") or result.get("response_text") or "resend-otp failed")
+            raise GoPayError(message)
+        next_state = dict(state)
+        next_state["issued_after_unix"] = int(time.time())
+        next_state["otp_resend_count"] = int(next_state.get("otp_resend_count") or 0) + 1
+        next_state["otp_required"] = True
+        return next_state
 
     def start_linking_until_otp(
-        self, snap_token: str, cs_id: str = "", stripe_pk: str = "",
+        self, snap_token: str, cs_id: str = "", stripe_pk: str = "", otp_channel: str = "",
     ) -> dict:
         """Load Midtrans, trigger GoPay linking OTP, and return resumable state."""
+        otp_channel = _normalize_otp_channel(otp_channel)
         self._midtrans_load_transaction(snap_token)
         reference_id = self._midtrans_init_linking(snap_token)
         self._gopay_validate_reference(reference_id)
         issued_after_unix = int(time.time())
-        self._gopay_user_consent(reference_id)
-        # self._gopay_resend_otp(reference_id)
+        consent = self._gopay_user_consent(reference_id)
+        otp_required = _linking_consent_requires_otp(consent)
+        if otp_required and otp_channel == "sms":
+            self._gopay_resend_otp(reference_id)
+        if not otp_required:
+            charge_data = self._midtrans_create_charge_data(snap_token)
+            state = {
+                "cs_id": cs_id,
+                "checkout_url": self.checkout_url,
+                "stripe_pk": stripe_pk,
+                "snap_token": snap_token,
+                "reference_id": reference_id,
+                "issued_after_unix": issued_after_unix,
+                "otp_channel": otp_channel,
+                "otp_required": False,
+                "state": "awaiting_manual_confirmation",
+            }
+            state.update(charge_data)
+            return state
         return {
             "cs_id": cs_id,
             "checkout_url": self.checkout_url,
@@ -2300,6 +2426,8 @@ class GoPayCharger:
             "snap_token": snap_token,
             "reference_id": reference_id,
             "issued_after_unix": issued_after_unix,
+            "otp_channel": otp_channel,
+            "otp_required": True,
         }
 
     def complete_after_otp_until_manual_confirmation(self, state: dict, otp: str) -> dict:

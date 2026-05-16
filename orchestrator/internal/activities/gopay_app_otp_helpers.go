@@ -60,7 +60,9 @@ func (s *Server) markGoPaySMSMessageSent(ctx context.Context, activationID strin
 }
 
 func (s *Server) finishGoPayAppOTPReady(ctx context.Context, jobID, stepName string, output GoPayAppOTPOutput, data map[string]any) (GoPayAppOTPOutput, error) {
-	tokenResp, err := s.validateGoPayAccountToken(ctx)
+	stateJSON := normalizeGoPayWorkflowStateJSON(output.GetStateJson())
+	tokenResp, nextStateJSON, err := s.validateGoPayAccountTokenForState(ctx, stateJSON)
+	output.StateJson = nextStateJSON
 	data["check_token_valid_after"] = checkTokenValidData(tokenResp)
 	if err != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, jobID, stepName, data, err)
@@ -72,7 +74,8 @@ func (s *Server) finishGoPayAppOTPReady(ctx context.Context, jobID, stepName str
 		}
 		return output, s.completeGoPayAppOTPStep(ctx, jobID, stepName, data, fmt.Errorf("%s", message))
 	}
-	statusAfter, statusErr := s.goPayStatus(ctx)
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 	data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, jobID, stepName, data, statusErr)
@@ -100,12 +103,7 @@ func gopayAppOTPStepName(input GoPayAppOTPStartInput) string {
 	if stepName := strings.TrimSpace(input.GetStepName()); stepName != "" {
 		return stepName
 	}
-	switch input.GetOperation() {
-	case goPayAppOTPOperationCreatePin:
-		return stepGoPayAppCreatePin
-	default:
-		return stepGoPayAppLogin
-	}
+	return stepGoPayAppLogin
 }
 
 func authStartData(resp *pb.AuthStartResponse) map[string]any {
@@ -156,6 +154,18 @@ func createPinStartData(resp *pb.CreatePinStartResponse) map[string]any {
 	}
 }
 
+func createPinRetryData(resp *pb.CreatePinRetryResponse) map[string]any {
+	if resp == nil {
+		return map[string]any{"response_present": false}
+	}
+	return map[string]any{
+		"response_present": true,
+		"success":          resp.GetSuccess(),
+		"error_message":    resp.GetErrorMessage(),
+		"otp_sent":         resp.GetOtpSent(),
+	}
+}
+
 func providerActionData(resp *pb.ProviderActionResponse, err error) map[string]any {
 	data := map[string]any{"response_present": resp != nil}
 	if resp != nil {
@@ -178,6 +188,21 @@ func signupStartData(resp *pb.SignupStartResponse) map[string]any {
 		"error_message":       resp.GetErrorMessage(),
 		"otp_sent":            resp.GetOtpSent(),
 		"verification_method": resp.GetVerificationMethod(),
+		"retry_timer_seconds": resp.GetRetryTimerSeconds(),
+		"raw_json":            resp.GetRawJson(),
+	}
+}
+
+func signupRetryData(resp *pb.SignupRetryResponse) map[string]any {
+	if resp == nil {
+		return map[string]any{"response_present": false}
+	}
+	return map[string]any{
+		"response_present": true,
+		"success":          resp.GetSuccess(),
+		"error_message":    resp.GetErrorMessage(),
+		"otp_sent":         resp.GetOtpSent(),
+		"raw_json":         resp.GetRawJson(),
 	}
 }
 
@@ -192,6 +217,7 @@ func signupCompleteData(resp *pb.SignupCompleteResponse) map[string]any {
 		"phone":                resp.GetPhone(),
 		"pin_setup_required":   resp.GetPinSetupRequired(),
 		"sensitive_values_set": false,
+		"raw_json":             resp.GetRawJson(),
 	}
 }
 

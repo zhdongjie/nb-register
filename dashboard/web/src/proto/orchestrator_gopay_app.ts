@@ -48,6 +48,10 @@ export interface GoPayPaymentRequest {
   sms_activation_id: string;
   add_balance: GoPayAddBalance | undefined;
   add_balance_confirm_timeout_seconds: number;
+  /** local 或 tg:<user_id>；WA 接码来源和 GoPay state key */
+  state_key: string;
+  /** WA 支付注册手机号；为空时使用 state_key 已保存值或本地配置 */
+  wa_phone: string;
 }
 
 export interface GoPayPaymentResponse {
@@ -62,6 +66,17 @@ export interface GoPayPaymentResponse {
   add_balance_complete: boolean;
   add_balance_method: string;
   add_balance_status: string;
+  wa_phone: string;
+  bound_phone: string;
+  change_phone_activation_id: string;
+  change_phone_complete: boolean;
+  state_key: string;
+}
+
+export interface GoPayPaymentRebindRequest {
+  source_job_id: string;
+  account_id: string;
+  state_key: string;
 }
 
 export interface GoPayAddBalance {
@@ -111,6 +126,22 @@ export interface GoPayUserClearStateRequest {
 export interface GoPayUserClearStateResponse {
   success: boolean;
   error_message: string;
+}
+
+export interface GoPayUserSetWAPhoneRequest {
+  state_key: string;
+  wa_phone: string;
+}
+
+export interface GoPayUserGetWAPhoneRequest {
+  state_key: string;
+}
+
+export interface GoPayUserWAPhoneResponse {
+  success: boolean;
+  error_message: string;
+  state_key: string;
+  wa_phone: string;
 }
 
 export interface GoPayUserAuthStartRequest {
@@ -267,6 +298,8 @@ export interface GoPayPaymentWorkflowInput {
   sms_activation_id: string;
   add_balance: GoPayAddBalance | undefined;
   add_balance_confirm_timeout_seconds: number;
+  state_key: string;
+  wa_phone: string;
 }
 
 export interface GoPayPaymentWorkflowResult {
@@ -283,6 +316,31 @@ export interface GoPayPaymentWorkflowResult {
   add_balance_complete: boolean;
   add_balance_method: string;
   add_balance_status: string;
+  wa_phone: string;
+  bound_phone: string;
+  change_phone_activation_id: string;
+  change_phone_complete: boolean;
+  state_key: string;
+}
+
+export interface GoPayPaymentRebindWorkflowInput {
+  job_id: string;
+  source_job_id: string;
+  account_id: string;
+  state_key: string;
+}
+
+export interface GoPayPaymentRebindWorkflowResult {
+  job_id: string;
+  success: boolean;
+  error_message: string;
+  source_job_id: string;
+  account_id: string;
+  activation_id: string;
+  bound_phone: string;
+  change_phone_complete: boolean;
+  state_key: string;
+  wa_phone: string;
 }
 
 export interface GoPayAppStepInput {
@@ -333,6 +391,48 @@ export interface GoPayAppAcquireSignupPhoneOutput {
   failure_count: number;
   max_failures: number;
   otp_timeout_seconds: number;
+  data: { [key: string]: any } | undefined;
+}
+
+export interface GoPayResolveWAPhoneInput {
+  job_id: string;
+  state_key: string;
+  wa_phone: string;
+}
+
+export interface GoPayResolveWAPhoneOutput {
+  state_key: string;
+  wa_phone: string;
+  data: { [key: string]: any } | undefined;
+}
+
+export interface GoPayAppStateActivityInput {
+  job_id: string;
+  state_key: string;
+  state_json: string;
+  reason: string;
+}
+
+export interface GoPayAppStateActivityOutput {
+  state_key: string;
+  state_json: string;
+  data: { [key: string]: any } | undefined;
+}
+
+export interface GoPayPaymentRebindSourceInput {
+  job_id: string;
+  source_job_id: string;
+  account_id: string;
+  state_key: string;
+}
+
+export interface GoPayPaymentRebindSourceOutput {
+  source_job_id: string;
+  account_id: string;
+  state_key: string;
+  wa_phone: string;
+  charge_ref: string;
+  snap_token: string;
   data: { [key: string]: any } | undefined;
 }
 

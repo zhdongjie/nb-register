@@ -49,16 +49,12 @@ GOPAY_PIN = os.environ.get("GOPAY_PIN", "")
 GOPAY_COUNTRY_CODE = os.environ.get("GOPAY_COUNTRY_CODE", "62")
 GOPAY_LOGIN_OTP_METHOD = os.environ.get("GOPAY_LOGIN_OTP_METHOD", "otp_wa")
 GOPAY_PIN_CLIENT_ID = os.environ.get("GOPAY_PIN_CLIENT_ID", "6d11d261d7ae462dbd4be0dc5f36a697-MFAGOJEK")
-GOPAY_LOGIN_FP_RETRIES = int(os.environ.get("GOPAY_LOGIN_FP_RETRIES", "8"))
 GOPAY_CHANGE_PHONE_COUNTRY_SYNC = os.environ.get("GOPAY_CHANGE_PHONE_COUNTRY_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}
 GOPAY_TOKEN_REFRESH_MIN_TTL_SECONDS = int(os.environ.get("GOPAY_TOKEN_REFRESH_MIN_TTL_SECONDS", "900"))
 GOPAY_OTP_TIMEOUT_SECONDS = int(os.environ.get("GOPAY_OTP_TIMEOUT_SECONDS", "180"))
 GOPAY_MIN_BALANCE_RP = 1
 _STATE_LOCK = threading.RLock()
-_PROXY_LOCK = threading.RLock()
-_GOPAY_PROXY_CURSOR = -1
 _GOPAY_PROXY_STATE_KEY = "_gopay_proxy"
-_GOPAY_PROXY_FIRST_STATE_KEY = "_gopay_proxy_first"
 LOGIN_STATE_KEYS = (
     "_login_phone",
     "_login_country_code",
@@ -155,41 +151,29 @@ def _state_proxy_index(state: dict, entries: list[str]) -> int:
     return -1
 
 
-def _next_proxy_index(entries: list[str], current_proxy: str = "") -> int:
-    global _GOPAY_PROXY_CURSOR
-    with _PROXY_LOCK:
-        current_index = _proxy_index(entries, current_proxy)
-        if current_index >= 0:
-            index = (current_index + 1) % len(entries)
-        else:
-            index = (_GOPAY_PROXY_CURSOR + 1) % len(entries)
-        _GOPAY_PROXY_CURSOR = index
-        return index
-
-
 def gopay_proxy_for_attempt(attempt: int, state: dict = None) -> tuple[str, int, int]:
     entries = _require_gopay_proxy_pool()
-    first_proxy = state.get(_GOPAY_PROXY_FIRST_STATE_KEY, "") if isinstance(state, dict) else ""
-    if attempt <= 1:
-        index = _state_proxy_index(state, entries)
-        if index < 0:
-            index = _next_proxy_index(entries)
-    else:
-        current_proxy = state.get(_GOPAY_PROXY_STATE_KEY, "") if isinstance(state, dict) else ""
-        index = _next_proxy_index(entries, current_proxy)
-    proxy = entries[index]
-    if attempt > 1 and first_proxy and proxy == first_proxy:
+    if attempt > len(entries):
         raise GopayProxyPoolExhausted("GOPAY_PROXY_POOL exhausted before login methods succeeded")
+    current_index = _state_proxy_index(state, entries)
+    if current_index < 0:
+        index = 0
+    elif attempt <= 1:
+        index = current_index
+    else:
+        index = (current_index + 1) % len(entries)
+    proxy = entries[index]
     if isinstance(state, dict):
-        if attempt <= 1 or not state.get(_GOPAY_PROXY_FIRST_STATE_KEY):
-            state[_GOPAY_PROXY_FIRST_STATE_KEY] = proxy
         state[_GOPAY_PROXY_STATE_KEY] = proxy
     return proxy, index + 1, len(entries)
 
 
 def reset_gopay_proxy_rotation(state: dict) -> None:
-    if isinstance(state, dict):
-        state.pop(_GOPAY_PROXY_FIRST_STATE_KEY, None)
+    return None
+
+
+def gopay_proxy_attempt_limit() -> int:
+    return max(1, len(gopay_proxy_pool_entries()))
 
 
 def gopay_proxy_for_state(state: dict) -> str:
@@ -356,7 +340,7 @@ def login_methods_invalid_user(response: dict) -> bool:
 def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
-    attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
+    attempts = gopay_proxy_attempt_limit()
     fingerprint_rotations = 0
     proxy_rotations = 0
     proxy_state = {}
@@ -417,11 +401,14 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
             time.sleep(1)
             continue
         if _is_rate_limited(r):
+            error = "GOPAY_PROXY_POOL exhausted before login methods succeeded"
+            if attempt < proxy_count:
+                error = _response_error("login methods rate limited", r)
             return {
                 "success": False,
                 "available": False,
                 "status": "rate_limited",
-                "error": _response_error("login methods rate limited", r),
+                "error": error,
                 "attempts": attempt,
                 "fingerprint_rotations": fingerprint_rotations,
                 "proxy_rotations": proxy_rotations,
@@ -956,7 +943,7 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
     """Start GoTo login and stop at 2FA OTP if needed."""
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
-    attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
+    attempts = gopay_proxy_attempt_limit()
     reset_gopay_proxy_rotation(state)
     for attempt in range(1, attempts + 1):
         try:
@@ -983,6 +970,8 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
             )
             time.sleep(1)
             continue
+        if _is_rate_limited(r):
+            return {"success": False, "error": "GOPAY_PROXY_POOL exhausted before login methods succeeded"}
         if login_methods_invalid_user(r):
             return {"success": False, "not_registered": True, "error": _response_error("login methods failed", r)}
         return {"success": False, "error": _response_error("login methods failed", r)}

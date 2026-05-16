@@ -39,6 +39,23 @@ func registerFailurePolicy(err error) (status string, recoverable bool, retryabl
 	return statusFailedRetryable, false, true
 }
 
+func isOTPWaitNotReceivedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	normalized := strings.ToLower(err.Error())
+	return strings.Contains(normalized, "otp not received") ||
+		strings.Contains(normalized, "otp not found") ||
+		strings.Contains(normalized, "waitcode")
+}
+
+func isGoPaySignupOTPNotReceived(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "gopay signup otp not received")
+}
+
 func normalizeTier(tier string) string {
 	return strings.ToLower(strings.TrimSpace(tier))
 }
@@ -54,7 +71,27 @@ func normalizeGoPayOTPChannel(value string) string {
 	}
 }
 
-func goPayOTPWaitInput(jobID, stepName string, start GoPayAppOTPOutput, channel string, activationID string) OTPWaitInput {
+func effectiveGoPayOTPChannel(start GoPayAppOTPOutput, requested string) string {
+	if channel := normalizeGoPayOTPChannel(requested); channel != "" {
+		return channel
+	}
+	return normalizeGoPayOTPChannel(start.GetOtpChannel())
+}
+
+func goPayAddBalanceMethod(addBalance *GoPayAddBalance) string {
+	if addBalance == nil {
+		return ""
+	}
+	if addBalance.GetManualTransfer() != nil {
+		return "manual_transfer"
+	}
+	if addBalance.GetEnvelope() != nil {
+		return "envelope"
+	}
+	return ""
+}
+
+func goPayOTPWaitInput(jobID, stepName string, start GoPayAppOTPOutput, channel string, activationID string, source string) OTPWaitInput {
 	input := OTPWaitInput{
 		JobId:            jobID,
 		StepName:         stepName,
@@ -63,11 +100,14 @@ func goPayOTPWaitInput(jobID, stepName string, start GoPayAppOTPOutput, channel 
 		OtpParam:         paymentOTPParam,
 		SubmittedAtParam: paymentOTPSubmittedAtParam,
 	}
-	if normalizeGoPayOTPChannel(channel) == "sms" {
+	if effectiveGoPayOTPChannel(start, channel) == "sms" {
 		input.Target = &pb.OTPWaitInput_Sms{Sms: &pb.OTPWaitSMSTarget{ActivationId: activationID}}
 		return input
 	}
-	input.Target = &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: goPayLocalSource}}
+	if strings.TrimSpace(source) == "" {
+		source = goPayLocalSource
+	}
+	input.Target = &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: source}}
 	return input
 }
 

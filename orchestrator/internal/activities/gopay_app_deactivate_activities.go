@@ -11,7 +11,8 @@ import (
 func (s *Server) GoPayAppDeactivateStartActivity(ctx context.Context, input GoPayAppDeactivateStartInput) (GoPayAppDeactivateStartOutput, error) {
 	output := GoPayAppDeactivateStartOutput{
 		ActivationId:   input.GetActivationId(),
-		TimeoutSeconds: defaultChangePhoneOTPWaitSeconds,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
 	}
 	data := map[string]any{"activation_id": input.GetActivationId()}
 	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppDeactivateStart, false, true)
@@ -26,12 +27,6 @@ func (s *Server) GoPayAppDeactivateStartActivity(ctx context.Context, input GoPa
 			data["error_message"] = err.Error()
 			return data, err
 		}
-		stateJSON, err := s.loadGoPayAppState(ctx)
-		if err != nil {
-			s.finishSMSActivation(ctx, input.GetActivationId())
-			data["error_message"] = err.Error()
-			return data, err
-		}
 		pin := configuredGoPayPIN()
 		if pin == "" {
 			s.finishSMSActivation(ctx, input.GetActivationId())
@@ -39,10 +34,8 @@ func (s *Server) GoPayAppDeactivateStartActivity(ctx context.Context, input GoPa
 			data["error_message"] = err.Error()
 			return data, err
 		}
-		resp, err := s.gopayClient.DeactivateStart(ctx, &pb.DeactivateStartRequest{Pin: pin, StateJson: stateJSON})
-		if err == nil && resp != nil {
-			err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-		}
+		resp, err := s.gopayClient.DeactivateStart(ctx, &pb.DeactivateStartRequest{Pin: pin, StateJson: output.GetStateJson()})
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(resp))
 		data["deactivate_start"] = deactivateStartData(resp)
 		if err != nil {
 			s.finishSMSActivation(ctx, input.GetActivationId())
@@ -78,7 +71,10 @@ func (s *Server) GoPayAppDeactivateStartActivity(ctx context.Context, input GoPa
 }
 
 func (s *Server) GoPayAppDeactivateCompleteActivity(ctx context.Context, input GoPayAppDeactivateCompleteInput) (GoPayAppDeactivateCompleteOutput, error) {
-	output := GoPayAppDeactivateCompleteOutput{ActivationId: input.GetActivationId()}
+	output := GoPayAppDeactivateCompleteOutput{
+		ActivationId: input.GetActivationId(),
+		StateJson:    normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	data := map[string]any{"activation_id": input.GetActivationId()}
 	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppDeactivateComplete, false, true)
 	_, err := step.run(func() (any, error) {
@@ -98,16 +94,8 @@ func (s *Server) GoPayAppDeactivateCompleteActivity(ctx context.Context, input G
 			data["error_message"] = err.Error()
 			return data, err
 		}
-		stateJSON, err := s.loadGoPayAppState(ctx)
-		if err != nil {
-			s.finishSMSActivation(ctx, input.GetActivationId())
-			data["error_message"] = err.Error()
-			return data, err
-		}
-		resp, err := s.gopayClient.DeactivateComplete(ctx, &pb.DeactivateCompleteRequest{Otp: input.GetCode(), StateJson: stateJSON})
-		if err == nil && resp != nil {
-			err = s.saveGoPayAppState(ctx, resp.GetStateJson())
-		}
+		resp, err := s.gopayClient.DeactivateComplete(ctx, &pb.DeactivateCompleteRequest{Otp: input.GetCode(), StateJson: output.GetStateJson()})
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(resp))
 		data["deactivate_complete"] = deactivateCompleteData(resp)
 		if err != nil {
 			s.finishSMSActivation(ctx, input.GetActivationId())

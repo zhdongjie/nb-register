@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import random
+import re
 import time
 import uuid
 from typing import Optional
@@ -18,9 +19,8 @@ from urllib.parse import urlparse
 import requests
 
 
-GOPAY_PROXY = os.environ.get("GOPAY_PROXY", os.environ.get("GOPAY_PROXY_URL", ""))
 GOPAY_COUNTRY_CODE = os.environ.get("GOPAY_COUNTRY_CODE", "62")
-GOPAY_LOGIN_FP_RETRIES = int(os.environ.get("GOPAY_LOGIN_FP_RETRIES", "8"))
+_GOPAY_PROXY_STATE_KEY = "_gopay_proxy"
 
 GOTO_AUTH = "https://accounts.goto-products.com"
 GOTO_CLIENT_ID = os.environ.get("GOTO_CLIENT_ID", "gopay:consumer:app")
@@ -31,18 +31,59 @@ DEFAULT_EMPTY_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
 DEFAULT_X_E2 = os.environ.get("GOPAY_X_E2", "")
 COMPACT_JSON_SEPARATORS = (",", ":")
 
-PHONE_MODELS = [
-    ("Samsung", "samsung, SM-G991B"),
-    ("Samsung", "samsung, SM-A525F"),
-    ("Samsung", "samsung, SM-S908B"),
-    ("Xiaomi", "Xiaomi, M2101K6G"),
-    ("Xiaomi", "Xiaomi, 22071219CG"),
-    ("OPPO", "OPPO, CPH2211"),
-    ("vivo", "vivo, V2111"),
-    ("Google", "Google, sdk_gphone_arm64"),
-    ("realme", "realme, RMX3085"),
-    ("OnePlus", "OnePlus, LE2115"),
-]
+
+class GopayProxyPoolExhausted(RuntimeError):
+    pass
+
+
+def gopay_proxy_pool_entries() -> list[str]:
+    raw = os.environ.get("GOPAY_PROXY_POOL", "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in re.split(r"[\s,]+", raw) if item.strip()]
+
+
+def _require_gopay_proxy_pool() -> list[str]:
+    entries = gopay_proxy_pool_entries()
+    if not entries:
+        raise RuntimeError("GOPAY_PROXY_POOL is required")
+    return entries
+
+
+def _proxy_index(entries: list[str], proxy: str) -> int:
+    try:
+        return entries.index(str(proxy or "").strip())
+    except ValueError:
+        return -1
+
+
+def _state_proxy_index(state: dict, entries: list[str]) -> int:
+    if isinstance(state, dict):
+        index = _proxy_index(entries, state.get(_GOPAY_PROXY_STATE_KEY, ""))
+        if index >= 0:
+            return index
+    return -1
+
+
+def gopay_proxy_for_attempt(attempt: int, state: dict = None) -> tuple[str, int, int]:
+    entries = _require_gopay_proxy_pool()
+    if attempt > len(entries):
+        raise GopayProxyPoolExhausted("GOPAY_PROXY_POOL exhausted before login methods succeeded")
+    current_index = _state_proxy_index(state, entries)
+    if current_index < 0:
+        index = 0
+    elif attempt <= 1:
+        index = current_index
+    else:
+        index = (current_index + 1) % len(entries)
+    proxy = entries[index]
+    if isinstance(state, dict):
+        state[_GOPAY_PROXY_STATE_KEY] = proxy
+    return proxy, index + 1, len(entries)
+
+
+def gopay_proxy_attempt_limit() -> int:
+    return max(1, len(gopay_proxy_pool_entries()))
 
 
 def _random_d1() -> str:
@@ -62,20 +103,91 @@ def _random_appsflyer_id() -> str:
     )
 
 
-def generate_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
-    if randomize_model is None:
-        randomize_model = os.environ.get("GOPAY_RANDOM_DEVICE") == "1"
-    if randomize_model:
-        make, model = random.choice(PHONE_MODELS)
-    else:
-        make, model = ("Google", "Google, sdk_gphone_arm64")
+def _random_wifi_mac() -> str:
+    return "02:" + ":".join(f"{b:02x}" for b in os.urandom(5))
 
-    android_version = os.environ.get("GOPAY_ANDROID_VERSION", "11")
+
+def _random_letters(length: int, alphabet: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ") -> str:
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def _random_brand_word() -> str:
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    vowels = "aeiou"
+    syllables = []
+    for _ in range(random.randint(2, 4)):
+        syllables.append(random.choice(consonants) + random.choice(vowels))
+    if random.random() < 0.35:
+        syllables.append(random.choice(("n", "r", "s", "x")))
+    return "".join(syllables).capitalize()
+
+
+def _random_phone_make() -> str:
+    return _random_brand_word()
+
+
+def _random_phone_model(make: str) -> str:
+    prefix = "".join(ch for ch in make.upper() if ch.isalpha())[:2]
+    if len(prefix) < 2:
+        prefix = _random_letters(2)
+    family = random.choice(("A", "C", "M", "N", "P", "R", "S", "V", "X", "Z"))
+    number = random.randint(1000, 9999)
+    suffix = _random_letters(random.randint(0, 2))
+    separator = random.choice(("-", " "))
+    return f"{make}, {prefix}{family}{separator}{number}{suffix}"
+
+
+def _random_screen() -> str:
+    width = random.randrange(720, 1448, 16)
+    aspect = random.uniform(1.95, 2.28)
+    height = int(width * aspect)
+    height = min(3200, max(width + 640, (height // 8) * 8))
+    screen = f"{width}x{height}"
+    return "1088x2160" if screen == "1080x2148" else screen
+
+
+def _random_android_version() -> str:
+    return str(random.randint(10, 14))
+
+
+def _random_device_shape() -> dict:
+    make = _random_phone_make()
+    return {
+        "make": make,
+        "model": _random_phone_model(make),
+        "screen": _random_screen(),
+        "android_version": _random_android_version(),
+    }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "")
+    if value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _use_env_identity() -> bool:
+    return _env_flag("GOPAY_STATIC_DEVICE_IDENTITY")
+
+
+def _identity_value(key: str, fallback, use_env_identity: bool) -> str:
+    if use_env_identity:
+        value = os.environ.get(key, "")
+        if value:
+            return value
+    return fallback() if callable(fallback) else str(fallback)
+
+
+def generate_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
+    use_env_identity = _use_env_identity()
+    shape = _random_device_shape()
+    make, model = shape["make"], shape["model"]
+    android_version = _identity_value("GOPAY_ANDROID_VERSION", shape["android_version"], use_env_identity)
     app_version = os.environ.get("GOPAY_APP_VERSION", "2.7.0")
     app_id = os.environ.get("GOPAY_APP_ID", "com.gojek.gopay")
     app_build = os.environ.get("GOPAY_APP_BUILD", "2070")
-    resolutions = ["1080x2400", "1080x2340", "1080x2148", "1080x1920", "720x1600"]
-    d1 = os.environ.get("GOPAY_D1", "")
+    d1 = os.environ.get("GOPAY_D1", "") if use_env_identity else ""
     if not d1 and os.environ.get("GOPAY_RANDOM_D1", "1") == "1":
         d1 = _random_d1()
 
@@ -84,27 +196,31 @@ def generate_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
         "x-appversion": app_version,
         "x-appid": app_id,
         "x-platform": "Android",
-        "x-uniqueid": os.environ.get("GOPAY_UNIQUE_ID", os.urandom(8).hex()),
+        "x-uniqueid": _identity_value("GOPAY_UNIQUE_ID", lambda: os.urandom(8).hex(), use_env_identity),
         "x-phonemake": make,
         "x-phonemodel": model,
-        "x-deviceos": os.environ.get("GOPAY_DEVICE_OS", f"Android, {android_version}"),
+        "x-deviceos": _identity_value("GOPAY_DEVICE_OS", f"Android, {android_version}", use_env_identity),
         "x-user-type": "customer",
-        "x-session-id": os.environ.get("GOPAY_SESSION_ID", str(uuid.uuid4())),
-        "transaction-id": os.environ.get("GOPAY_TRANSACTION_ID", str(uuid.uuid4())),
-        "user-agent": os.environ.get(
+        "x-session-id": _identity_value("GOPAY_SESSION_ID", lambda: str(uuid.uuid4()), use_env_identity),
+        "transaction-id": _identity_value("GOPAY_TRANSACTION_ID", lambda: str(uuid.uuid4()), use_env_identity),
+        "user-agent": _identity_value(
             "GOPAY_USER_AGENT",
             f"GoPay/{app_version} ({app_id}; build:{app_build}; Android, {android_version})",
+            use_env_identity,
         ),
         "d1": d1,
         "x-e2": os.environ.get("GOPAY_X_E2", DEFAULT_X_E2),
         "adjts": os.environ.get("GOPAY_ADJTS", "host:D"),
-        "m1_appsflyer_id": os.environ.get("GOPAY_APPSFLYER_ID", _random_appsflyer_id()),
-        "m1_widevine_id": os.environ.get("GOPAY_WIDEVINE_ID", _random_widevine_id()),
-        "m1_screen": os.environ.get("GOPAY_SCREEN", random.choice(resolutions)),
-        "m1_wifi_mac": os.environ.get("GOPAY_WIFI_MAC", "02:00:00:00:00:00"),
-        "m1_signature": os.environ.get("GOPAY_M1_SIGNATURE", os.urandom(16).hex()),
-        "user-uuid": os.environ.get("GOPAY_USER_UUID", ""),
-        "x-devicetoken": os.environ.get("GOPAY_DEVICE_TOKEN", ""),
+        "m1_appsflyer_id": _identity_value("GOPAY_APPSFLYER_ID", _random_appsflyer_id, use_env_identity),
+        "m1_widevine_id": _identity_value("GOPAY_WIDEVINE_ID", _random_widevine_id, use_env_identity),
+        "m1_screen": _identity_value("GOPAY_SCREEN", shape["screen"], use_env_identity),
+        "m1_wifi_mac": _identity_value("GOPAY_WIFI_MAC", _random_wifi_mac, use_env_identity),
+        "m1_wifi_ssid": _random_wifi_ssid(),
+        "m1_connection_id": str(random.randint(100000, 999999)),
+        "m1_signature": _identity_value("GOPAY_M1_SIGNATURE", lambda: os.urandom(16).hex(), use_env_identity),
+        "m1_device_uuid": str(uuid.uuid4()),
+        "user-uuid": _identity_value("GOPAY_USER_UUID", "", use_env_identity),
+        "x-devicetoken": _identity_value("GOPAY_DEVICE_TOKEN", "", use_env_identity),
         "x-location": os.environ.get("GOPAY_LOCATION", ""),
         "x-location-accuracy": os.environ.get("GOPAY_LOCATION_ACCURACY", ""),
         "gojek-country-code": os.environ.get("GOPAY_GOJEK_COUNTRY_CODE", "ID"),
@@ -131,35 +247,42 @@ def _device_get(device: dict, key: str, default: str = "") -> str:
 
 
 def _ensure_device_defaults(device: dict) -> dict:
+    use_env_identity = _use_env_identity()
+    shape = _random_device_shape()
+    android_version = _identity_value("GOPAY_ANDROID_VERSION", shape["android_version"], use_env_identity)
     device.setdefault("x-apptype", "GOPAY")
     device.setdefault("x-appversion", os.environ.get("GOPAY_APP_VERSION", "2.7.0"))
     device.setdefault("x-appid", os.environ.get("GOPAY_APP_ID", "com.gojek.gopay"))
     device.setdefault("x-platform", "Android")
-    device.setdefault("x-uniqueid", os.environ.get("GOPAY_UNIQUE_ID", os.urandom(8).hex()))
-    device.setdefault("x-phonemake", "Google")
-    device.setdefault("x-phonemodel", "Google, sdk_gphone_arm64")
-    device.setdefault("x-deviceos", os.environ.get("GOPAY_DEVICE_OS", "Android, 11"))
+    device.setdefault("x-uniqueid", _identity_value("GOPAY_UNIQUE_ID", lambda: os.urandom(8).hex(), use_env_identity))
+    device.setdefault("x-phonemake", shape["make"])
+    device.setdefault("x-phonemodel", shape["model"])
+    device.setdefault("x-deviceos", _identity_value("GOPAY_DEVICE_OS", f"Android, {android_version}", use_env_identity))
     device.setdefault("x-user-type", "customer")
-    device.setdefault("x-session-id", os.environ.get("GOPAY_SESSION_ID", str(uuid.uuid4())))
-    device.setdefault("transaction-id", os.environ.get("GOPAY_TRANSACTION_ID", str(uuid.uuid4())))
+    device.setdefault("x-session-id", _identity_value("GOPAY_SESSION_ID", lambda: str(uuid.uuid4()), use_env_identity))
+    device.setdefault("transaction-id", _identity_value("GOPAY_TRANSACTION_ID", lambda: str(uuid.uuid4()), use_env_identity))
     device.setdefault(
         "user-agent",
-        os.environ.get(
+        _identity_value(
             "GOPAY_USER_AGENT",
-            f"GoPay/{device['x-appversion']} ({device['x-appid']}; build:{os.environ.get('GOPAY_APP_BUILD', '2070')}; Android, 11)",
+            f"GoPay/{device['x-appversion']} ({device['x-appid']}; build:{os.environ.get('GOPAY_APP_BUILD', '2070')}; Android, {android_version})",
+            use_env_identity,
         ),
     )
     if not _device_get(device, "d1"):
-        device["d1"] = os.environ.get("GOPAY_D1", "") or _random_d1()
+        device["d1"] = _identity_value("GOPAY_D1", _random_d1, use_env_identity)
     device.setdefault("x-e2", os.environ.get("GOPAY_X_E2", DEFAULT_X_E2))
     device.setdefault("adjts", os.environ.get("GOPAY_ADJTS", "host:D"))
-    device.setdefault("m1_appsflyer_id", os.environ.get("GOPAY_APPSFLYER_ID", _random_appsflyer_id()))
-    device.setdefault("m1_widevine_id", os.environ.get("GOPAY_WIDEVINE_ID", _random_widevine_id()))
-    device.setdefault("m1_screen", os.environ.get("GOPAY_SCREEN", "1080x2148"))
-    device.setdefault("m1_wifi_mac", os.environ.get("GOPAY_WIFI_MAC", "02:00:00:00:00:00"))
-    device.setdefault("m1_signature", os.environ.get("GOPAY_M1_SIGNATURE", os.urandom(16).hex()))
-    device.setdefault("user-uuid", os.environ.get("GOPAY_USER_UUID", ""))
-    device.setdefault("x-devicetoken", os.environ.get("GOPAY_DEVICE_TOKEN", ""))
+    device.setdefault("m1_appsflyer_id", _identity_value("GOPAY_APPSFLYER_ID", _random_appsflyer_id, use_env_identity))
+    device.setdefault("m1_widevine_id", _identity_value("GOPAY_WIDEVINE_ID", _random_widevine_id, use_env_identity))
+    device.setdefault("m1_screen", _identity_value("GOPAY_SCREEN", shape["screen"], use_env_identity))
+    device.setdefault("m1_wifi_mac", _identity_value("GOPAY_WIFI_MAC", _random_wifi_mac, use_env_identity))
+    device.setdefault("m1_wifi_ssid", _random_wifi_ssid())
+    device.setdefault("m1_connection_id", str(random.randint(100000, 999999)))
+    device.setdefault("m1_signature", _identity_value("GOPAY_M1_SIGNATURE", lambda: os.urandom(16).hex(), use_env_identity))
+    device.setdefault("m1_device_uuid", str(uuid.uuid4()))
+    device.setdefault("user-uuid", _identity_value("GOPAY_USER_UUID", "", use_env_identity))
+    device.setdefault("x-devicetoken", _identity_value("GOPAY_DEVICE_TOKEN", "", use_env_identity))
     device.setdefault("x-location", os.environ.get("GOPAY_LOCATION", ""))
     device.setdefault("x-location-accuracy", os.environ.get("GOPAY_LOCATION_ACCURACY", ""))
     device.setdefault("gojek-country-code", os.environ.get("GOPAY_GOJEK_COUNTRY_CODE", "ID"))
@@ -170,14 +293,16 @@ def _current_x_m1(device: dict) -> str:
     return ",".join(
         [
             f"3:{_device_get(device, 'm1_appsflyer_id', _random_appsflyer_id())}",
-            "4:5939",
-            "5:|0|4",
+            f"4:{_device_get(device, 'm1_connection_id', '5939')}",
+            f"5:{_device_get(device, 'x-phonemake')}|3200|2",
             f"6:{_device_get(device, 'm1_wifi_mac', '02:00:00:00:00:00')}",
-            "7:<unknown ssid>",
+            f"7:{_device_get(device, 'm1_wifi_ssid', '<unknown ssid>')}",
             f"8:{_device_get(device, 'm1_screen', '1080x2148')}",
+            "9:passive,network,fused,gps",
             "10:1",
             f"11:{_device_get(device, 'm1_widevine_id', _random_widevine_id())}",
             f"15:{_device_get(device, 'm1_signature')}",
+            f"16:{_device_get(device, 'm1_device_uuid')}",
         ]
     )
 
@@ -371,10 +496,26 @@ def login_methods_invalid_user(response: dict) -> bool:
 def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
-    attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
+    attempts = gopay_proxy_attempt_limit()
+    fingerprint_rotations = 0
+    proxy_rotations = 0
+    proxy_state = {}
     for attempt in range(1, attempts + 1):
+        try:
+            proxy, proxy_index, proxy_count = gopay_proxy_for_attempt(attempt, proxy_state)
+        except GopayProxyPoolExhausted as exc:
+            return {
+                "success": False,
+                "available": False,
+                "status": "rate_limited",
+                "error": str(exc),
+                "attempts": attempt - 1,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": len(gopay_proxy_pool_entries()),
+            }
         device = generate_device_fingerprint(randomize_model=True)
-        c = GopayClient("", proxy=GOPAY_PROXY, device=device)
+        c = GopayClient("", proxy=proxy, device=device)
         try:
             r = c.post(
                 f"{GOTO_AUTH}/goto-auth/login/methods",
@@ -391,6 +532,10 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
                 "available": False,
                 "status": "error",
                 "error": str(e),
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
             }
         if r["status"] in (200, 201):
             data = r.get("data") if isinstance(r.get("data"), dict) else {}
@@ -399,24 +544,55 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
                 "available": False,
                 "status": "registered",
                 "methods": data.get("methods") or [],
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
             }
         if login_methods_invalid_user(r):
-            return {"success": True, "available": True, "status": "available"}
+            return {
+                "success": True,
+                "available": True,
+                "status": "available",
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
+            }
         if _is_rate_limited(r) and attempt < attempts:
+            fingerprint_rotations += 1
+            if proxy_count > 0:
+                proxy_rotations += 1
+            print(
+                "[checkphone-tgbot] check phone rate limited; rotating fingerprint/proxy "
+                f"attempt={attempt}/{attempts} proxy_index={proxy_index}/{proxy_count}",
+                flush=True,
+            )
             time.sleep(1)
             continue
         if _is_rate_limited(r):
+            error = "GOPAY_PROXY_POOL exhausted before login methods succeeded"
+            if attempt < proxy_count:
+                error = _response_error("login methods rate limited", r)
             return {
                 "success": False,
                 "available": False,
                 "status": "rate_limited",
-                "error": _response_error("login methods rate limited", r),
+                "error": error,
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
             }
         return {
             "success": False,
             "available": False,
             "status": "error",
             "error": _response_error("login methods failed", r),
+            "attempts": attempt,
+            "fingerprint_rotations": fingerprint_rotations,
+            "proxy_rotations": proxy_rotations,
+            "proxy_pool_size": proxy_count,
         }
     return {
         "success": False,

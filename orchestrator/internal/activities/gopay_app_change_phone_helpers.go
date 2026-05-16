@@ -17,13 +17,6 @@ func (s *Server) changePhoneMaxFailureCount() int {
 	return s.changePhoneMaxFailures
 }
 
-func (s *Server) changePhoneOTPWaitTimeoutSeconds() int32 {
-	if s.changePhoneOTPWaitSeconds <= 0 {
-		return defaultChangePhoneOTPWaitSeconds
-	}
-	return s.changePhoneOTPWaitSeconds
-}
-
 func (s *Server) changePhoneOTPRetryCount() int {
 	if s.changePhoneOTPRetryAttempts < 0 {
 		return defaultChangePhoneOTPRetryAttempts
@@ -54,9 +47,7 @@ func (s *Server) changePhoneSMSCancelRetryDelay() time.Duration {
 
 func (s *Server) recordChangePhoneFailure(ctx context.Context, activationID string, failures *int, reason string) error {
 	if activationID != "" {
-		if err := s.cancelSMSActivationBeforeRotation(ctx, activationID); err != nil {
-			return fmt.Errorf("cancel SMS activation before phone rotation after %s: %w", reason, err)
-		}
+		s.cancelSMSActivationAsync(activationID, reason)
 	}
 	*failures++
 	maxFailures := s.changePhoneMaxFailureCount()
@@ -132,18 +123,21 @@ func (s *Server) cancelSMSActivationBeforeRotation(ctx context.Context, activati
 	}
 }
 
-func (s *Server) cancelSMSActivation(ctx context.Context, activationID string) {
+func (s *Server) cancelSMSActivationAsync(activationID string, reason string) {
 	if s.smsClient == nil || activationID == "" {
 		return
 	}
-	resp, err := s.smsClient.CancelActivation(ctx, &pb.CancelActivationRequest{ActivationId: activationID})
-	if err != nil {
-		log.Printf("[gopay-app] CancelActivation failed: %v", err)
-		return
-	}
-	if !resp.GetSuccess() {
-		log.Printf("[gopay-app] CancelActivation failed: %s", resp.GetErrorMessage())
-	}
+	go func() {
+		timeout := s.changePhoneSMSCancelWaitTimeout() + 5*time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if strings.TrimSpace(reason) != "" {
+			log.Printf("[gopay-app] async CancelActivation for %s: %s", activationID, reason)
+		}
+		if err := s.cancelSMSActivationBeforeRotation(ctx, activationID); err != nil {
+			log.Printf("[gopay-app] async CancelActivation failed for %s: %v", activationID, err)
+		}
+	}()
 }
 
 func smsCancelSettled(resp *pb.ProviderActionResponse) bool {

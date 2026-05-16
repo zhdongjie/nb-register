@@ -68,6 +68,7 @@ secrets:
     REGISTER_PROXY_URL: socks5://proxy.internal:10813
     OUTLOOK_REGISTER_PROXY: socks5://proxy.internal:10810
     GOPAY_PHONE_NUMBER: ""
+    GOPAY_WA_PHONE_NUMBER: ""
     GOPAY_PIN: ""
     GOPAY_PROXY_POOL: socks5://proxy.internal:10810,socks5://proxy.internal:10811,socks5://proxy.internal:10813,http://proxy.internal:10814
     GOPAY_SIGNUP_AUTH_UUID: ""

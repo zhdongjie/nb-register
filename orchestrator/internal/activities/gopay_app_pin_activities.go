@@ -9,13 +9,31 @@ import (
 	pb "orchestrator/pb"
 )
 
-func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPStartInput) (GoPayAppOTPOutput, error) {
+const goPayAppCreatePinOperation = "create_pin"
+
+func (s *Server) GoPayAppCreatePinStartActivity(ctx context.Context, input GoPayAppCreatePinStartInput) (GoPayAppOTPOutput, error) {
+	return s.startGoPayAppCreatePin(ctx, input)
+}
+
+func (s *Server) GoPayAppCreatePinRetryActivity(ctx context.Context, input GoPayAppCreatePinStartInput) (GoPayAppOTPOutput, error) {
+	return s.retryGoPayAppCreatePin(ctx, input)
+}
+
+func (s *Server) GoPayAppCreatePinCompleteActivity(ctx context.Context, input GoPayAppCreatePinCompleteInput) (GoPayAppOTPOutput, error) {
+	return s.completeGoPayAppCreatePin(ctx, input)
+}
+
+func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppCreatePinStartInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppCreatePin
-	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationCreatePin, TimeoutSeconds: s.paymentOtpTimeout()}
+	output := GoPayAppOTPOutput{
+		Operation:      goPayAppCreatePinOperation,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	otpChannel := normalizeGoPayOTPChannel(input.GetOtpChannel())
 	output.OtpChannel = otpChannel
 	data := map[string]any{
-		"operation":   goPayAppOTPOperationCreatePin,
+		"operation":   goPayAppCreatePinOperation,
 		"otp_channel": otpChannel,
 	}
 	defer func() {
@@ -31,7 +49,8 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("GOPAY_PIN is required"))
 	}
 
-	statusBefore, statusErr := s.goPayStatus(ctx)
+	statusBefore, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusBefore))
 	data["status_before"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusBefore, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, statusErr)
@@ -60,14 +79,8 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 	}
 
 	startedAt := time.Now().Unix()
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
-	}
-	startResp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: pin, OtpChannel: goPayOTPMethod(otpChannel), StateJson: stateJSON})
-	if err == nil && startResp != nil {
-		err = s.saveGoPayAppState(ctx, startResp.GetStateJson())
-	}
+	startResp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: pin, OtpChannel: goPayOTPMethod(otpChannel), StateJson: output.GetStateJson()})
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(startResp))
 	data["create_pin_start"] = createPinStartData(startResp)
 	if err != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay create pin start: %w", err))
@@ -83,7 +96,8 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay create pin start: %s", startResp.GetErrorMessage()))
 	}
 
-	statusAfter, statusErr := s.goPayStatus(ctx)
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 	data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("Status after gopay create pin start: %w", statusErr))
@@ -113,9 +127,73 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 	return output, nil
 }
 
-func (s *Server) completeGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPCompleteInput) (GoPayAppOTPOutput, error) {
+func (s *Server) retryGoPayAppCreatePin(ctx context.Context, input GoPayAppCreatePinStartInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppCreatePin
-	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationCreatePin, TimeoutSeconds: s.paymentOtpTimeout()}
+	output := GoPayAppOTPOutput{
+		Operation:      goPayAppCreatePinOperation,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
+	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
+	data := protoDataMap(input.GetData())
+	if data == nil {
+		data = map[string]any{}
+	}
+	defer func() {
+		output.Data = protoData(data)
+	}()
+
+	step := s.activityStep(ctx, input.GetJobId(), stepName, false, true)
+	step.progress("retrying gopay create pin otp", map[string]any{
+		"otp_channel": output.GetOtpChannel(),
+	})
+	resp, err := s.gopayClient.CreatePinRetry(ctx, &pb.CreatePinRetryRequest{StateJson: output.GetStateJson()})
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(resp))
+	data["create_pin_retry"] = createPinRetryData(resp)
+	if err != nil {
+		step.update(data)
+		return output, fmt.Errorf("gopay create pin retry: %w", err)
+	}
+	if resp == nil {
+		step.update(data)
+		return output, fmt.Errorf("gopay create pin retry returned empty response")
+	}
+	if !resp.GetSuccess() {
+		step.update(data)
+		return output, fmt.Errorf("gopay create pin retry: %s", resp.GetErrorMessage())
+	}
+
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
+	data["status_after_retry"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
+	if statusErr != nil {
+		step.update(data)
+		return output, fmt.Errorf("Status after gopay create pin retry: %w", statusErr)
+	}
+	output.Stage = statusAfter.GetStage()
+	output.Phone = statusAfter.GetPhone()
+	output.OtpRequired = resp.GetOtpSent()
+	output.IssuedAfterUnix = statusAfter.GetSignupPinOtpSentAtUnix()
+	if output.GetIssuedAfterUnix() <= 0 {
+		output.IssuedAfterUnix = time.Now().Unix()
+	}
+	if output.GetOtpChannel() == "" {
+		output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
+	}
+	data["otp_required"] = output.GetOtpRequired()
+	data["issued_after_unix"] = output.GetIssuedAfterUnix()
+	data["otp_channel"] = output.GetOtpChannel()
+	step.update(data)
+	return output, nil
+}
+
+func (s *Server) completeGoPayAppCreatePin(ctx context.Context, input GoPayAppCreatePinCompleteInput) (GoPayAppOTPOutput, error) {
+	stepName := stepGoPayAppCreatePin
+	output := GoPayAppOTPOutput{
+		Operation:      goPayAppCreatePinOperation,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
 	data := protoDataMap(input.GetData())
 	if data == nil {
@@ -133,14 +211,8 @@ func (s *Server) completeGoPayAppCreatePin(ctx context.Context, input GoPayAppOT
 	if pin == "" {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("GOPAY_PIN is required"))
 	}
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
-	}
-	completeResp, err := s.gopayClient.CreatePinComplete(ctx, &pb.CreatePinCompleteRequest{Otp: otp, Pin: pin, StateJson: stateJSON})
-	if err == nil && completeResp != nil {
-		err = s.saveGoPayAppState(ctx, completeResp.GetStateJson())
-	}
+	completeResp, err := s.gopayClient.CreatePinComplete(ctx, &pb.CreatePinCompleteRequest{Otp: otp, Pin: pin, StateJson: output.GetStateJson()})
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(completeResp))
 	data["create_pin_complete"] = createPinCompleteData(completeResp)
 	data["otp_source"] = input.GetOtpSource()
 	if err != nil {
@@ -153,7 +225,8 @@ func (s *Server) completeGoPayAppCreatePin(ctx context.Context, input GoPayAppOT
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay create pin complete: %s", completeResp.GetErrorMessage()))
 	}
 
-	statusAfter, statusErr := s.goPayStatus(ctx)
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 	data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("Status after gopay create pin complete: %w", statusErr))

@@ -22,6 +22,7 @@ message Account {
   optional bool plus_trial_eligible = 15;
   optional bool plus_active = 16;
   string tier = 17;
+  optional string activation_channel = 18;
 }
 
 message CreateAccountRequest {

@@ -11,7 +11,11 @@ import (
 
 func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartInput) (GoPayAppOTPOutput, error) {
 	stepName := gopayAppOTPStepName(input)
-	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationAuth, TimeoutSeconds: s.paymentOtpTimeout()}
+	output := GoPayAppOTPOutput{
+		Operation:      goPayAppOTPOperationAuth,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	otpChannel := normalizeGoPayOTPChannel(input.GetOtpChannel())
 	output.OtpChannel = otpChannel
 	data := map[string]any{"operation": goPayAppOTPOperationAuth, "otp_channel": otpChannel}
@@ -24,13 +28,15 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 		return output, err
 	}
 
-	statusBefore, statusErr := s.goPayStatus(ctx)
+	statusBefore, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusBefore))
 	data["status_before"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusBefore, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, statusErr)
 	}
 
-	tokenResp, err := s.validateGoPayAccountToken(ctx)
+	tokenResp, nextStateJSON, err := s.validateGoPayAccountTokenForState(ctx, output.GetStateJson())
+	output.StateJson = nextStateJSON
 	data["check_token_valid"] = checkTokenValidData(tokenResp)
 	if err != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
@@ -38,7 +44,8 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 	if tokenResp.GetTokenValid() {
 		output.Ready = true
 		output.AccountTokenReady = true
-		statusAfter, statusErr := s.goPayStatus(ctx)
+		statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+		output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 		data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 		if statusErr == nil {
 			output.Stage = statusAfter.GetStage()
@@ -64,20 +71,14 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("GOPAY_PIN is required"))
 	}
 	startedAt := time.Now().Unix()
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
-	}
 	startResp, err := s.gopayClient.AuthStart(ctx, &pb.AuthStartRequest{
 		Phone:       phone,
 		CountryCode: configuredGoPayCountryCode(),
 		Pin:         pin,
 		OtpChannel:  goPayOTPMethod(otpChannel),
-		StateJson:   stateJSON,
+		StateJson:   output.GetStateJson(),
 	})
-	if err == nil && startResp != nil {
-		err = s.saveGoPayAppState(ctx, startResp.GetStateJson())
-	}
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(startResp))
 	data["auth_start"] = authStartData(startResp)
 	if err != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay auth start: %w", err))
@@ -96,7 +97,8 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 		return s.finishGoPayAppOTPReady(ctx, input.GetJobId(), stepName, output, data)
 	}
 
-	statusAfter, statusErr := s.goPayStatus(ctx)
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 	data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("Status after gopay auth start: %w", statusErr))
@@ -128,7 +130,11 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 
 func (s *Server) completeGoPayAppAuth(ctx context.Context, input GoPayAppOTPCompleteInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppLogin
-	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationAuth, TimeoutSeconds: s.paymentOtpTimeout()}
+	output := GoPayAppOTPOutput{
+		Operation:      goPayAppOTPOperationAuth,
+		TimeoutSeconds: s.paymentOtpTimeout(),
+		StateJson:      normalizeGoPayWorkflowStateJSON(input.GetStateJson()),
+	}
 	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
 	data := protoDataMap(input.GetData())
 	if data == nil {
@@ -146,14 +152,8 @@ func (s *Server) completeGoPayAppAuth(ctx context.Context, input GoPayAppOTPComp
 	if pin == "" {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("GOPAY_PIN is required"))
 	}
-	stateJSON, err := s.loadGoPayAppState(ctx)
-	if err != nil {
-		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
-	}
-	completeResp, err := s.gopayClient.AuthComplete(ctx, &pb.AuthCompleteRequest{Otp: otp, Pin: pin, StateJson: stateJSON})
-	if err == nil && completeResp != nil {
-		err = s.saveGoPayAppState(ctx, completeResp.GetStateJson())
-	}
+	completeResp, err := s.gopayClient.AuthComplete(ctx, &pb.AuthCompleteRequest{Otp: otp, Pin: pin, StateJson: output.GetStateJson()})
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(completeResp))
 	data["auth_complete"] = authCompleteData(completeResp)
 	data["otp_source"] = input.GetOtpSource()
 	if err != nil {
@@ -177,7 +177,8 @@ func (s *Server) completeGoPayAppAuth(ctx context.Context, input GoPayAppOTPComp
 		return output, nil
 	}
 
-	statusAfter, statusErr := s.goPayStatus(ctx)
+	statusAfter, statusErr := s.goPayStatusForState(ctx, output.GetStateJson())
+	output.StateJson = goPayWorkflowStateAfter(output.GetStateJson(), responseStateJSON(statusAfter))
 	data["status_after"] = goPayStatusSnapshotData(goPayStatusSnapshot(statusAfter, statusErr))
 	if statusErr != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("Status after gopay auth complete: %w", statusErr))

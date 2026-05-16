@@ -432,6 +432,11 @@ input, select {
   gap: 8px;
 }
 
+.compactInput {
+  width: 150px;
+  min-width: 130px;
+}
+
 .panelIntro {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-soft);
@@ -606,21 +611,21 @@ table {
 }
 
 .accountsTable th:nth-child(1),
-.accountsTable td:nth-child(1) { width: 27%; }
+.accountsTable td:nth-child(1) { width: 22%; }
 .accountsTable th:nth-child(2),
-.accountsTable td:nth-child(2) { width: 11%; }
+.accountsTable td:nth-child(2) { width: 9%; }
 .accountsTable th:nth-child(3),
-.accountsTable td:nth-child(3) { width: 12%; }
+.accountsTable td:nth-child(3) { width: 10%; }
 .accountsTable th:nth-child(4),
-.accountsTable td:nth-child(4) { width: 8%; }
+.accountsTable td:nth-child(4) { width: 7%; }
 .accountsTable th:nth-child(5),
-.accountsTable td:nth-child(5) { width: 8%; }
+.accountsTable td:nth-child(5) { width: 7%; }
 .accountsTable th:nth-child(6),
-.accountsTable td:nth-child(6) { width: 12%; }
+.accountsTable td:nth-child(6) { width: 11%; }
 .accountsTable th:nth-child(7),
-.accountsTable td:nth-child(7) { display: none; }
+.accountsTable td:nth-child(7) { width: 10%; }
 .accountsTable th:nth-child(8),
-.accountsTable td:nth-child(8) { width: 22%; }
+.accountsTable td:nth-child(8) { width: 24%; }
 
 .jobTable th:nth-child(1),
 .jobTable td:nth-child(1) { width: 15%; }
@@ -866,17 +871,31 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
 
 .rowActions {
   min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.rowActionsMain {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.rowActions button {
+.rowActionsMain button {
   width: 30px;
   min-height: 30px;
   padding: 0;
   justify-content: center;
+}
+
+.rowActionsPayment {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
 }
 
 .rowButton {
@@ -898,6 +917,35 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.activationChannel {
+  color: #087f5b;
+  font-weight: 650;
+}
+
+.rowPaymentButton {
+  width: 100% !important;
+  min-height: 34px;
+  padding: 6px 8px !important;
+  color: #087f5b;
+  border-color: #9ad7c0;
+  background: #e9fbf3;
+}
+
+.rowPaymentButton:hover:not(:disabled) {
+  color: #066349;
+  border-color: #63c69d;
+  background: #d8f7e9;
+}
+
+.rowPaymentButton span {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .primaryRowAction {
@@ -1041,6 +1089,7 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
 .detailDrawer {
   width: min(720px, calc(100vw - 18px)) !important;
   max-width: 720px !important;
+  max-height: 100dvh;
   background: var(--popover);
   border-left: 1px solid var(--border);
   box-shadow: -18px 0 60px rgba(15, 23, 42, .18);
@@ -1067,7 +1116,14 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
 .drawerBody {
   min-height: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+
+.drawerBody > .details {
+  width: 100%;
+  min-height: 0;
 }
 
 .detailDrawer .details {
@@ -1449,6 +1505,10 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
   justify-content: center;
 }
 
+.channelEditLine {
+  grid-template-columns: 96px minmax(0, 1fr) 78px;
+}
+
 .copyButton {
   width: 34px;
   min-width: 34px;
@@ -1484,9 +1544,155 @@ tbody tr:hover, tr.selected { background: #f4f8ff; }
   justify-content: center;
 }
 
+.manualBalancePanel {
+  margin: 12px 0 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+}
+
+.manualBalanceHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.manualBalanceHead span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.transferBox {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.rebindRetryBox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.rebindRetryBox button {
+  flex-shrink: 0;
+}
+
+.transferQr {
+  width: 156px;
+  height: 156px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  object-fit: contain;
+}
+
+.transferQrEmpty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.transferMeta {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.transferMeta strong,
+.transferMeta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.transferMeta strong {
+  font-size: 18px;
+  line-height: 1.2;
+  color: #111827;
+}
+
+.transferMeta span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.transferActions {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.transferActions button {
+  justify-content: center;
+}
+
 .timeline {
   display: grid;
   gap: 10px;
+}
+
+.workflowEvents {
+  margin-top: 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.eventList {
+  display: grid;
+  gap: 8px;
+}
+
+.eventItem {
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-soft);
+  border-radius: 8px;
+  padding: 9px 10px;
+  display: grid;
+  gap: 5px;
+}
+
+.eventItem > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, .65fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.eventItem strong,
+.eventItem span,
+.eventItem small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eventItem span,
+.eventItem small {
+  color: var(--faint);
+}
+
+.eventItem small {
+  font-size: 12px;
 }
 
 .step {
@@ -1623,6 +1829,7 @@ pre {
     flex-wrap: wrap;
   }
   .headerControls select,
+  .headerControls .compactInput,
   .panelHeader select {
     width: 100%;
   }
@@ -1717,6 +1924,14 @@ pre {
   .kv,
   .editLine {
     grid-template-columns: 72px minmax(0, 1fr) 34px;
+  }
+  .transferBox {
+    grid-template-columns: 1fr;
+  }
+  .transferQr {
+    width: min(220px, 100%);
+    height: auto;
+    aspect-ratio: 1;
   }
   .editLine {
     grid-template-columns: 72px minmax(0, 1fr);

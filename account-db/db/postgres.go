@@ -24,6 +24,7 @@ type Account struct {
 	PlusTrialEligible *bool
 	PlusActive        *bool
 	Tier              string
+	ActivationChannel string
 	CreatedAt         int64 `gorm:"autoCreateTime"`
 	UpdatedAt         int64 `gorm:"autoUpdateTime"`
 }

@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import android.util.Log
 import com.nbregister.whatsappforwarder.network.OtpWebhookClient
 import com.nbregister.whatsappforwarder.settings.SettingsStore
 import java.util.concurrent.TimeUnit
@@ -32,6 +33,7 @@ class OtpForwardWorker(
         }
 
         val result = OtpWebhookClient().send(webhookUrl, otp)
+        Log.i(TAG, "Webhook send result success=${result.success} permanent=${result.permanentFailure} message=${result.message} otp_len=${otp.length}")
         return when {
             result.success -> Result.success()
             result.permanentFailure -> Result.failure(workDataOf(KEY_ERROR to result.message))
@@ -43,6 +45,7 @@ class OtpForwardWorker(
         private const val KEY_WEBHOOK_URL = "webhook_url"
         private const val KEY_OTP = "otp"
         private const val KEY_ERROR = "error"
+        private const val TAG = "WhatsAppForwarder"
 
         fun enqueue(context: Context, webhookUrl: String, otp: String) {
             val request = OneTimeWorkRequestBuilder<OtpForwardWorker>()

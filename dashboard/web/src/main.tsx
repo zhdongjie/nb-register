@@ -21,6 +21,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  WalletCards,
   X,
   Zap
 } from 'lucide-react';
@@ -55,6 +56,7 @@ type Account = {
   password: string;
   status: string;
   error_message: string;
+  activation_channel?: string;
   session_token: string;
   access_token: string;
   plus_trial_eligible?: boolean;
@@ -62,13 +64,6 @@ type Account = {
   tier: string;
   created_at: number;
   updated_at: number;
-};
-
-type CheckoutLinkResponse = {
-  success: boolean;
-  error_message?: string;
-  checkout_url: string;
-  checkout_session_id: string;
 };
 
 type ManualAddBalanceConfirmResponse = {
@@ -236,6 +231,7 @@ const actionLabels: DisplayLabelMap = {
   AUTOPAY: '自动支付',
   GOPAY_APP: 'GoPay App',
   GOPAY_PAYMENT: 'GoPay 支付',
+  GOPAY_PAYMENT_REBIND: 'GoPay 支付换绑',
   REGISTER_AND_ACTIVATE: '注册并激活',
   PROBE_ACCOUNT: '探测账号',
   REGISTER_MAILBOX: '注册 Outlook 邮箱',
@@ -256,6 +252,7 @@ const stepLabels: DisplayLabelMap = {
   gopay_app_change_phone_cancel: '取消换绑号码',
   gopay_app_change_phone_complete: '完成换绑',
   gopay_app_signup_phone: '获取未注册 GoPay 号',
+  gopay_app_wa_phone_check: '检测 WA GoPay 号',
   gopay_app_deactivate: 'GoPay 注销',
   gopay_app_deactivate_start: '开始注销',
   gopay_app_deactivate_sms_wait: '等待注销短信',
@@ -270,6 +267,7 @@ const stepLabels: DisplayLabelMap = {
   gopay_login: 'GoPay 登录',
   gopay_payment_prepare: '准备 GoPay 支付',
   gopay_payment: 'GoPay 支付',
+  gopay_payment_rebind: 'GoPay 支付换绑',
   probe_plus_trial: '探测 0 元资格',
   probe_tier: '探测套餐',
   register_mailbox: '注册邮箱',
@@ -295,6 +293,7 @@ function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [showSecrets, setShowSecrets] = useState(false);
   const [gopayOtpChannel, setGopayOtpChannel] = useState<GoPayOTPChannel>('sms');
+  const [gopayWaPhone, setGopayWaPhone] = useState('');
   const [mailboxRegistering, setMailboxRegistering] = useState(false);
   const [mailboxOAuthing, setMailboxOAuthing] = useState('');
   const [inboxLoading, setInboxLoading] = useState(false);
@@ -382,26 +381,6 @@ function App() {
     }
   }
 
-  async function createCheckoutLink(account: Account) {
-    setBusy(true);
-    try {
-      const resp = await api<CheckoutLinkResponse>(`/api/accounts/${account.account_id}/checkout-link`, { method: 'POST', body: '{}' });
-      if (resp.error_message || !resp.checkout_url) {
-        setToast({ kind: 'error', text: resp.error_message || '提链失败' });
-        return;
-      }
-      const copied = await copyText(resp.checkout_url);
-      setToast({
-        kind: copied ? 'ok' : 'error',
-        text: copied ? `提链已复制: ${short(resp.checkout_session_id || 'ok')}` : '提链成功，但浏览器拒绝复制'
-      });
-    } catch (err) {
-      setToast({ kind: 'error', text: errorText(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function copyField(label: string, value: string) {
     const copied = await copyText(value);
     setToast({
@@ -427,17 +406,25 @@ function App() {
     }
   }
 
-  async function runGoPayPayment(account: Account) {
+  async function runGoPayPayment(account: Account, otpChannel: GoPayOTPChannel) {
     setBusy(true);
     try {
+      const payload: Record<string, string> = {
+        account_id: account.account_id,
+        otp_channel: otpChannel,
+        state_key: 'local'
+      };
+      if (otpChannel === 'wa' && gopayWaPhone.trim()) {
+        payload.wa_phone = gopayWaPhone.trim();
+      }
       const resp = await api<any>('/api/workflows/gopay-payment', {
         method: 'POST',
-        body: JSON.stringify({ account_id: account.account_id, otp_channel: gopayOtpChannel })
+        body: JSON.stringify(payload)
       });
       if (resp.error_message) {
         setToast({ kind: 'error', text: resp.error_message });
       } else {
-        setToast({ kind: 'ok', text: `GoPay 支付已提交: ${resp.job_id || 'ok'}` });
+        setToast({ kind: 'ok', text: `Gopay-${otpChannel.toUpperCase()}-手动转账支付已提交: ${resp.job_id || 'ok'}` });
         await refresh();
       }
     } catch (err) {
@@ -492,6 +479,28 @@ function App() {
       }
       setToast({ kind: 'ok', text: `转账已确认: ${short(resp.job_id || job.job_id)}` });
       await refreshSelectedJob(job.job_id);
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+      throw err;
+    }
+  }
+
+  async function retryGoPayPaymentRebind(job: Job) {
+    try {
+      const resp = await api<any>('/api/workflows/gopay-payment/rebind', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_job_id: job.job_id,
+          account_id: job.account_id || '',
+          state_key: goPayPaymentStateKey(job)
+        })
+      });
+      if (resp.error_message) {
+        setToast({ kind: 'error', text: resp.error_message });
+        return;
+      }
+      setToast({ kind: 'ok', text: `换绑重试已提交: ${resp.job_id || 'ok'}` });
+      await refresh();
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
       throw err;
@@ -585,7 +594,7 @@ function App() {
     }
   }
 
-  async function updateAccountAuth(account: Account, payload: { session_token?: string; access_token?: string }) {
+  async function updateAccount(account: Account, payload: { session_token?: string; access_token?: string; activation_channel?: string }, successText: string) {
     setBusy(true);
     try {
       const updated = await api<Account>(`/api/accounts/${account.account_id}`, {
@@ -594,7 +603,7 @@ function App() {
       });
       setAccounts((prev) => prev.map((item) => item.account_id === updated.account_id ? updated : item));
       setSelectedAccount(updated);
-      setToast({ kind: 'ok', text: '认证信息已更新' });
+      setToast({ kind: 'ok', text: successText });
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
       throw err;
@@ -745,7 +754,7 @@ function App() {
   const selectedAccountLatestOtp = selectedAccount ? latestOtpForEmail(inboxResponse, mailboxes, selectedAccount.email) : null;
   const mailboxRegisterJobs = jobs.filter((job) => job.action === 'REGISTER_MAILBOX');
   const runningMailboxRegisterCount = mailboxRegisterJobs.filter((job) => job.status === 'RUNNING').length;
-  const gopayAppJobs = jobs.filter((job) => job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT');
+  const gopayAppJobs = jobs.filter((job) => job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'GOPAY_PAYMENT_REBIND');
   const runningGoPayAppCount = gopayAppJobs.filter((job) => job.status === 'RUNNING').length;
   const latestGoPayAppJob = gopayAppJobs[0];
   const latestMailboxRegisterJob = mailboxRegisterJobs[0];
@@ -806,14 +815,6 @@ function App() {
                     <NativeSelect value={accountStatus} onChange={(e) => setAccountStatus(e.target.value)}>
                       {statusOptions.map((s) => <NativeSelectOption key={s} value={s}>{s ? statusText(s) : '全部状态'}</NativeSelectOption>)}
                     </NativeSelect>
-                    <NativeSelect
-                      aria-label="GoPay OTP 接码"
-                      value={gopayOtpChannel}
-                      onChange={(event) => setGopayOtpChannel(event.target.value as GoPayOTPChannel)}
-                    >
-                      <NativeSelectOption value="sms">SMS</NativeSelectOption>
-                      <NativeSelectOption value="wa">WA</NativeSelectOption>
-                    </NativeSelect>
                   </div>
                 </PanelHeader>
                 <PanelIntro text="创建账号时邮箱和密码可留空；系统会从邮箱池取可用邮箱，并自动生成密码。" />
@@ -826,6 +827,7 @@ function App() {
                 />
                 <AccountTable
                   accounts={accounts}
+                  jobs={jobs}
                   selected={selectedAccount?.account_id}
                   showSecrets={showSecrets}
                   runningAccountIds={runningAccountIds}
@@ -834,10 +836,7 @@ function App() {
                   onSelect={selectAccount}
                   onRegister={(account) => runAccountWorkflow('注册账号', '/api/workflows/register', account)}
                   onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
-                  onActivate={(account) => runAccountWorkflow('激活支付', '/api/workflows/activate', account)}
-	                  onAutopay={(account) => runAccountWorkflow('自动支付', '/api/workflows/autopay', account)}
 	                  onGoPayPayment={runGoPayPayment}
-	                  onCreateCheckoutLink={createCheckoutLink}
 	                  onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
                   onRegisterActivate={(account) => runAccountWorkflow('注册并激活', '/api/workflows/register-and-activate', account)}
                   onRefreshAccessToken={refreshAccountAccessToken}
@@ -868,6 +867,14 @@ function App() {
                       <NativeSelectOption value="sms">SMS</NativeSelectOption>
                       <NativeSelectOption value="wa">WA</NativeSelectOption>
                     </NativeSelect>
+                    {gopayOtpChannel === 'wa' && (
+                      <Input
+                        className="compactInput"
+                        placeholder="WA 手机号"
+                        value={gopayWaPhone}
+                        onChange={(event) => setGopayWaPhone(event.target.value)}
+                      />
+                    )}
                     <Button className="primaryButton" onClick={runGoPayApp} disabled={busy || runningGoPayAppCount > 0}>
                       <RefreshCcw size={16} /> {runningGoPayAppCount > 0 ? '执行中' : '启动'}
                     </Button>
@@ -994,12 +1001,13 @@ function App() {
             inboxLoading={inboxLoading}
             mailboxContext={selectedAccountMailboxContext}
             latestOtp={selectedAccountLatestOtp}
+            activationChannel={accountActivationChannel(selectedAccount, jobs)}
             onCopy={copyField}
             onFetchInbox={fetchMailboxInbox}
-            onSessionSave={(account, sessionToken) => updateAccountAuth(account, { session_token: sessionToken })}
-            onAccessSave={(account, accessToken) => updateAccountAuth(account, { access_token: accessToken })}
+            onSessionSave={(account, sessionToken) => updateAccount(account, { session_token: sessionToken }, '认证信息已更新')}
+            onAccessSave={(account, accessToken) => updateAccount(account, { access_token: accessToken }, '认证信息已更新')}
+            onActivationChannelSave={(account, activationChannel) => updateAccount(account, { activation_channel: activationChannel }, '激活渠道已更新')}
 	            onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
-	            onCreateCheckoutLink={createCheckoutLink}
 	            onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
             onRefreshAccessToken={refreshAccountAccessToken}
             refreshingAccessToken={refreshingAccessTokenIds.has(selectedAccount.account_id)}
@@ -1017,6 +1025,7 @@ function App() {
 	            onCopy={copyField}
 	            onOtpSubmit={submitJobOtp}
 	            onManualAddBalanceConfirm={confirmManualAddBalance}
+	            onGoPayRebindRetry={retryGoPayPaymentRebind}
 	          />
         )}
       </DetailDrawer>
@@ -1134,7 +1143,7 @@ function DetailDrawer({ open, title, onClose, children }: {
   );
 }
 
-function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAccessToken, mailboxContext, latestOtp, onCopy, onFetchInbox, onSessionSave, onAccessSave, onProbeAccount, onCreateCheckoutLink, onLogin, onRefreshAccessToken }: {
+function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAccessToken, mailboxContext, latestOtp, activationChannel, onCopy, onFetchInbox, onSessionSave, onAccessSave, onActivationChannelSave, onProbeAccount, onLogin, onRefreshAccessToken }: {
   account: Account;
   showSecrets: boolean;
   busy: boolean;
@@ -1142,12 +1151,13 @@ function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAc
   refreshingAccessToken: boolean;
   mailboxContext: AccountMailboxContext | null;
   latestOtp: LatestOtp | null;
+  activationChannel: string;
   onCopy: (label: string, value: string) => void;
   onFetchInbox: (emailAddress?: string) => Promise<void>;
   onSessionSave: (account: Account, sessionToken: string) => Promise<void>;
   onAccessSave: (account: Account, accessToken: string) => Promise<void>;
+  onActivationChannelSave: (account: Account, activationChannel: string) => Promise<void>;
   onProbeAccount: (account: Account) => void;
-  onCreateCheckoutLink: (account: Account) => Promise<void>;
   onLogin: (account: Account) => void;
   onRefreshAccessToken: (account: Account) => Promise<void>;
 }) {
@@ -1170,9 +1180,6 @@ function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAc
             <Button {...buttonHint(probeAccountHint(account))} disabled={busy || !canProbeAccount(account)} onClick={() => onProbeAccount(account)}>
               <Search size={14} /> 探测账号
             </Button>
-            <Button {...buttonHint('创建 checkout 链接并复制到剪贴板')} disabled={busy || !canCreateCheckoutLink(account)} onClick={() => void onCreateCheckoutLink(account)}>
-              <Copy size={14} /> 提链
-            </Button>
             <Button {...buttonHint(accountInboxHint(account.email, mailboxContext, showSecrets))} disabled={busy || inboxLoading || !account.email} onClick={() => void onFetchInbox(account.email)}>
               <Inbox size={14} /> {inboxLoading ? '拉取中' : '拉取 OTP'}
             </Button>
@@ -1182,14 +1189,14 @@ function AccountDetails({ account, showSecrets, busy, inboxLoading, refreshingAc
         <KV label="ID" value={account.account_id} mono onCopy={onCopy} />
         <KV label="状态" value={statusText(account.status)} copyValue={account.status || '-'} onCopy={onCopy} />
         <KV label="Tier" value={tierText(account.tier)} />
-        <KV label="Plus" value={plusText(account)} />
+        <KV label="Plus资格" value={plusText(account)} />
+        <ActivationChannelEditor account={account} activationChannel={activationChannel} onSave={onActivationChannelSave} />
         <KV label="邮箱" value={showSecrets ? account.email : maskEmail(account.email)} copyValue={account.email} copyDisabled={!account.email} masked={!showSecrets} onCopy={onCopy} />
         <KV label="密码" value={showSecrets ? account.password : mask(account.password)} copyValue={account.password} copyDisabled={!account.password} masked={!showSecrets} mono onCopy={onCopy} />
         <TokenEditor label="Session" field="session_token" account={account} showSecrets={showSecrets} onCopy={onCopy} onSave={onSessionSave} />
         <TokenEditor label="Access" field="access_token" account={account} showSecrets={showSecrets} onCopy={onCopy} onSave={onAccessSave} />
         <KV label="创建时间" value={formatUnix(account.created_at)} onCopy={onCopy} />
         <KV label="更新时间" value={formatUnix(account.updated_at)} onCopy={onCopy} />
-        <KV label="错误" value={account.error_message || '-'} onCopy={onCopy} />
       </section>
     </div>
   );
@@ -1223,7 +1230,7 @@ function AccountOtpPanel({ latestOtp, showSecrets, loading, onCopy }: {
   );
 }
 
-function JobDetails({ job, progress, events, nowUnix, onCopy, onOtpSubmit, onManualAddBalanceConfirm }: {
+function JobDetails({ job, progress, events, nowUnix, onCopy, onOtpSubmit, onManualAddBalanceConfirm, onGoPayRebindRetry }: {
   job: Job;
   progress: WorkflowProgress | null;
   events: JobEvent[];
@@ -1231,6 +1238,7 @@ function JobDetails({ job, progress, events, nowUnix, onCopy, onOtpSubmit, onMan
   onCopy: (label: string, value: string) => void;
   onOtpSubmit: (job: Job, otp: string) => Promise<void>;
   onManualAddBalanceConfirm: (job: Job) => Promise<void>;
+  onGoPayRebindRetry: (job: Job) => Promise<void>;
 }) {
   return (
     <div className="details">
@@ -1258,6 +1266,7 @@ function JobDetails({ job, progress, events, nowUnix, onCopy, onOtpSubmit, onMan
 	          onConfirm={onManualAddBalanceConfirm}
 	          onCopy={onCopy}
 	        />
+          <GoPayRebindPanel job={job} onRetry={onGoPayRebindRetry} />
 	        <div className="timeline">
           {(job.steps || []).map((step) => {
             const progressText = stepProgressText(step, progress);
@@ -1415,6 +1424,38 @@ function ManualAddBalancePanel({ job, progress, onConfirm, onCopy }: {
   );
 }
 
+function GoPayRebindPanel({ job, onRetry }: {
+  job: Job;
+  onRetry: (job: Job) => Promise<void>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  if (!canRetryGoPayPaymentRebind(job)) return null;
+
+  async function retry() {
+    setSubmitting(true);
+    try {
+      await onRetry(job);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="manualBalancePanel">
+      <div className="manualBalanceHead">
+        <span><RefreshCcw size={15} /> 支付后换绑</span>
+        <StatusBadge status="FAILED_RECOVERABLE" />
+      </div>
+      <div className="rebindRetryBox">
+        <span>支付已完成，继续执行 SMS 换绑。</span>
+        <Button className="primaryButton" disabled={submitting} onClick={() => void retry()}>
+          <RefreshCcw size={14} /> 重试换绑
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function TransferQRCode({ payload }: { payload: string }) {
   const [dataUrl, setDataUrl] = useState('');
 
@@ -1447,8 +1488,9 @@ function TransferQRCode({ payload }: { payload: string }) {
   );
 }
 
-function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onGoPayPayment, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountTable({ accounts, jobs, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onGoPayPayment, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   accounts: Account[];
+  jobs: Job[];
   selected?: string;
   showSecrets: boolean;
   runningAccountIds: Set<string>;
@@ -1457,10 +1499,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   onSelect: (a: Account) => void;
   onRegister: (a: Account) => void;
   onLogin: (a: Account) => void;
-  onActivate: (a: Account) => void;
-  onAutopay: (a: Account) => void;
-  onGoPayPayment: (a: Account) => void;
-  onCreateCheckoutLink: (a: Account) => Promise<void>;
+  onGoPayPayment: (a: Account, otpChannel: GoPayOTPChannel) => void;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1475,9 +1514,9 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
             <TableHead>密码</TableHead>
             <TableHead>状态</TableHead>
             <TableHead>Tier</TableHead>
-            <TableHead>Plus</TableHead>
+            <TableHead>Plus资格</TableHead>
+            <TableHead>激活渠道</TableHead>
             <TableHead>更新</TableHead>
-            <TableHead>错误</TableHead>
             <TableHead>操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -1501,9 +1540,11 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
                   </div>
                 </TableCell>
                 <TableCell data-label="Tier"><TierBadge tier={account.tier} /></TableCell>
-                <TableCell data-label="Plus"><PlusBadge account={account} /></TableCell>
+                <TableCell data-label="Plus资格"><PlusBadge account={account} /></TableCell>
+                <TableCell data-label="激活渠道">
+                  <span className="activationChannel">{accountActivationChannel(account, jobs)}</span>
+                </TableCell>
                 <TableCell data-label="更新">{formatUnix(account.updated_at)}</TableCell>
-                <TableCell data-label="错误" className="errorCell" title={account.error_message}>{compactCellError(account.error_message || '-')}</TableCell>
                 <TableCell data-label="操作">
                   <AccountRowActions
                     account={account}
@@ -1512,10 +1553,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
                     refreshingAccessToken={refreshingAccessToken}
                     onRegister={onRegister}
                     onLogin={onLogin}
-                    onActivate={onActivate}
-                    onAutopay={onAutopay}
                     onGoPayPayment={onGoPayPayment}
-                    onCreateCheckoutLink={onCreateCheckoutLink}
                     onProbeAccount={onProbeAccount}
                     onRegisterActivate={onRegisterActivate}
                     onRefreshAccessToken={onRefreshAccessToken}
@@ -1531,17 +1569,14 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   );
 }
 
-function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onGoPayPayment, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onGoPayPayment, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   account: Account;
   accountBusy: boolean;
   busy: boolean;
   refreshingAccessToken: boolean;
   onRegister: (a: Account) => void;
   onLogin: (a: Account) => void;
-  onActivate: (a: Account) => void;
-  onAutopay: (a: Account) => void;
-  onGoPayPayment: (a: Account) => void;
-  onCreateCheckoutLink: (a: Account) => Promise<void>;
+  onGoPayPayment: (a: Account, otpChannel: GoPayOTPChannel) => void;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
   onRefreshAccessToken: (a: Account) => Promise<void>;
@@ -1551,15 +1586,16 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
 
   const actions: RowActionDescriptor[] = [];
   if (canRegister(account)) actions.push({ label: '注册账号', icon: <Play size={14} />, onClick: () => onRegister(account), disabled: busy, kind: 'primary' });
-  if (canActivate(account)) actions.push({ label: '激活支付', icon: <Zap size={14} />, onClick: () => onActivate(account), disabled: true, kind: 'secondary' });
-  if (canAutopay(account)) actions.push({ label: '自动支付', icon: <Zap size={14} />, onClick: () => onAutopay(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
-  if (canGoPayPayment(account)) actions.push({ label: 'GoPay 支付', icon: <Zap size={14} />, onClick: () => onGoPayPayment(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canRefreshAccessToken(account)) actions.push({ label: refreshingAccessToken ? '获取中' : '获取 Access', icon: <KeyRound size={14} />, onClick: () => void onRefreshAccessToken(account), disabled: busy || refreshingAccessToken, kind: actions.length ? 'secondary' : 'primary' });
   if (canLoginSession(account)) actions.push({ label: loginActionLabel(account), icon: <KeyRound size={14} />, onClick: () => onLogin(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
-  if (canCreateCheckoutLink(account)) actions.push({ label: '提链', icon: <Copy size={14} />, onClick: () => void onCreateCheckoutLink(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canProbeAccount(account)) actions.push({ label: '探测账号', icon: <Search size={14} />, onClick: () => onProbeAccount(account), disabled: busy, kind: 'secondary' });
   if (canRegister(account)) actions.push({ label: '注册并激活', icon: <ShieldCheck size={14} />, onClick: () => onRegisterActivate(account), disabled: busy, kind: 'secondary' });
   actions.push({ label: '删除账号', icon: <Trash2 size={14} />, onClick: () => onDelete(account), disabled: busy, kind: 'danger' });
+
+  const paymentActions: RowActionDescriptor[] = canGoPayPayment(account) ? [
+    { label: 'Gopay-SMS-手动转账支付', icon: <WalletCards size={14} />, onClick: () => onGoPayPayment(account, 'sms'), disabled: busy, kind: 'secondary' },
+    { label: 'Gopay-WA-手动转账支付', icon: <WalletCards size={14} />, onClick: () => onGoPayPayment(account, 'wa'), disabled: busy, kind: 'secondary' }
+  ] : [];
 
   const primary = actions.find((action) => action.kind === 'primary' && !action.disabled) ||
     actions.find((action) => !action.disabled) ||
@@ -1568,15 +1604,23 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
 
   return (
     <div className="rowActions" onClick={(event) => event.stopPropagation()}>
-      <RowActionButton action={primary} showLabel />
-      {secondary.map((action) => <RowActionButton key={action.label} action={action} />)}
+      <div className="rowActionsMain">
+        <RowActionButton action={primary} showLabel />
+        {secondary.map((action) => <RowActionButton key={action.label} action={action} />)}
+      </div>
+      {paymentActions.length > 0 && (
+        <div className="rowActionsPayment">
+          {paymentActions.map((action) => <RowActionButton key={action.label} action={action} showLabel fullLabel />)}
+        </div>
+      )}
     </div>
   );
 }
 
-function RowActionButton({ action, showLabel }: { action: RowActionDescriptor; showLabel?: boolean }) {
+function RowActionButton({ action, showLabel, fullLabel }: { action: RowActionDescriptor; showLabel?: boolean; fullLabel?: boolean }) {
   const className = [
     showLabel ? 'rowButtonText' : 'iconButton',
+    fullLabel ? 'rowPaymentButton' : '',
     action.kind === 'primary' ? 'primaryRowAction' : '',
     action.kind === 'danger' ? 'dangerButton' : ''
   ].filter(Boolean).join(' ');
@@ -2159,6 +2203,45 @@ function TokenEditor({ label, field, account, showSecrets, onCopy, onSave }: {
   );
 }
 
+function ActivationChannelEditor({ account, activationChannel, onSave }: {
+  account: Account;
+  activationChannel: string;
+  onSave: (account: Account, activationChannel: string) => Promise<void>;
+}) {
+  const stored = activationChannelSelectValue(account.activation_channel || '');
+  const derived = activationChannelSelectValue(activationChannel);
+  const current = stored || derived;
+  const [value, setValue] = useState(current);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValue(stored || derived);
+  }, [account.account_id, account.activation_channel, stored, derived]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave(account, value);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="editLine channelEditLine">
+      <span>激活渠道</span>
+      <NativeSelect value={value} onChange={(event) => setValue(event.target.value)}>
+        <NativeSelectOption value="">未设置</NativeSelectOption>
+        <NativeSelectOption value="gopay_sms_manual_transfer">Gopay-SMS-手动转账</NativeSelectOption>
+        <NativeSelectOption value="gopay_wa_manual_transfer">Gopay-WA-手动转账</NativeSelectOption>
+      </NativeSelect>
+      <Button {...buttonHint('保存激活渠道')} onClick={save} disabled={saving || value === stored}>
+        <Save size={14} /> 保存
+      </Button>
+    </div>
+  );
+}
+
 function KV({ label, value, mono, copyValue, copyDisabled, copyHint, masked, onCopy }: {
   label: string;
   value: string;
@@ -2216,7 +2299,6 @@ function statusText(status: string) {
 }
 
 function PlusBadge({ account }: { account: Account }) {
-  if (account.plus_active) return <Badge className="badge good">Plus</Badge>;
   return <TrialBadge eligible={account.plus_trial_eligible} />;
 }
 
@@ -2277,15 +2359,6 @@ function canRegister(account: Account) {
   return !isUserAlreadyExistsAccount(account) && !hasRegisteredSession(account);
 }
 
-function canActivate(account: Account) {
-  return !isUserAlreadyExistsAccount(account) &&
-    account.status !== 'ACTIVATED' &&
-    !account.plus_active &&
-    normalizeTier(account.tier) === 'free' &&
-    account.plus_trial_eligible === true &&
-    (!!account.session_token || !!account.access_token);
-}
-
 function canAutopay(account: Account) {
   const tier = normalizeTier(account.tier);
   return !isUserAlreadyExistsAccount(account) &&
@@ -2300,15 +2373,59 @@ function canGoPayPayment(account: Account) {
   return canAutopay(account);
 }
 
-function canProbeAccount(account: Account) {
-  return !isUserAlreadyExistsAccount(account) && !!account.session_token;
+function accountActivationChannel(account: Account, jobs: Job[]) {
+  const direct = formatActivationChannel(account.activation_channel || '', '');
+  if (direct !== '-') return direct;
+
+  const latestPaymentJob = jobs
+    .filter((job) =>
+      job.account_id === account.account_id &&
+      (job.action === 'GOPAY_PAYMENT' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'REGISTER_AND_ACTIVATE')
+    )
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))[0];
+  if (!latestPaymentJob) return '-';
+
+  const result = objectValue(latestPaymentJob.result);
+  const addBalance = objectValue(result.add_balance);
+  const payment = objectValue(result.gopay_payment);
+  const paymentStep = objectValue(stepResultData(latestPaymentJob, 'gopay_payment'));
+  return formatActivationChannel(
+    stringValue(result.otp_channel) || stringValue(payment.otp_channel) || stringValue(paymentStep.otp_channel),
+    stringValue(result.add_balance_method) || stringValue(addBalance.method)
+  );
 }
 
-function canCreateCheckoutLink(account: Account) {
-  return !isUserAlreadyExistsAccount(account) &&
-    account.status !== 'ACTIVATED' &&
-    !account.plus_active &&
-    (!!account.session_token || !!account.access_token);
+function formatActivationChannel(channel: string, addBalanceMethod: string) {
+  const normalizedChannel = normalizeActivationChannel(channel);
+  const manualTransfer = isManualTransferActivation(channel) || isManualTransferActivation(addBalanceMethod);
+  if (normalizedChannel) {
+    return manualTransfer ? `Gopay-${normalizedChannel}-手动转账` : `Gopay-${normalizedChannel}`;
+  }
+  return manualTransfer ? 'Gopay-手动转账' : '-';
+}
+
+function activationChannelSelectValue(value: string) {
+  const normalizedChannel = normalizeActivationChannel(value);
+  if (normalizedChannel === 'SMS') return 'gopay_sms_manual_transfer';
+  if (normalizedChannel === 'WA') return 'gopay_wa_manual_transfer';
+  return '';
+}
+
+function normalizeActivationChannel(value: string) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'sms' || normalized.includes('-sms') || normalized.includes('_sms')) return 'SMS';
+  if (normalized === 'wa' || normalized.includes('-wa') || normalized.includes('_wa') || normalized.includes('whatsapp')) return 'WA';
+  return '';
+}
+
+function isManualTransferActivation(value: string) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'manual_transfer' || normalized === 'manual-transfer' || normalized.includes('manual_transfer') || normalized.includes('手动转账');
+}
+
+function canProbeAccount(account: Account) {
+  return !isUserAlreadyExistsAccount(account) && !!account.session_token;
 }
 
 function probeAccountHint(account: Account) {
@@ -2354,7 +2471,7 @@ function isUserAlreadyExistsAccount(account: Account) {
 }
 
 function canSubmitOtp(job: Job) {
-  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'REGISTER_AND_ACTIVATE');
+  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'GOPAY_PAYMENT_REBIND' || job.action === 'REGISTER_AND_ACTIVATE');
 }
 
 function manualAddBalanceView(job: Job) {
@@ -2380,6 +2497,21 @@ function canConfirmManualAddBalance(job: Job, progress: WorkflowProgress | null,
     (progress?.step_name === 'gopay_app_add_balance_confirm' || progress?.step_name === 'gopay_app_add_balance');
 }
 
+function canRetryGoPayPaymentRebind(job: Job) {
+  if (job.action !== 'GOPAY_PAYMENT' || job.status !== 'FAILED_RECOVERABLE') return false;
+  const result = objectValue(job.result);
+  const paymentCompleted = result.payment_completed === true || String(result.payment_completed || '').toLowerCase() === 'true';
+  const hasPayment = !!(stringValue(result.charge_ref) || stringValue(result.snap_token));
+  const changePhone = objectValue(result.change_phone);
+  const changeComplete = result.change_phone_complete === true || changePhone.change_phone_complete === true;
+  return paymentCompleted && hasPayment && !changeComplete && job.last_step === 'gopay_app_change_phone';
+}
+
+function goPayPaymentStateKey(job: Job) {
+  const result = objectValue(job.result);
+  return stringValue(result.state_key) || 'local';
+}
+
 function stepResultData(job: Job, stepName: string): any | null {
   const step = (job.steps || []).find((item) => item.step_name === stepName);
   return stepDetailData(step);
@@ -2387,7 +2519,7 @@ function stepResultData(job: Job, stepName: string): any | null {
 
 function otpSubmitLabel(job: Job) {
   if (job.action === 'LOGIN_SESSION') return '登录 OTP';
-  if (job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT') return 'GoPay OTP';
+  if (job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'GOPAY_PAYMENT_REBIND') return 'GoPay OTP';
   if (job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || (job.action === 'REGISTER_AND_ACTIVATE' && (job.last_step === 'gopay_login' || job.last_step === 'gopay_payment'))) {
     return '支付 OTP';
   }
@@ -2585,7 +2717,6 @@ function trialText(value?: boolean) {
 }
 
 function plusText(account: Account) {
-  if (account.plus_active) return 'Plus 已开通';
   return trialText(account.plus_trial_eligible);
 }
 

@@ -20,6 +20,7 @@ SIGNUP_GOPAY_COMMAND = "/signup-gopay"
 CREATE_GOPAY_PIN_COMMAND = "/create-gopay-pin"
 GOPAY_STATUS_COMMAND = "/gopay-status"
 CLEAR_GOPAY_STATE_COMMAND = "/clear-gopay-state"
+SET_GOPAY_WA_PHONE_COMMAND = "/set-gopay-wa-phone"
 GOPAY_COMMANDS = {
     LOGIN_GOPAY_COMMAND,
     CHANGE_GOPAY_PHONE_COMMAND,
@@ -27,6 +28,7 @@ GOPAY_COMMANDS = {
     CREATE_GOPAY_PIN_COMMAND,
     GOPAY_STATUS_COMMAND,
     CLEAR_GOPAY_STATE_COMMAND,
+    SET_GOPAY_WA_PHONE_COMMAND,
 }
 COMMANDS = {"/start", "/help", CHECK_COMMAND} | GOPAY_COMMANDS
 CHECK_COMMANDS = {CHECK_COMMAND}
@@ -113,6 +115,7 @@ def gopay_usage_text(default_country_code: str) -> str:
         f"{CHANGE_GOPAY_PHONE_COMMAND} - 换绑手机号\n"
         f"{SIGNUP_GOPAY_COMMAND} - 注册账号\n"
         f"{CREATE_GOPAY_PIN_COMMAND} - 创建 PIN\n"
+        f"{SET_GOPAY_WA_PHONE_COMMAND} - 保存 WA 支付手机号\n"
         f"{GOPAY_STATUS_COMMAND} - 查看当前 GoPay state\n"
         f"{CLEAR_GOPAY_STATE_COMMAND} - 清空自己的 GoPay state"
     )
@@ -149,6 +152,15 @@ def gopay_change_phone_prompt(default_country_code: str) -> str:
     cc = _country_code(default_country_code)
     return (
         "请发送要换绑的新手机号。\n"
+        "支持格式：628xxxxxxxxxx、8xxxxxxxxxx、+62 8xxxxxxxxxx\n"
+        f"当前默认区号：{cc}"
+    )
+
+
+def gopay_wa_phone_prompt(default_country_code: str) -> str:
+    cc = _country_code(default_country_code)
+    return (
+        "请发送 WA 支付注册手机号。\n"
         "支持格式：628xxxxxxxxxx、8xxxxxxxxxx、+62 8xxxxxxxxxx\n"
         f"当前默认区号：{cc}"
     )
@@ -384,6 +396,10 @@ class TelegramCheckPhoneBot:
             self._set_pending_gopay_flow(message, chat_id, {"step": "create_pin_pin"})
             self.send_message(chat_id, gopay_pin_prompt(), message.get("message_id"))
             return True
+        if first == SET_GOPAY_WA_PHONE_COMMAND:
+            self._set_pending_gopay_flow(message, chat_id, {"step": "set_wa_phone"})
+            self.send_message(chat_id, gopay_wa_phone_prompt(self.default_country_code), message.get("message_id"))
+            return True
         if first == GOPAY_STATUS_COMMAND:
             self.send_chat_action(chat_id)
             try:
@@ -423,7 +439,7 @@ class TelegramCheckPhoneBot:
         state_key = self._gopay_state_key(message, chat_id)
         message_id = message.get("message_id")
 
-        if step in {"auth_phone", "signup_phone", "change_phone"}:
+        if step in {"auth_phone", "signup_phone", "change_phone", "set_wa_phone"}:
             request = parse_check_text(text, self.default_country_code)
             if request is None:
                 self._set_pending_gopay_flow(message, chat_id, session)
@@ -431,8 +447,23 @@ class TelegramCheckPhoneBot:
                     self.send_message(chat_id, gopay_change_phone_prompt(self.default_country_code), message_id)
                 elif step == "signup_phone":
                     self.send_message(chat_id, gopay_signup_phone_prompt(self.default_country_code), message_id)
+                elif step == "set_wa_phone":
+                    self.send_message(chat_id, gopay_wa_phone_prompt(self.default_country_code), message_id)
                 else:
                     self.send_message(chat_id, gopay_login_phone_prompt(self.default_country_code), message_id)
+                return True
+            if step == "set_wa_phone":
+                resp = self._call_orchestrator(
+                    chat_id,
+                    message_id,
+                    lambda: self.gopay.set_wa_phone(state_key, wa_phone=request.phone),
+                )
+                self._clear_pending_gopay_flow(message, chat_id)
+                if resp is not None:
+                    if _response_success(resp):
+                        self.send_message(chat_id, f"已保存 WA 支付手机号：{getattr(resp, 'wa_phone', request.phone)}", message_id)
+                    else:
+                        self.send_message(chat_id, f"保存 WA 支付手机号失败：{_response_error(resp)}", message_id)
                 return True
             next_step = {
                 "auth_phone": "auth_pin",

@@ -66,6 +66,12 @@ message GoPayActivityInput {
   string tokenization = 6;
   string checkout_url = 7;
   string checkout_session_id = 8;
+  string otp_channel = 9; // sms 时 payment 触发 resend-otp；wa/空值不触发
+  string state_json = 10;
+  string prepared_flow_id = 11;
+  string gopay_phone = 12;
+  string sms_activation_id = 13;
+  string state_key = 14; // WA 接码来源；local 或 tg:<user_id>
 }
 
 message GoPayActivityOutput {
@@ -75,6 +81,7 @@ message GoPayActivityOutput {
   bool plus_trial_checked = 4;
   bool plus_active = 5;
   google.protobuf.Struct data = 6;
+  string state_json = 7;
 }
 
 message GoPayPaymentStartOutput {
@@ -83,6 +90,18 @@ message GoPayPaymentStartOutput {
   int32 otp_timeout_seconds = 3;
   bool use_account_token = 4;
   google.protobuf.Struct data = 5;
+  bool otp_required = 6;
+  string state_json = 7;
+}
+
+message GoPayPaymentPrepareOutput {
+  string flow_id = 1;
+  string snap_token = 2;
+  string checkout_url = 3;
+  string checkout_session_id = 4;
+  bool use_account_token = 5;
+  google.protobuf.Struct data = 6;
+  string state_json = 7;
 }
 
 message GoPayPaymentCompleteInput {
@@ -95,6 +114,21 @@ message GoPayPaymentCompleteInput {
   string otp_source = 7;
   bool use_account_token = 8;
   google.protobuf.Struct data = 9;
+  string state_json = 10;
+}
+
+message GoPayPaymentOTPResendInput {
+  string job_id = 1;
+  string account_id = 2;
+  string flow_id = 3;
+  google.protobuf.Struct data = 4;
+}
+
+message GoPayPaymentOTPResendOutput {
+  bool success = 1;
+  string flow_id = 2;
+  int64 issued_after_unix = 3;
+  google.protobuf.Struct data = 4;
 }
 
 message GoPayPaymentCancelInput {

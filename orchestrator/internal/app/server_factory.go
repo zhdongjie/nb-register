@@ -25,7 +25,6 @@ func activityConfig(cfg orchestratorConfig, deps *orchestratorDependencies) acti
 		GoPayAppUnlinkTimeout:             cfg.GoPayAppUnlinkTimeout,
 		ChangePhoneMaxFailures:            cfg.ChangePhoneMaxFailures,
 		ChangePhoneDisabled:               cfg.ChangePhoneDisabled,
-		ChangePhoneOTPWaitSeconds:         cfg.ChangePhoneOTPWaitSeconds,
 		ChangePhoneOTPRetryAttempts:       cfg.ChangePhoneOTPRetryAttempts,
 		ChangePhoneGetNumberRetryDelay:    cfg.ChangePhoneGetNumberRetryDelay,
 		ChangePhoneSMSCancelTimeout:       cfg.ChangePhoneSMSCancelTimeout,

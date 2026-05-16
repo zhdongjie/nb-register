@@ -10,6 +10,7 @@ option go_package = "./;pb";
 service GoPayAppWorkflowService {
   rpc RunGoPayApp(GoPayAppRequest) returns (GoPayAppResponse);
   rpc RunGoPayPayment(GoPayPaymentRequest) returns (GoPayPaymentResponse);
+  rpc ConfirmManualAddBalance(ConfirmManualAddBalanceRequest) returns (ConfirmManualAddBalanceResponse);
   rpc GoPayUserStatus(GoPayUserStatusRequest) returns (GoPayUserStatusResponse);
   rpc GoPayUserClearState(GoPayUserClearStateRequest) returns (GoPayUserClearStateResponse);
   rpc GoPayUserAuthStart(GoPayUserAuthStartRequest) returns (GoPayUserAuthStartResponse);
@@ -57,6 +58,9 @@ message GoPayPaymentRequest {
   string account_id = 1;
   string source_job_id = 2;
   string otp_channel = 3; // sms 或 wa；默认 sms
+  string sms_activation_id = 4; // 续跑已取号流程时复用同一个短信激活号
+  GoPayAddBalance add_balance = 5;
+  int32 add_balance_confirm_timeout_seconds = 6;
 }
 
 message GoPayPaymentResponse {
@@ -68,6 +72,41 @@ message GoPayPaymentResponse {
   string snap_token = 6;
   string activation_id = 7;
   string phone = 8;
+  bool add_balance_complete = 9;
+  string add_balance_method = 10;
+  string add_balance_status = 11;
+}
+
+message GoPayAddBalance {
+  oneof method {
+    GoPayEnvelopeAddBalance envelope = 1;
+    GoPayManualTransferAddBalance manual_transfer = 2;
+  }
+}
+
+message GoPayEnvelopeAddBalance {
+  string link = 1;
+  string envelope_request_id = 2;
+}
+
+message GoPayManualTransferAddBalance {
+  string instructions = 3;
+  int64 amount = 4;
+  string currency = 5;
+}
+
+message ManualAddBalanceSignal {
+  string kind = 1;
+}
+
+message ConfirmManualAddBalanceRequest {
+  string job_id = 1;
+}
+
+message ConfirmManualAddBalanceResponse {
+  bool success = 1;
+  string job_id = 2;
+  string error_message = 3;
 }
 
 message GoPayUserStatusRequest {
@@ -165,7 +204,7 @@ message GoPayUserSignupStartRequest {
   string name = 3;
   string email = 4;
   string country_code = 5;
-  string otp_channel = 6; // sms 或 wa；为空时使用服务默认配置
+  string otp_channel = 6; // sms 或 wa；为空默认 sms
 }
 
 message GoPayUserSignupStartResponse {
@@ -191,7 +230,7 @@ message GoPayUserSignupCompleteResponse {
 message GoPayUserCreatePinStartRequest {
   string state_key = 1;
   string pin = 2;
-  string otp_channel = 3; // sms 或 wa；为空时使用服务默认配置
+  string otp_channel = 3; // sms 或 wa；为空默认 sms
 }
 
 message GoPayUserCreatePinStartResponse {
@@ -236,6 +275,9 @@ message GoPayPaymentWorkflowInput {
   string account_id = 2;
   string source_job_id = 3;
   string otp_channel = 4; // sms 或 wa；默认 sms
+  string sms_activation_id = 5;
+  GoPayAddBalance add_balance = 6;
+  int32 add_balance_confirm_timeout_seconds = 7;
 }
 
 message GoPayPaymentWorkflowResult {
@@ -249,11 +291,15 @@ message GoPayPaymentWorkflowResult {
   bool signup_pin_complete = 8;
   string charge_ref = 9;
   string snap_token = 10;
+  bool add_balance_complete = 11;
+  string add_balance_method = 12;
+  string add_balance_status = 13;
 }
 
 message GoPayAppStepInput {
   string job_id = 1;
   string activation_id = 2;
+  string state_json = 3;
 }
 
 message GoPayAppStepOutput {
@@ -267,11 +313,13 @@ message GoPayAppStepOutput {
   bool signup_complete = 8;
   bool signup_pin_complete = 9;
   google.protobuf.Struct data = 10;
+  string state_json = 11;
 }
 
 message GoPayAppChangePhoneStartInput {
   string job_id = 1;
   int32 failure_count = 2;
+  string state_json = 3;
 }
 
 message GoPayAppChangePhoneStartOutput {
@@ -282,6 +330,7 @@ message GoPayAppChangePhoneStartOutput {
   int32 otp_timeout_seconds = 5;
   int32 otp_retry_attempts = 6;
   google.protobuf.Struct data = 7;
+  string state_json = 8;
 }
 
 message GoPayAppAcquireSignupPhoneInput {
@@ -298,10 +347,26 @@ message GoPayAppAcquireSignupPhoneOutput {
   google.protobuf.Struct data = 6;
 }
 
+message GoPayAppAddBalanceInput {
+  string job_id = 1;
+  string state_json = 2;
+  GoPayAddBalance add_balance = 3;
+}
+
+message GoPayAppAddBalanceOutput {
+  bool success = 1;
+  string error_message = 2;
+  string method = 3;
+  string status = 4;
+  google.protobuf.Struct data = 5;
+  string state_json = 6;
+}
+
 message GoPayAppChangePhoneRetryInput {
   string job_id = 1;
   string activation_id = 2;
   int32 otp_attempt = 3;
+  string state_json = 4;
 }
 
 message GoPayAppChangePhoneRetryOutput {
@@ -309,6 +374,7 @@ message GoPayAppChangePhoneRetryOutput {
   bool otp_sent = 2;
   string error_message = 3;
   google.protobuf.Struct data = 4;
+  string state_json = 5;
 }
 
 message GoPayAppSMSActivationInput {
@@ -331,6 +397,7 @@ message GoPayAppChangePhoneCompleteInput {
   string activation_id = 2;
   string code = 3;
   int32 failure_count = 4;
+  string state_json = 5;
 }
 
 message GoPayAppChangePhoneCompleteOutput {
@@ -343,11 +410,13 @@ message GoPayAppChangePhoneCompleteOutput {
   string stage = 7;
   string phone = 8;
   google.protobuf.Struct data = 9;
+  string state_json = 10;
 }
 
 message GoPayAppDeactivateStartInput {
   string job_id = 1;
   string activation_id = 2;
+  string state_json = 3;
 }
 
 message GoPayAppDeactivateStartOutput {
@@ -355,18 +424,21 @@ message GoPayAppDeactivateStartOutput {
   bool otp_required = 2;
   int32 timeout_seconds = 3;
   google.protobuf.Struct data = 4;
+  string state_json = 5;
 }
 
 message GoPayAppDeactivateCompleteInput {
   string job_id = 1;
   string activation_id = 2;
   string code = 3;
+  string state_json = 4;
 }
 
 message GoPayAppDeactivateCompleteOutput {
   string activation_id = 1;
   bool deactivate_complete = 2;
   google.protobuf.Struct data = 3;
+  string state_json = 4;
 }
 
 message GoPayAppOTPStartInput {
@@ -374,9 +446,18 @@ message GoPayAppOTPStartInput {
   string operation = 2;
   string step_name = 3;
   string phone = 4;
-  string otp_channel = 5; // sms 或 wa；默认沿用 gopay-app 配置
+  string otp_channel = 5; // sms 或 wa；默认 sms
   string sms_activation_id = 6;
   bool reset_state = 7;
+  string state_json = 8;
+}
+
+message GoPayAppCreatePinStartInput {
+  string job_id = 1;
+  string otp_channel = 2; // sms 或 wa；默认 sms
+  string sms_activation_id = 3;
+  string state_json = 4;
+  google.protobuf.Struct data = 5;
 }
 
 message GoPayAppOTPOutput {
@@ -394,6 +475,19 @@ message GoPayAppOTPOutput {
   google.protobuf.Struct data = 12;
   string verification_method = 13;
   string otp_channel = 14;
+  string state_json = 15;
+}
+
+message GoPayAppCreatePinCompleteInput {
+  string job_id = 1;
+  string otp_param = 2;
+  string submitted_at_param = 3;
+  int64 issued_after_unix = 4;
+  string otp_source = 5;
+  google.protobuf.Struct data = 6;
+  string otp_channel = 7;
+  string sms_activation_id = 8;
+  string state_json = 9;
 }
 
 message GoPayAppOTPCompleteInput {
@@ -406,4 +500,5 @@ message GoPayAppOTPCompleteInput {
   google.protobuf.Struct data = 7;
   string otp_channel = 8;
   string sms_activation_id = 9;
+  string state_json = 10;
 }

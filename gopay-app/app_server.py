@@ -17,33 +17,37 @@ import grpc
 import gopay_app_pb2
 import gopay_app_pb2_grpc
 
-from gopay_client import GopayClient, generate_device_fingerprint
+from gopay_client import GopayClient
 from gopay_app import (
     GOPAY_MIN_BALANCE_RP,
     GOPAY_PIN,
-    PROXY,
     access_token_expires_at,
     access_token_usable,
     complete_login,
     complete_signup,
     complete_signup_pin,
     ensure_access_token,
+    ensure_state_device,
     check_token_valid,
     check_phone_by_login_methods,
     expire_login_if_needed,
     expire_signup_if_needed,
+    get_qr_id,
+    gopay_proxy_for_state,
     clear_tmp_tokens,
     migrate_active_tokens_to_tmp,
     start_login,
     start_signup,
+    retry_signup_otp,
+    retry_signup_pin_otp,
     start_signup_pin,
 )
 from replay import LinkPaymentOptions, LinkedAppUnlinkOptions, run_link_payment, run_linked_app_unlink
 
 PORT = int(os.environ.get("GOPAY_APP_PORT", "50051"))
 GOPAY_COUNTRY_CODE = os.environ.get("GOPAY_COUNTRY_CODE", "62").strip() or "62"
-GOPAY_SIGNUP_NAME = os.environ.get("GOPAY_SIGNUP_NAME", "gg").strip()
-GOPAY_SIGNUP_EMAIL = os.environ.get("GOPAY_SIGNUP_EMAIL", "gg@example.com").strip()
+GOPAY_SIGNUP_NAME = os.environ.get("GOPAY_SIGNUP_NAME", "").strip()
+GOPAY_SIGNUP_EMAIL = os.environ.get("GOPAY_SIGNUP_EMAIL", "").strip()
 GOPAY_CHANGE_PHONE_CONFIRM_TIMEOUT_SECONDS = float(os.environ.get("GOPAY_CHANGE_PHONE_CONFIRM_TIMEOUT_SECONDS", "8"))
 GOPAY_CHANGE_PHONE_CONFIRM_INTERVAL_SECONDS = float(os.environ.get("GOPAY_CHANGE_PHONE_CONFIRM_INTERVAL_SECONDS", "1"))
 GOPAY_ENVELOPE_SHORTLINK_TIMEOUT_SECONDS = float(os.environ.get("GOPAY_ENVELOPE_SHORTLINK_TIMEOUT_SECONDS", "10"))
@@ -204,7 +208,29 @@ def _client(state) -> GopayClient:
     refresh = ensure_access_token(state)
     if not refresh.get("success") and not access_token_usable(state, 0):
         raise RuntimeError(refresh.get("error", "token refresh failed"))
-    return GopayClient(state.get("token", ""), proxy=PROXY, device=state.get("device"))
+    return GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
+
+
+def _claim_envelope(client: GopayClient, envelope_request_id: str) -> dict:
+    response = client.post(
+        f"{GOPAY_CUSTOMER}/v1/festivals/envelope-requests",
+        body={"envelope_request_id": envelope_request_id},
+    )
+    if int(response.get("status") or 0) == 200:
+        detail = client.get(
+            f"{GOPAY_CUSTOMER}/v1/festivals/envelope-requests/"
+            f"{quote(envelope_request_id, safe='')}"
+        )
+        if int(detail.get("status") or 0) == 200:
+            return {
+                "status": 200,
+                "data": detail.get("data"),
+                "raw": {
+                    "claim": response.get("raw") or response.get("data"),
+                    "detail": detail.get("raw") or detail.get("data"),
+                },
+            }
+    return response
 
 
 def _phone_country_code(explicit: str = "") -> str:
@@ -247,19 +273,36 @@ def _tmp_client(state: dict) -> GopayClient:
     if not _tmp_access_token_usable(state, 0):
         expires_at = access_token_expires_at(token) or int(state.get("_tmp_token_expires_at") or 0)
         raise RuntimeError(f"temporary account token expired: expires_at={expires_at}")
-    return GopayClient(token, proxy=PROXY, device=state.get("device"))
+    return GopayClient(token, proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
 
 
 def _pin(request_pin: str = "") -> str:
     return str(request_pin or GOPAY_PIN or "").strip()
 
 
-def _signup_name() -> str:
-    return GOPAY_SIGNUP_NAME or "gg"
+def _signup_seed(phone: str = "") -> str:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    phone_tail = digits[-6:] if digits else ""
+    return f"{phone_tail}{int(time.time())}{os.urandom(3).hex()}"
 
 
-def _signup_email() -> str:
-    return GOPAY_SIGNUP_EMAIL or "gg@example.com"
+def _signup_name_from_seed(seed: str) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    hex_chars = re.sub(r"[^0-9a-f]", "", str(seed or "").lower())
+    if len(hex_chars) < 2:
+        hex_chars = f"{hex_chars:0>2}"
+    return "".join(alphabet[int(ch, 16) % len(alphabet)] for ch in hex_chars[-2:])
+
+
+def _signup_profile(phone: str = "", name: str = "", email: str = "") -> tuple[str, str]:
+    resolved_name = str(name or GOPAY_SIGNUP_NAME or "").strip()
+    resolved_email = str(email or GOPAY_SIGNUP_EMAIL or "").strip()
+    if resolved_name:
+        return resolved_name, resolved_email
+
+    seed = _signup_seed(phone)
+    resolved_name = _signup_name_from_seed(seed)
+    return resolved_name, resolved_email
 
 
 def _gojek_customer_profile(response: dict) -> dict:
@@ -581,15 +624,10 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                 request.envelope_request_id,
                 request.link,
             )
-            client = _client(state)
-            response = client.get(
-                f"{GOPAY_CUSTOMER}/v1/festivals/envelope-requests/"
-                f"{quote(envelope_request_id, safe='')}"
-            )
+            response = _claim_envelope(_client(state), envelope_request_id)
             raw = response.get("raw") or response.get("data") or {}
             data = response.get("data") if isinstance(response.get("data"), dict) else {}
-            raw_success = raw.get("success") if isinstance(raw, dict) else None
-            success = 200 <= int(response.get("status") or 0) < 300 and raw_success is not False
+            success = int(response.get("status") or 0) == 200
             return gopay_app_pb2.ClaimEnvelopeResponse(
                 success=success,
                 error_message="" if success else _api_error("claim envelope failed", response),
@@ -628,8 +666,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                 return gopay_app_pb2.ChangePhoneStartResponse(
                     success=False, error_message="PHONE_EXHAUSTED")
 
-            device = state.get("device") or generate_device_fingerprint()
-            state["device"] = device
+            ensure_state_device(state)
             c = _client(state)
             profile, profile_error = _load_gojek_customer_profile(c)
             if profile:
@@ -935,23 +972,43 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                     success=False,
                     error_message="signup phone required",
                 )
-            name = str(request.name or GOPAY_SIGNUP_NAME or "").strip()
-            email = str(request.email or GOPAY_SIGNUP_EMAIL or "").strip()
+            name, email = _signup_profile(phone, request.name, request.email)
             country_code = _phone_country_code(request.country_code)
             result = start_signup(state, phone, name, email, country_code, request.otp_channel)
             if not result.get("success"):
                 return gopay_app_pb2.SignupStartResponse(
                     success=False,
                     error_message=result.get("error", "signup start failed"),
+                    raw_json=result.get("raw_json", ""),
                 )
             return gopay_app_pb2.SignupStartResponse(
                 success=True,
                 otp_sent=bool(result.get("otp_sent")),
                 verification_id=result.get("verification_id", ""),
                 verification_method=result.get("method", ""),
+                raw_json=result.get("raw_json", ""),
+                retry_timer_seconds=[int(value) for value in result.get("retry_timer_seconds", []) if str(value).strip().isdigit()],
             )
         except Exception as e:
             return gopay_app_pb2.SignupStartResponse(success=False, error_message=str(e))
+
+    def SignupRetry(self, request, context):
+        try:
+            state = load_state()
+            result = retry_signup_otp(state)
+            if not result.get("success"):
+                return gopay_app_pb2.SignupRetryResponse(
+                    success=False,
+                    error_message=result.get("error", "signup retry failed"),
+                    raw_json=result.get("raw_json", ""),
+                )
+            return gopay_app_pb2.SignupRetryResponse(
+                success=True,
+                otp_sent=bool(result.get("otp_sent")),
+                raw_json=result.get("raw_json", ""),
+            )
+        except Exception as e:
+            return gopay_app_pb2.SignupRetryResponse(success=False, error_message=str(e))
 
     def SignupComplete(self, request, context):
         try:
@@ -963,11 +1020,13 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                 return gopay_app_pb2.SignupCompleteResponse(
                     success=False,
                     error_message=result.get("error", "signup complete failed"),
+                    raw_json=result.get("raw_json", ""),
                 )
             return gopay_app_pb2.SignupCompleteResponse(
                 success=True,
                 phone=result.get("phone", ""),
                 pin_setup_required=bool(result.get("pin_setup_required")),
+                raw_json=result.get("raw_json", ""),
             )
         except Exception as e:
             return gopay_app_pb2.SignupCompleteResponse(success=False, error_message=str(e))
@@ -991,6 +1050,24 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
             )
         except Exception as e:
             return gopay_app_pb2.CreatePinStartResponse(success=False, error_message=str(e))
+
+    def CreatePinRetry(self, request, context):
+        try:
+            state = load_state()
+            if expire_signup_if_needed(state):
+                save_state(state)
+            result = retry_signup_pin_otp(state)
+            if not result.get("success"):
+                return gopay_app_pb2.CreatePinRetryResponse(
+                    success=False,
+                    error_message=result.get("error", "create pin retry failed"),
+                )
+            return gopay_app_pb2.CreatePinRetryResponse(
+                success=True,
+                otp_sent=bool(result.get("otp_sent")),
+            )
+        except Exception as e:
+            return gopay_app_pb2.CreatePinRetryResponse(success=False, error_message=str(e))
 
     def CreatePinComplete(self, request, context):
         try:
@@ -1116,11 +1193,12 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                     stage=state.get("stage", "idle"),
                 )
 
+            signup_name, signup_email = _signup_profile(normalized_phone)
             resp = self.SignupStart(
                 gopay_app_pb2.SignupStartRequest(
                     phone=normalized_phone,
-                    name=_signup_name(),
-                    email=_signup_email(),
+                    name=signup_name,
+                    email=signup_email,
                     country_code=country_code,
                     otp_channel=request.otp_channel,
                 ),
@@ -1335,6 +1413,21 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
             balance_currency=state.get("balance_currency", ""),
         )
 
+    def GetQrId(self, request, context):
+        try:
+            state = load_state()
+            ensure_access_token(state)
+            state = load_state()
+            result = get_qr_id(state)
+            return gopay_app_pb2.GetQrIdResponse(
+                success=bool(result.get("success")),
+                error_message=result.get("error", ""),
+                qr_id=result.get("qr_id", ""),
+                state_json=_state_json(state),
+            )
+        except Exception as e:
+            return gopay_app_pb2.GetQrIdResponse(success=False, error_message=str(e))
+
     def GetReadyAccountToken(self, request, context):
         state = load_state()
         if state.get("stage") == "ready":
@@ -1385,13 +1478,16 @@ for _method_name in (
     "LoginStart",
     "LoginComplete",
     "SignupStart",
+    "SignupRetry",
     "SignupComplete",
     "CreatePinStart",
+    "CreatePinRetry",
     "CreatePinComplete",
     "AuthStart",
     "AuthComplete",
     "CheckTokenValid",
     "ClaimEnvelope",
+    "GetQrId",
     "Unlink",
     "Status",
     "GetReadyAccountToken",

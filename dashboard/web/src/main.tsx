@@ -15,6 +15,7 @@ import {
   Mail,
   Play,
   Plus,
+  QrCode,
   RefreshCcw,
   Save,
   Search,
@@ -23,6 +24,7 @@ import {
   X,
   Zap
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -69,6 +71,12 @@ type CheckoutLinkResponse = {
   checkout_session_id: string;
 };
 
+type ManualAddBalanceConfirmResponse = {
+  success: boolean;
+  job_id: string;
+  error_message?: string;
+};
+
 function snapshotEventID(snapshot: JobSnapshot) {
   return snapshot.event_id || snapshot.job?.updated_at || snapshot.progress?.updated_at_unix || 0;
 }
@@ -87,6 +95,12 @@ function mergeJobSnapshots(prev: JobSnapshot[], snapshot: JobSnapshot, include: 
   const next = prev.filter((item) => item.job?.job_id !== jobID);
   if (!include) return next;
   return [snapshot, ...next].sort((a, b) => snapshotEventID(b) - snapshotEventID(a));
+}
+
+function mergeJobEvents(prev: JobEvent[], event: JobEvent, jobID: string) {
+  if (!event?.event_id || event.job_id !== jobID) return prev;
+  const next = prev.filter((item) => item.event_id !== event.event_id);
+  return [event, ...next].sort((a, b) => b.event_id - a.event_id).slice(0, 80);
 }
 
 type Mailbox = {
@@ -249,9 +263,12 @@ const stepLabels: DisplayLabelMap = {
   gopay_app_deactivate_complete: '完成注销',
   gopay_app_signup: 'GoPay 注册',
   gopay_app_create_pin: '创建 GoPay PIN',
+  gopay_app_add_balance: 'GoPay 加余额',
+  gopay_app_add_balance_confirm: '等待转账确认',
   gopay_app_sms_finish: '结束 GoPay 接码',
   gopay_app_sms_request_more: '追加短信接码',
   gopay_login: 'GoPay 登录',
+  gopay_payment_prepare: '准备 GoPay 支付',
   gopay_payment: 'GoPay 支付',
   probe_plus_trial: '探测 0 元资格',
   probe_tier: '探测套餐',
@@ -269,6 +286,7 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('accounts');
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [selectedJobSnapshot, setSelectedJobSnapshot] = useState<JobSnapshot | null>(null);
+  const [selectedJobEvents, setSelectedJobEvents] = useState<JobEvent[]>([]);
   const [selectedMailbox, setSelectedMailbox] = useState<Mailbox | null>(null);
   const [accountStatus, setAccountStatus] = useState('');
   const [jobStatus, setJobStatus] = useState('');
@@ -283,12 +301,14 @@ function App() {
   const [inboxResponse, setInboxResponse] = useState<InboxResponse | null>(null);
   const [refreshingAccessTokenIds, setRefreshingAccessTokenIds] = useState<Set<string>>(new Set());
   const [loadError, setLoadError] = useState('');
+  const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
   const jobs = jobSnapshots.map((snapshot) => snapshot.job).filter((job): job is Job => !!job);
   const runningJobs = runningJobSnapshots.map((snapshot) => snapshot.job).filter((job): job is Job => !!job);
   const runningJobCount = runningJobs.length;
   const runningAccountIds = new Set(runningJobs.filter((job) => job.account_id).map((job) => job.account_id));
   const selectedJob = selectedJobSnapshot?.job || null;
   const selectedJobProgress = selectedJobSnapshot?.progress || null;
+  const selectedJobID = selectedJob?.job_id || '';
   const runningJobIDsKey = runningJobs.map((job) => job.job_id).sort().join('|');
 
   const applyJobSnapshot = useCallback((snapshot: JobSnapshot) => {
@@ -297,6 +317,16 @@ function App() {
     setRunningJobSnapshots((prev) => mergeJobSnapshots(prev, snapshot, isRunningSnapshot(snapshot)));
     setSelectedJobSnapshot((prev) => prev?.job?.job_id === snapshot.job?.job_id ? snapshot : prev);
   }, [jobStatus]);
+
+  const applyJobEvent = useCallback((jobEvent: JobEvent) => {
+    if (!jobEvent?.job_id) return;
+    if (jobEvent.snapshot) {
+      applyJobSnapshot(jobEvent.snapshot);
+    }
+    if (selectedJobID && jobEvent.job_id === selectedJobID) {
+      setSelectedJobEvents((prev) => mergeJobEvents(prev, jobEvent, selectedJobID));
+    }
+  }, [applyJobSnapshot, selectedJobID]);
 
   async function refresh() {
     setBusy(true);
@@ -450,6 +480,24 @@ function App() {
     }
   }
 
+  async function confirmManualAddBalance(job: Job) {
+    try {
+      const resp = await api<ManualAddBalanceConfirmResponse>(`/api/jobs/${job.job_id}/add-balance/confirm`, {
+        method: 'POST',
+        body: '{}'
+      });
+      if (resp.error_message || !resp.success) {
+        setToast({ kind: 'error', text: resp.error_message || '转账确认失败' });
+        return;
+      }
+      setToast({ kind: 'ok', text: `转账已确认: ${short(resp.job_id || job.job_id)}` });
+      await refreshSelectedJob(job.job_id);
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+      throw err;
+    }
+  }
+
   async function startMailboxRegistration() {
     setMailboxRegistering(true);
     try {
@@ -590,9 +638,7 @@ function App() {
     const source = new EventSource(`/api/jobs/events?${params.toString()}`);
     source.addEventListener('job', (event) => {
       const jobEvent = JSON.parse((event as MessageEvent).data) as JobEvent;
-      if (jobEvent.snapshot) {
-        applyJobSnapshot(jobEvent.snapshot);
-      }
+      applyJobEvent(jobEvent);
     });
     source.addEventListener('error', (event) => {
       const data = (event as MessageEvent).data;
@@ -608,7 +654,42 @@ function App() {
     return () => {
       source.close();
     };
-  }, [runningJobIDsKey, applyJobSnapshot]);
+  }, [runningJobIDsKey, applyJobEvent]);
+
+  useEffect(() => {
+    if (!selectedJobID) {
+      setSelectedJobEvents([]);
+      return;
+    }
+    setSelectedJobEvents([]);
+    const params = new URLSearchParams();
+    params.append('job_id', selectedJobID);
+    const source = new EventSource(`/api/jobs/events?${params.toString()}`);
+    source.addEventListener('job', (event) => {
+      const jobEvent = JSON.parse((event as MessageEvent).data) as JobEvent;
+      applyJobEvent(jobEvent);
+    });
+    source.addEventListener('error', (event) => {
+      const data = (event as MessageEvent).data;
+      if (!data) return;
+      try {
+        const payload = JSON.parse(data) as { error?: string };
+        if (payload.error) setToast({ kind: 'error', text: payload.error });
+      } catch {
+        setToast({ kind: 'error', text: '工作流事件流解析失败' });
+      }
+      source.close();
+    });
+    return () => {
+      source.close();
+    };
+  }, [selectedJobID, applyJobEvent]);
+
+  useEffect(() => {
+    if (!selectedJob || selectedJob.status !== 'RUNNING') return;
+    const id = window.setInterval(() => setNowUnix(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [selectedJob?.job_id, selectedJob?.status]);
 
   useEffect(() => {
     if (!toast) return;
@@ -641,6 +722,7 @@ function App() {
   function closeDetails() {
     setSelectedAccount(null);
     setSelectedJobSnapshot(null);
+    setSelectedJobEvents([]);
     setSelectedMailbox(null);
   }
 
@@ -930,9 +1012,12 @@ function App() {
           <JobDetails
             job={selectedJob}
             progress={selectedJobProgress}
-            onCopy={copyField}
-            onOtpSubmit={submitJobOtp}
-          />
+            events={selectedJobEvents}
+	            nowUnix={nowUnix}
+	            onCopy={copyField}
+	            onOtpSubmit={submitJobOtp}
+	            onManualAddBalanceConfirm={confirmManualAddBalance}
+	          />
         )}
       </DetailDrawer>
 
@@ -1138,11 +1223,14 @@ function AccountOtpPanel({ latestOtp, showSecrets, loading, onCopy }: {
   );
 }
 
-function JobDetails({ job, progress, onCopy, onOtpSubmit }: {
+function JobDetails({ job, progress, events, nowUnix, onCopy, onOtpSubmit, onManualAddBalanceConfirm }: {
   job: Job;
   progress: WorkflowProgress | null;
+  events: JobEvent[];
+  nowUnix: number;
   onCopy: (label: string, value: string) => void;
   onOtpSubmit: (job: Job, otp: string) => Promise<void>;
+  onManualAddBalanceConfirm: (job: Job) => Promise<void>;
 }) {
   return (
     <div className="details">
@@ -1162,9 +1250,15 @@ function JobDetails({ job, progress, onCopy, onOtpSubmit }: {
           </>
         )}
         <KV label="更新时间" value={formatJobTime(job.updated_at)} onCopy={onCopy} />
-        <KV label="错误" value={job.error_message || '-'} onCopy={onCopy} />
-        {canSubmitOtp(job) && <OtpSubmitter job={job} onSubmit={onOtpSubmit} />}
-        <div className="timeline">
+	        <KV label="错误" value={job.error_message || '-'} onCopy={onCopy} />
+	        {canSubmitOtp(job) && <OtpSubmitter job={job} onSubmit={onOtpSubmit} />}
+	        <ManualAddBalancePanel
+	          job={job}
+	          progress={progress}
+	          onConfirm={onManualAddBalanceConfirm}
+	          onCopy={onCopy}
+	        />
+	        <div className="timeline">
           {(job.steps || []).map((step) => {
             const progressText = stepProgressText(step, progress);
             const isCurrentStep = progress?.step_name === step.step_name && job.status === 'RUNNING';
@@ -1174,7 +1268,7 @@ function JobDetails({ job, progress, onCopy, onOtpSubmit }: {
                   <strong>{stepText(step.step_name)} <small className="rawHint">{step.step_name}</small></strong>
                   <span className="stepState">
                     {isCurrentStep && <small className="stepLive">当前</small>}
-                    {stepDuration(step)}
+                    {stepDuration(step, nowUnix)}
                     <StatusBadge status={step.status} />
                   </span>
                 </div>
@@ -1197,7 +1291,38 @@ function JobDetails({ job, progress, onCopy, onOtpSubmit }: {
           })}
           {(!job.steps || job.steps.length === 0) && <EmptyBlock text="暂无步骤明细。" />}
         </div>
+        <WorkflowEvents events={events} />
       </section>
+    </div>
+  );
+}
+
+function WorkflowEvents({ events }: { events: JobEvent[] }) {
+  return (
+    <div className="workflowEvents">
+      <div className="sectionTitle">
+        <h3>事件</h3>
+        <span className="muted">{events.length}</span>
+      </div>
+      <div className="eventList">
+        {events.length === 0 && <EmptyBlock text="暂无事件流数据。" />}
+        {events.slice(0, 30).map((event) => {
+          const snapshot = event.snapshot;
+          const job = snapshot?.job;
+          const progress = snapshot?.progress;
+          const step = progress?.step_name || job?.last_step || '';
+          const status = progress?.status || job?.status || '';
+          return (
+            <div className="eventItem" key={event.event_id}>
+              <div>
+                <strong>{eventText(event.event_type)}</strong>
+                <span>{step ? stepText(step) : '-'}</span>
+              </div>
+              <small>{status ? statusText(status.toUpperCase()) : '-'} · {eventTime(event)}</small>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1240,6 +1365,84 @@ function OtpSubmitter({ job, onSubmit }: {
           <KeyRound size={14} /> 提交
         </Button>
       </div>
+    </div>
+  );
+}
+
+function ManualAddBalancePanel({ job, progress, onConfirm, onCopy }: {
+  job: Job;
+  progress: WorkflowProgress | null;
+  onConfirm: (job: Job) => Promise<void>;
+  onCopy: (label: string, value: string) => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const balance = manualAddBalanceView(job);
+  if (!balance || balance.method !== 'manual_transfer') return null;
+
+  const transfer = balance.transfer;
+  const canConfirm = canConfirmManualAddBalance(job, progress, balance);
+  async function confirm() {
+    setSubmitting(true);
+    try {
+      await onConfirm(job);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="manualBalancePanel">
+      <div className="manualBalanceHead">
+        <span><QrCode size={15} /> 手动转账</span>
+        <StatusBadge status={canConfirm ? 'RUNNING' : balance.status === 'confirmed' ? 'SUCCEEDED' : 'RUNNING'} />
+      </div>
+      <div className="transferBox">
+        <TransferQRCode payload={transfer.qr_payload} />
+        <div className="transferMeta">
+          <strong>{transfer.amount > 0 ? `${transfer.amount} ${transfer.currency || 'IDR'}` : (transfer.currency || 'IDR')}</strong>
+          <span>{transfer.instructions || '转账后点击确认继续流程。'}</span>
+          <div className="transferActions">
+            <Button className="copyButton" {...buttonHint('复制二维码内容')} disabled={!transfer.qr_payload} onClick={() => onCopy('二维码内容', transfer.qr_payload)}>
+              <Copy size={14} />
+            </Button>
+            <Button className="primaryButton" disabled={!canConfirm || submitting} onClick={() => void confirm()}>
+              <CheckCircle2 size={14} /> 已转账，继续
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransferQRCode({ payload }: { payload: string }) {
+  const [dataUrl, setDataUrl] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setDataUrl('');
+    if (!payload) return () => {
+      cancelled = true;
+    };
+    QRCode.toDataURL(payload, { width: 224, margin: 1, errorCorrectionLevel: 'M' })
+      .then((value) => {
+        if (!cancelled) setDataUrl(value);
+      })
+      .catch(() => {
+        if (!cancelled) setDataUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [payload]);
+
+  if (dataUrl) {
+    return <img className="transferQr" src={dataUrl} alt="GoPay 转账二维码" />;
+  }
+  return (
+    <div className="transferQr transferQrEmpty">
+      <QrCode size={34} />
+      <span>未配置二维码</span>
     </div>
   );
 }
@@ -2052,6 +2255,17 @@ function stepText(step: string) {
   return stepLabels[step] || step || '-';
 }
 
+function eventText(eventType: string) {
+  const labels: DisplayLabelMap = {
+    job_created: '创建',
+    job_updated: '更新',
+    job_step_started: '步骤开始',
+    job_step_progress: '步骤进度',
+    job_step_completed: '步骤完成'
+  };
+  return labels[eventType] || eventType || '事件';
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
   const data = await resp.json().catch(() => ({}));
@@ -2141,6 +2355,29 @@ function isUserAlreadyExistsAccount(account: Account) {
 
 function canSubmitOtp(job: Job) {
   return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'REGISTER_AND_ACTIVATE');
+}
+
+function manualAddBalanceView(job: Job) {
+  const data = stepResultData(job, 'gopay_app_add_balance');
+  if (!data) return null;
+  const transfer = objectValue(data.manual_transfer);
+  return {
+    method: stringValue(data.method),
+    status: stringValue(data.status),
+    transfer: {
+      qr_payload: stringValue(transfer.qr_payload),
+      instructions: stringValue(transfer.instructions),
+      amount: numberValue(transfer.amount),
+      currency: stringValue(transfer.currency) || 'IDR'
+    }
+  };
+}
+
+function canConfirmManualAddBalance(job: Job, progress: WorkflowProgress | null, balance: ReturnType<typeof manualAddBalanceView>) {
+  return !!balance &&
+    job.status === 'RUNNING' &&
+    job.action === 'GOPAY_PAYMENT' &&
+    (progress?.step_name === 'gopay_app_add_balance_confirm' || progress?.step_name === 'gopay_app_add_balance');
 }
 
 function stepResultData(job: Job, stepName: string): any | null {
@@ -2309,13 +2546,19 @@ function formatJobTime(value: string | number) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function stepDuration(step: Step) {
-	if (!step.started_at) return null;
-	const end = step.completed_at || Math.floor(Date.now() / 1000);
-	const seconds = Math.max(0, end - step.started_at);
-	if (seconds < 1) return <small className="stepTime">刚刚</small>;
-	if (seconds < 60) return <small className="stepTime">{seconds}s</small>;
-	return <small className="stepTime">{Math.floor(seconds / 60)}m {seconds % 60}s</small>;
+function stepDuration(step: Step, nowUnix?: number) {
+  if (!step.started_at) return null;
+  const end = step.completed_at || nowUnix || Math.floor(Date.now() / 1000);
+  const seconds = Math.max(0, end - step.started_at);
+  if (seconds < 1) return <small className="stepTime">刚刚</small>;
+  if (seconds < 60) return <small className="stepTime">{seconds}s</small>;
+  return <small className="stepTime">{Math.floor(seconds / 60)}m {seconds % 60}s</small>;
+}
+
+function eventTime(event: JobEvent) {
+  const snapshot = event.snapshot;
+  const updated = snapshot?.progress?.updated_at_unix || snapshot?.job?.updated_at || 0;
+  return formatUnix(updated);
 }
 
 function stepProgressText(step: Step, workflowProgress?: WorkflowProgress | null) {
@@ -2383,6 +2626,10 @@ function stepDetailData(step?: Step): Record<string, any> | null {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : '';
+}
+
+function objectValue(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' ? value as Record<string, any> : {};
 }
 
 function numberValue(value: unknown) {

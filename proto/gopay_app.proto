@@ -109,7 +109,7 @@ message SignupStartRequest {
   string name = 2;
   string email = 3;
   string country_code = 4; // 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62
-  string otp_channel = 5;  // sms 或 wa；由服务映射为 otp_sms / otp_wa
+  string otp_channel = 5;  // sms 或 wa；为空默认 sms；由服务映射为 otp_sms / otp_wa
   string state_json = 100;
 }
 
@@ -119,6 +119,20 @@ message SignupStartResponse {
   bool otp_sent = 3;
   string verification_id = 4;
   string verification_method = 5;
+  string raw_json = 6; // 上游原始响应 JSON
+  repeated int32 retry_timer_seconds = 7;
+  string state_json = 100;
+}
+
+message SignupRetryRequest {
+  string state_json = 100;
+}
+
+message SignupRetryResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool otp_sent = 3;
+  string raw_json = 4; // 上游原始响应 JSON
   string state_json = 100;
 }
 
@@ -132,12 +146,13 @@ message SignupCompleteResponse {
   string error_message = 2;
   string phone = 3;
   bool pin_setup_required = 4;
+  string raw_json = 5; // 上游原始响应 JSON
   string state_json = 100;
 }
 
 message CreatePinStartRequest {
   string pin = 1;
-  string otp_channel = 2;  // sms 或 wa；由服务映射为 otp_sms / otp_wa
+  string otp_channel = 2;  // sms 或 wa；为空默认 sms；由服务映射为 otp_sms / otp_wa
   string state_json = 100;
 }
 
@@ -147,6 +162,17 @@ message CreatePinStartResponse {
   bool otp_sent = 3;
   string verification_id = 4;
   string verification_method = 5;
+  string state_json = 100;
+}
+
+message CreatePinRetryRequest {
+  string state_json = 100;
+}
+
+message CreatePinRetryResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool otp_sent = 3;
   string state_json = 100;
 }
 
@@ -225,7 +251,7 @@ message CheckTokenValidResponse {
 // === GoPay 红包 ===
 
 message ClaimEnvelopeRequest {
-  string envelope_request_id = 1; // 例如 6a070b928feaf260b5a0b201；为空时从 link 提取
+  string envelope_request_id = 1; // 为空时从 link 提取
   string link = 2;                // app.gopay 短链、gopay:// deeplink 或 customer API URL
   string state_json = 100;
 }
@@ -302,6 +328,19 @@ message CheckDeactivationRequest {
 message CheckDeactivationResponse {
   bool completed = 1;
   int64 remaining_seconds = 2;
+  string state_json = 100;
+}
+
+// === 收款二维码 ===
+
+message GetQrIdRequest {
+  string state_json = 100;
+}
+
+message GetQrIdResponse {
+  bool success = 1;
+  string error_message = 2;
+  string qr_id = 3;
   string state_json = 100;
 }
 
@@ -405,8 +444,10 @@ service GopayAppService {
 
   // 注册（四步）
   rpc SignupStart(SignupStartRequest) returns (SignupStartResponse);
+  rpc SignupRetry(SignupRetryRequest) returns (SignupRetryResponse);
   rpc SignupComplete(SignupCompleteRequest) returns (SignupCompleteResponse);
   rpc CreatePinStart(CreatePinStartRequest) returns (CreatePinStartResponse);
+  rpc CreatePinRetry(CreatePinRetryRequest) returns (CreatePinRetryResponse);
   rpc CreatePinComplete(CreatePinCompleteRequest) returns (CreatePinCompleteResponse);
 
   // 登录 / 注册入口
@@ -422,6 +463,7 @@ service GopayAppService {
 
   // 查询
   rpc Status(StatusRequest) returns (StatusResponse);
+  rpc GetQrId(GetQrIdRequest) returns (GetQrIdResponse);
   rpc GetReadyAccountToken(GetReadyAccountTokenRequest) returns (GetReadyAccountTokenResponse);
   rpc CheckDeactivation(CheckDeactivationRequest) returns (CheckDeactivationResponse);
 

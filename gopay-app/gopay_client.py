@@ -28,13 +28,20 @@ GOPAY_CUSTOMER_SLIM_GET_PATHS = {
     "/v1/users/profile",
     "/v1/payment-options/balances",
     "/v1/payment-options/profiles",
+    "/v1/user/wallet-card/balance",
 }
 GOPAY_CUSTOMER_APP_HEADER_PATHS = {
+    "/v1/users/profile",
     "/v1/qris/payments",
     "/v2/customer/payment-options/checkout/list",
     "/v1/customer/payment-options/settings/last-used",
     "/v1/promotions/evaluate",
+    "/api/v1/festival-envelopes/claim",
+    "/api/v1/users/deactivate",
+    "/api/v1/users/deactivate/check",
+    "/api/v1/users/pin/challenges",
     "/api/v1/users/pin/tokens",
+    "/api/v1/users/pin/tokens/nb",
     "/api/v1/users/pins/allowed",
     "/api/v2/users/pins/setup/tokens",
     "/cvs/v1/methods",
@@ -49,24 +56,10 @@ GOJEK_ACTIVITY_PATHS = {
 }
 GOJEK_APP_HEADER_PATHS = {
     "/courier/v1/token",
+    "/v7/customers/signup",
 }
 GOPAY_CUSTOMER_LINKED_APP_PATH = "/v1/linkedapps"
 GOPAY_CUSTOMER_LINK_PREFIX = "/v1/links/"
-
-# 手机品牌/型号池
-PHONE_MODELS = [
-    ("Samsung", "samsung, SM-G991B"),
-    ("Samsung", "samsung, SM-A525F"),
-    ("Samsung", "samsung, SM-S908B"),
-    ("Xiaomi", "Xiaomi, M2101K6G"),
-    ("Xiaomi", "Xiaomi, 22071219CG"),
-    ("OPPO", "OPPO, CPH2211"),
-    ("vivo", "vivo, V2111"),
-    ("Google", "Google, sdk_gphone_arm64"),
-    ("realme", "realme, RMX3085"),
-    ("OnePlus", "OnePlus, LE2115"),
-]
-
 
 def _random_d1() -> str:
     return ":".join(f"{b:02X}" for b in os.urandom(32))
@@ -83,21 +76,99 @@ def _random_appsflyer_id() -> str:
     )
 
 
-def generate_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
-    """生成并持久化到 state 的设备/header 种子。"""
-    if randomize_model is None:
-        randomize_model = os.environ.get("GOPAY_RANDOM_DEVICE") == "1"
-    if randomize_model:
-        make, model = random.choice(PHONE_MODELS)
-    else:
-        make, model = ("Google", "Google, sdk_gphone_arm64")
+def _random_wifi_mac() -> str:
+    return "02:" + ":".join(f"{b:02x}" for b in os.urandom(5))
 
-    android_version = os.environ.get("GOPAY_ANDROID_VERSION", "11")
+
+def _random_wifi_ssid() -> str:
+    prefix = _random_brand_word()
+    return f"{prefix}_{os.urandom(6).hex()}"
+
+
+def _random_letters(length: int, alphabet: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ") -> str:
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def _random_brand_word() -> str:
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    vowels = "aeiou"
+    syllables = []
+    for _ in range(random.randint(2, 4)):
+        syllables.append(random.choice(consonants) + random.choice(vowels))
+    if random.random() < 0.35:
+        syllables.append(random.choice(("n", "r", "s", "x")))
+    return "".join(syllables).capitalize()
+
+
+def _random_phone_make() -> str:
+    return _random_brand_word()
+
+
+def _random_phone_model(make: str) -> str:
+    prefix = "".join(ch for ch in make.upper() if ch.isalpha())[:2]
+    if len(prefix) < 2:
+        prefix = _random_letters(2)
+    family = random.choice(("A", "C", "M", "N", "P", "R", "S", "V", "X", "Z"))
+    number = random.randint(1000, 9999)
+    suffix = _random_letters(random.randint(0, 2))
+    separator = random.choice(("-", " "))
+    return f"{make}, {prefix}{family}{separator}{number}{suffix}"
+
+
+def _random_screen() -> str:
+    width = random.randrange(720, 1448, 16)
+    aspect = random.uniform(1.95, 2.28)
+    height = int(width * aspect)
+    height = min(3200, max(width + 640, (height // 8) * 8))
+    screen = f"{width}x{height}"
+    return "1088x2160" if screen == "1080x2148" else screen
+
+
+def _random_android_version() -> str:
+    return str(random.randint(10, 14))
+
+
+def _random_device_shape() -> dict:
+    make = _random_phone_make()
+    return {
+        "make": make,
+        "model": _random_phone_model(make),
+        "screen": _random_screen(),
+        "android_version": _random_android_version(),
+    }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "")
+    if value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _use_env_identity(use_env_identity: Optional[bool]) -> bool:
+    if use_env_identity is not None:
+        return bool(use_env_identity)
+    return _env_flag("GOPAY_STATIC_DEVICE_IDENTITY")
+
+
+def _identity_value(key: str, fallback, use_env_identity: bool) -> str:
+    if use_env_identity:
+        value = os.environ.get(key, "")
+        if value:
+            return value
+    return fallback() if callable(fallback) else str(fallback)
+
+
+def generate_device_fingerprint(randomize_model: Optional[bool] = None, use_env_identity: Optional[bool] = None) -> dict:
+    """生成并持久化到 state 的设备/header 种子。"""
+    use_env_identity = _use_env_identity(use_env_identity)
+    shape = _random_device_shape()
+    make, model = shape["make"], shape["model"]
+    android_version = _identity_value("GOPAY_ANDROID_VERSION", shape["android_version"], use_env_identity)
     app_version = os.environ.get("GOPAY_APP_VERSION", "2.7.0")
     app_id = os.environ.get("GOPAY_APP_ID", "com.gojek.gopay")
     app_build = os.environ.get("GOPAY_APP_BUILD", "2070")
-    resolutions = ["1080x2400", "1080x2340", "1080x2148", "1080x1920", "720x1600"]
-    d1 = os.environ.get("GOPAY_D1", "")
+    d1 = os.environ.get("GOPAY_D1", "") if use_env_identity else ""
     if not d1 and os.environ.get("GOPAY_RANDOM_D1", "1") == "1":
         d1 = _random_d1()
 
@@ -106,31 +177,41 @@ def generate_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
         "x-appversion": app_version,
         "x-appid": app_id,
         "x-platform": "Android",
-        "x-uniqueid": os.environ.get("GOPAY_UNIQUE_ID", os.urandom(8).hex()),
+        "x-uniqueid": _identity_value("GOPAY_UNIQUE_ID", lambda: os.urandom(8).hex(), use_env_identity),
         "x-phonemake": make,
         "x-phonemodel": model,
-        "x-deviceos": os.environ.get("GOPAY_DEVICE_OS", f"Android, {android_version}"),
+        "x-deviceos": _identity_value("GOPAY_DEVICE_OS", f"Android, {android_version}", use_env_identity),
         "x-user-type": "customer",
-        "x-session-id": os.environ.get("GOPAY_SESSION_ID", str(uuid.uuid4())),
-        "transaction-id": os.environ.get("GOPAY_TRANSACTION_ID", str(uuid.uuid4())),
-        "user-agent": os.environ.get(
+        "x-session-id": _identity_value("GOPAY_SESSION_ID", lambda: str(uuid.uuid4()), use_env_identity),
+        "transaction-id": _identity_value("GOPAY_TRANSACTION_ID", lambda: str(uuid.uuid4()), use_env_identity),
+        "user-agent": _identity_value(
             "GOPAY_USER_AGENT",
             f"GoPay/{app_version} ({app_id}; build:{app_build}; Android, {android_version})",
+            use_env_identity,
         ),
         "d1": d1,
         "x-e2": os.environ.get("GOPAY_X_E2", DEFAULT_X_E2),
         "adjts": os.environ.get("GOPAY_ADJTS", "host:D"),
-        "m1_appsflyer_id": os.environ.get("GOPAY_APPSFLYER_ID", _random_appsflyer_id()),
-        "m1_widevine_id": os.environ.get("GOPAY_WIDEVINE_ID", _random_widevine_id()),
-        "m1_screen": os.environ.get("GOPAY_SCREEN", random.choice(resolutions)),
-        "m1_wifi_mac": os.environ.get("GOPAY_WIFI_MAC", "02:00:00:00:00:00"),
-        "m1_signature": os.environ.get("GOPAY_M1_SIGNATURE", os.urandom(16).hex()),
-        "user-uuid": os.environ.get("GOPAY_USER_UUID", ""),
-        "x-devicetoken": os.environ.get("GOPAY_DEVICE_TOKEN", ""),
-        "x-location": os.environ.get("GOPAY_LOCATION", ""),
-        "x-location-accuracy": os.environ.get("GOPAY_LOCATION_ACCURACY", ""),
+        "m1_appsflyer_id": _identity_value("GOPAY_APPSFLYER_ID", _random_appsflyer_id, use_env_identity),
+        "m1_widevine_id": _identity_value("GOPAY_WIDEVINE_ID", _random_widevine_id, use_env_identity),
+        "m1_screen": _identity_value("GOPAY_SCREEN", shape["screen"], use_env_identity),
+        "m1_wifi_mac": _identity_value("GOPAY_WIFI_MAC", _random_wifi_mac, use_env_identity),
+        "m1_wifi_ssid": _random_wifi_ssid(),
+        "m1_connection_id": str(random.randint(100000, 999999)),
+        "m1_signature": _identity_value("GOPAY_M1_SIGNATURE", lambda: os.urandom(16).hex(), use_env_identity),
+        "m1_device_uuid": str(uuid.uuid4()),
+        "user-uuid": _identity_value("GOPAY_USER_UUID", "", use_env_identity),
+        "x-devicetoken": _identity_value("GOPAY_DEVICE_TOKEN", "", use_env_identity),
+        "x-location": _identity_value("GOPAY_LOCATION", lambda: f"{round(-6.2 + random.uniform(-0.05, 0.05), 7)},{round(106.8 + random.uniform(-0.05, 0.05), 7)}", use_env_identity),
+        "x-location-accuracy": _identity_value("GOPAY_LOCATION_ACCURACY", lambda: f"0.0{random.randint(10, 99)}999999552965164", use_env_identity),
         "gojek-country-code": os.environ.get("GOPAY_GOJEK_COUNTRY_CODE", "ID"),
     }
+
+
+def generate_random_device_fingerprint(randomize_model: Optional[bool] = None) -> dict:
+    if randomize_model is None:
+        randomize_model = True
+    return generate_device_fingerprint(randomize_model=randomize_model, use_env_identity=False)
 
 
 # 默认设备（可被覆盖）
@@ -162,53 +243,66 @@ def _device_get(device: dict, key: str, default: str = "") -> str:
 
 
 def _ensure_device_defaults(device: dict) -> dict:
+    use_env_identity = _use_env_identity(None)
+    shape = _random_device_shape()
+    android_version = _identity_value("GOPAY_ANDROID_VERSION", shape["android_version"], use_env_identity)
     device.setdefault("x-apptype", "GOPAY")
     device.setdefault("x-appversion", os.environ.get("GOPAY_APP_VERSION", "2.7.0"))
     device.setdefault("x-appid", os.environ.get("GOPAY_APP_ID", "com.gojek.gopay"))
     device.setdefault("x-platform", "Android")
-    device.setdefault("x-uniqueid", os.environ.get("GOPAY_UNIQUE_ID", os.urandom(8).hex()))
-    device.setdefault("x-phonemake", "Google")
-    device.setdefault("x-phonemodel", "Google, sdk_gphone_arm64")
-    device.setdefault("x-deviceos", os.environ.get("GOPAY_DEVICE_OS", "Android, 11"))
+    device.setdefault("x-uniqueid", _identity_value("GOPAY_UNIQUE_ID", lambda: os.urandom(8).hex(), use_env_identity))
+    device.setdefault("x-phonemake", shape["make"])
+    device.setdefault("x-phonemodel", shape["model"])
+    device.setdefault("x-deviceos", _identity_value("GOPAY_DEVICE_OS", f"Android, {android_version}", use_env_identity))
     device.setdefault("x-user-type", "customer")
-    device.setdefault("x-session-id", os.environ.get("GOPAY_SESSION_ID", str(uuid.uuid4())))
-    device.setdefault("transaction-id", os.environ.get("GOPAY_TRANSACTION_ID", str(uuid.uuid4())))
+    device.setdefault("x-session-id", _identity_value("GOPAY_SESSION_ID", lambda: str(uuid.uuid4()), use_env_identity))
+    device.setdefault("transaction-id", _identity_value("GOPAY_TRANSACTION_ID", lambda: str(uuid.uuid4()), use_env_identity))
     device.setdefault(
         "user-agent",
-        os.environ.get(
+        _identity_value(
             "GOPAY_USER_AGENT",
-            f"GoPay/{device['x-appversion']} ({device['x-appid']}; build:{os.environ.get('GOPAY_APP_BUILD', '2070')}; Android, 11)",
+            f"GoPay/{device['x-appversion']} ({device['x-appid']}; build:{os.environ.get('GOPAY_APP_BUILD', '2070')}; Android, {android_version})",
+            use_env_identity,
         ),
     )
     if not _device_get(device, "d1"):
-        device["d1"] = os.environ.get("GOPAY_D1", "") or _random_d1()
+        device["d1"] = _identity_value("GOPAY_D1", _random_d1, use_env_identity)
     device.setdefault("x-e2", os.environ.get("GOPAY_X_E2", DEFAULT_X_E2))
     device.setdefault("adjts", os.environ.get("GOPAY_ADJTS", "host:D"))
-    device.setdefault("m1_appsflyer_id", os.environ.get("GOPAY_APPSFLYER_ID", _random_appsflyer_id()))
-    device.setdefault("m1_widevine_id", os.environ.get("GOPAY_WIDEVINE_ID", _random_widevine_id()))
-    device.setdefault("m1_screen", os.environ.get("GOPAY_SCREEN", "1080x2148"))
-    device.setdefault("m1_wifi_mac", os.environ.get("GOPAY_WIFI_MAC", "02:00:00:00:00:00"))
-    device.setdefault("m1_signature", os.environ.get("GOPAY_M1_SIGNATURE", os.urandom(16).hex()))
-    device.setdefault("user-uuid", os.environ.get("GOPAY_USER_UUID", ""))
-    device.setdefault("x-devicetoken", os.environ.get("GOPAY_DEVICE_TOKEN", ""))
-    device.setdefault("x-location", os.environ.get("GOPAY_LOCATION", ""))
-    device.setdefault("x-location-accuracy", os.environ.get("GOPAY_LOCATION_ACCURACY", ""))
+    device.setdefault("m1_appsflyer_id", _identity_value("GOPAY_APPSFLYER_ID", _random_appsflyer_id, use_env_identity))
+    device.setdefault("m1_widevine_id", _identity_value("GOPAY_WIDEVINE_ID", _random_widevine_id, use_env_identity))
+    device.setdefault("m1_screen", _identity_value("GOPAY_SCREEN", shape["screen"], use_env_identity))
+    device.setdefault("m1_wifi_mac", _identity_value("GOPAY_WIFI_MAC", _random_wifi_mac, use_env_identity))
+    device.setdefault("m1_wifi_ssid", _random_wifi_ssid())
+    device.setdefault("m1_connection_id", str(random.randint(100000, 999999)))
+    device.setdefault("m1_signature", _identity_value("GOPAY_M1_SIGNATURE", lambda: os.urandom(16).hex(), use_env_identity))
+    device.setdefault("m1_device_uuid", str(uuid.uuid4()))
+    device.setdefault("user-uuid", _identity_value("GOPAY_USER_UUID", "", use_env_identity))
+    device.setdefault("x-devicetoken", _identity_value("GOPAY_DEVICE_TOKEN", "", use_env_identity))
+    device.setdefault("x-location", _identity_value("GOPAY_LOCATION", lambda: f"{round(-6.2 + random.uniform(-0.05, 0.05), 7)},{round(106.8 + random.uniform(-0.05, 0.05), 7)}", use_env_identity))
+    device.setdefault("x-location-accuracy", _identity_value("GOPAY_LOCATION_ACCURACY", lambda: f"0.0{random.randint(10, 99)}999999552965164", use_env_identity))
     device.setdefault("gojek-country-code", os.environ.get("GOPAY_GOJEK_COUNTRY_CODE", "ID"))
     return device
+
+
+def ensure_device_fingerprint(device: Optional[dict] = None) -> dict:
+    return _ensure_device_defaults(device if isinstance(device, dict) else {})
 
 
 def _current_x_m1(device: dict) -> str:
     return ",".join(
         [
             f"3:{_device_get(device, 'm1_appsflyer_id', _random_appsflyer_id())}",
-            "4:5939",
-            "5:|0|4",
+            f"4:{_device_get(device, 'm1_connection_id', '5939')}",
+            f"5:{_device_get(device, 'x-phonemake')}|3200|2",
             f"6:{_device_get(device, 'm1_wifi_mac', '02:00:00:00:00:00')}",
-            "7:<unknown ssid>",
+            f"7:{_device_get(device, 'm1_wifi_ssid', '<unknown ssid>')}",
             f"8:{_device_get(device, 'm1_screen', '1080x2148')}",
+            "9:passive,network,fused,gps",
             "10:1",
             f"11:{_device_get(device, 'm1_widevine_id', _random_widevine_id())}",
             f"15:{_device_get(device, 'm1_signature')}",
+            f"16:{_device_get(device, 'm1_device_uuid')}",
         ]
     )
 
@@ -234,7 +328,7 @@ def _is_gopay_customer_app_header_path(path: str) -> bool:
         return True
     if path.startswith("/v3/payments/") and path.endswith("/capture"):
         return True
-    if path.startswith("/api/v2/challenges/") and path.endswith("/pin-page"):
+    if path.startswith("/api/v2/challenges/") and (path.endswith("/pin-page") or path.endswith("/pin-page/nb")):
         return True
     return False
 
@@ -281,24 +375,32 @@ def generate_xe1(
     return xe1, body_md5
 
 
+def _header_value(headers: dict, name: str, default=None):
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value or "")
+    return default
+
+
 class GopayClient:
     def __init__(self, token: str, proxy: Optional[str] = None, device: Optional[dict] = None):
         self.token = token
         self.proxy = proxy
-        self.device = _ensure_device_defaults(device or DEVICE)
+        self.device = ensure_device_fingerprint(device)
         self.session = requests.Session()
         self.session.headers.clear()
 
     def new_fingerprint(self):
         """切换到新的随机设备指纹"""
-        self.device = generate_device_fingerprint(randomize_model=True)
+        self.device = generate_random_device_fingerprint(randomize_model=True)
         return self.device
 
     def _headers(self, method: str, url: str, body_str: str, extra_headers: Optional[dict]) -> dict:
         host = _security_host(url)
         path = _security_path(url)
         x_m1 = _current_x_m1(self.device)
-        xe1, body_md5 = generate_xe1(method, url, body_str, self.token, self.device, x_m1=x_m1)
+        body_md5 = hashlib.md5(body_str.encode()).hexdigest() if body_str else DEFAULT_EMPTY_MD5
         has_body = body_str != ""
         headers = {
             "X-AppVersion": _device_get(self.device, "x-appversion", "2.7.0"),
@@ -318,7 +420,6 @@ class GopayClient:
             "Accept-Language": "en-ID",
             "X-User-Locale": "en_ID",
             "X-M1": x_m1,
-            "X-E1": xe1,
             "X-E2": _device_get(self.device, "x-e2", DEFAULT_X_E2),
             "X-E3": body_md5,
             "AdjTs": _device_get(self.device, "adjts", "host:D"),
@@ -334,20 +435,25 @@ class GopayClient:
                 "X-AppVersion": _device_get(self.device, "x-appversion", "2.7.0"),
                 "X-M1": x_m1,
                 "Gojek-Country-Code": _device_get(self.device, "gojek-country-code", "ID"),
+                "X-Request-ID": str(uuid.uuid1()),
                 "X-UniqueId": _device_get(self.device, "x-uniqueid"),
                 "X-PhoneMake": _device_get(self.device, "x-phonemake", "Google"),
                 "X-Help-Version": _device_get(self.device, "x-appversion", "2.7.0"),
-                "X-E1": xe1,
+                "X-Location": _device_get(self.device, "x-location"),
+                "X-Location-Accuracy": _device_get(self.device, "x-location-accuracy"),
                 "X-DeviceOS": _device_get(self.device, "x-deviceos", "Android, 11"),
                 "X-User-Type": _device_get(self.device, "x-user-type", "customer"),
                 "User-Agent": _device_get(self.device, "user-agent"),
                 "X-AppId": _device_get(self.device, "x-appid", "com.gojek.gopay"),
                 "Gojek-Timezone": os.environ.get("GOPAY_TIMEZONE", "Asia/Jakarta"),
+                "X-AuthSDK-Version": os.environ.get("GOPAY_AUTHSDK_VERSION", "1.0.0"),
                 "X-AppType": _device_get(self.device, "x-apptype", "GOPAY"),
                 "X-User-Locale": os.environ.get("GOPAY_USER_LOCALE", "en_ID"),
                 "X-DeviceToken": _device_get(self.device, "x-devicetoken"),
                 "X-E2": _device_get(self.device, "x-e2", DEFAULT_X_E2),
+                "X-CVSDK-Version": os.environ.get("GOPAY_CVSDK_VERSION", "1.0.0"),
                 "Accept-Language": os.environ.get("GOPAY_ACCEPT_LANGUAGE", "en-ID"),
+                "Transaction-ID": _device_get(self.device, "transaction-id"),
                 "X-PhoneModel": _device_get(self.device, "x-phonemodel", "Google, sdk_gphone_arm64"),
                 "X-Platform": _device_get(self.device, "x-platform", "Android"),
             }
@@ -368,7 +474,6 @@ class GopayClient:
                 "X-UniqueId": _device_get(self.device, "x-uniqueid"),
                 "X-PhoneMake": _device_get(self.device, "x-phonemake", "Google"),
                 "X-Help-Version": _device_get(self.device, "x-appversion", "2.7.0"),
-                "X-E1": xe1,
                 "User-Agent": _device_get(self.device, "user-agent"),
                 "X-DeviceOS": _device_get(self.device, "x-deviceos", "Android, 11"),
                 "X-User-Type": _device_get(self.device, "x-user-type", "customer"),
@@ -393,26 +498,7 @@ class GopayClient:
         elif host == "customer.gopayapi.com" and _is_gopay_customer_app_header_path(path):
             headers = app_headers()
         elif host == "customer.gopayapi.com" and method == "GET" and path in GOPAY_CUSTOMER_SLIM_GET_PATHS:
-            headers = {
-                "Accept-Encoding": "gzip",
-                "X-AppVersion": _device_get(self.device, "x-appversion", "2.7.0"),
-                "X-UniqueId": _device_get(self.device, "x-uniqueid"),
-                "X-PhoneMake": _device_get(self.device, "x-phonemake", "Google"),
-                "X-E1": xe1,
-                "X-DeviceOS": _device_get(self.device, "x-deviceos", "Android, 11"),
-                "X-User-Type": _device_get(self.device, "x-user-type", "customer"),
-                "User-Agent": _device_get(self.device, "user-agent"),
-                "X-AppId": _device_get(self.device, "x-appid", "com.gojek.gopay"),
-                "X-AppType": _device_get(self.device, "x-apptype", "GOPAY"),
-                "X-E2": _device_get(self.device, "x-e2", DEFAULT_X_E2),
-                "X-M1": x_m1,
-                "X-PhoneModel": _device_get(self.device, "x-phonemodel", "Google, sdk_gphone_arm64"),
-                "X-Platform": _device_get(self.device, "x-platform", "Android"),
-                "Accept-Language": os.environ.get("GOPAY_ACCEPT_LANGUAGE", "en-ID"),
-                "X-User-Locale": os.environ.get("GOPAY_USER_LOCALE", "en_ID"),
-                "X-DeviceToken": _device_get(self.device, "x-devicetoken"),
-                "Gojek-Country-Code": _device_get(self.device, "gojek-country-code", "ID"),
-            }
+            headers = app_headers()
         else:
             headers.update(
                 {
@@ -424,13 +510,17 @@ class GopayClient:
                     "X-Dark-Mode": "false",
                 }
             )
-        if path.endswith("/api/v1/users/pin/tokens/nb"):
+        if path == "/api/v1/users/pin/tokens":
+            headers["Sdk-Version"] = _device_get(self.device, "x-appversion", "2.7.0")
             headers["X-Biometric"] = ""
-            headers["X-Verification"] = "pin"
+            headers["X-Verification"] = "PIN"
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}" if not self.token.startswith("Bearer") else self.token
         if extra_headers:
             headers.update(extra_headers)
+        sign_token = _header_value(headers, "Authorization", self.token)
+        xe1, _ = generate_xe1(method, url, body_str, sign_token, self.device, x_m1=x_m1)
+        headers["X-E1"] = xe1
         return headers
 
     def _request(self, method: str, url: str, body: Optional[dict] = None, extra_headers: Optional[dict] = None) -> dict:

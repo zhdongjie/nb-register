@@ -15,7 +15,7 @@ GoPay 一号一Plus 步骤脚本
   python3 gopay_app.py --step account-setup --phone <phone> --pin <pin>
 
 环境变量：
-  GOPAY_PROXY      - 代理地址 (默认 socks5://127.0.0.1:10810)
+  GOPAY_PROXY_POOL - GoPay 代理池，429 时按转轮轮换
   ORCHESTRATOR_URL - orchestrator gRPC 地址 (默认 127.0.0.1:50051)
   GOPAY_SIGNUP_AUTH_UUID - signup Authorization Basic 使用的 UUID
 """
@@ -24,12 +24,19 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
 import uuid
 
-from gopay_client import GopayClient, GOTO_CLIENT_ID, GOTO_CLIENT_SECRET, generate_device_fingerprint
+from gopay_client import (
+    GopayClient,
+    GOTO_CLIENT_ID,
+    GOTO_CLIENT_SECRET,
+    ensure_device_fingerprint,
+    generate_random_device_fingerprint,
+)
 from replay import LinkedAppUnlinkOptions, run_linked_app_unlink
 
 GOPAY_API = "https://customer.gopayapi.com"
@@ -37,7 +44,6 @@ GOPAY_CUSTOMER = GOPAY_API
 GOJEK_API = "https://api.gojekapi.com"
 GOTO_AUTH = "https://accounts.goto-products.com"
 
-PROXY = os.environ.get("GOPAY_PROXY", "socks5://127.0.0.1:10810")
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:8080")
 GOPAY_PIN = os.environ.get("GOPAY_PIN", "")
 GOPAY_COUNTRY_CODE = os.environ.get("GOPAY_COUNTRY_CODE", "62")
@@ -46,17 +52,13 @@ GOPAY_PIN_CLIENT_ID = os.environ.get("GOPAY_PIN_CLIENT_ID", "6d11d261d7ae462dbd4
 GOPAY_LOGIN_FP_RETRIES = int(os.environ.get("GOPAY_LOGIN_FP_RETRIES", "8"))
 GOPAY_CHANGE_PHONE_COUNTRY_SYNC = os.environ.get("GOPAY_CHANGE_PHONE_COUNTRY_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}
 GOPAY_TOKEN_REFRESH_MIN_TTL_SECONDS = int(os.environ.get("GOPAY_TOKEN_REFRESH_MIN_TTL_SECONDS", "900"))
-GOPAY_LOGIN_OTP_TIMEOUT_SECONDS = int(
-    os.environ.get("GOPAY_LOGIN_OTP_TIMEOUT_SECONDS", os.environ.get("GOPAY_OTP_TIMEOUT_SECONDS", "180"))
-)
-GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS = int(
-    os.environ.get("GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS", os.environ.get("GOPAY_OTP_TIMEOUT_SECONDS", "180"))
-)
-GOPAY_SIGNUP_PIN_OTP_TIMEOUT_SECONDS = int(
-    os.environ.get("GOPAY_SIGNUP_PIN_OTP_TIMEOUT_SECONDS", os.environ.get("GOPAY_OTP_TIMEOUT_SECONDS", "180"))
-)
+GOPAY_OTP_TIMEOUT_SECONDS = int(os.environ.get("GOPAY_OTP_TIMEOUT_SECONDS", "180"))
 GOPAY_MIN_BALANCE_RP = 1
 _STATE_LOCK = threading.RLock()
+_PROXY_LOCK = threading.RLock()
+_GOPAY_PROXY_CURSOR = -1
+_GOPAY_PROXY_STATE_KEY = "_gopay_proxy"
+_GOPAY_PROXY_FIRST_STATE_KEY = "_gopay_proxy_first"
 LOGIN_STATE_KEYS = (
     "_login_phone",
     "_login_country_code",
@@ -107,6 +109,96 @@ TMP_TOKEN_METADATA_KEYS = (
     "_tmp_phone",
     "_tmp_token_migrated_at",
 )
+
+
+class GopayProxyPoolExhausted(RuntimeError):
+    pass
+
+
+def safe_response_json(response: dict) -> str:
+    try:
+        return json.dumps(response or {}, ensure_ascii=False, separators=(",", ":"), default=str)
+    except Exception as exc:
+        return json.dumps({"marshal_error": str(exc)}, ensure_ascii=False, separators=(",", ":"))
+
+
+def log_api_response(label: str, response: dict) -> None:
+    print(f"[gopay-app] {label}: {safe_response_json(response)}", flush=True)
+
+
+def gopay_proxy_pool_entries() -> list[str]:
+    raw = os.environ.get("GOPAY_PROXY_POOL", "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in re.split(r"[\s,]+", raw) if item.strip()]
+
+
+def _require_gopay_proxy_pool() -> list[str]:
+    entries = gopay_proxy_pool_entries()
+    if not entries:
+        raise RuntimeError("GOPAY_PROXY_POOL is required")
+    return entries
+
+
+def _proxy_index(entries: list[str], proxy: str) -> int:
+    try:
+        return entries.index(str(proxy or "").strip())
+    except ValueError:
+        return -1
+
+
+def _state_proxy_index(state: dict, entries: list[str]) -> int:
+    if isinstance(state, dict):
+        index = _proxy_index(entries, state.get(_GOPAY_PROXY_STATE_KEY, ""))
+        if index >= 0:
+            return index
+    return -1
+
+
+def _next_proxy_index(entries: list[str], current_proxy: str = "") -> int:
+    global _GOPAY_PROXY_CURSOR
+    with _PROXY_LOCK:
+        current_index = _proxy_index(entries, current_proxy)
+        if current_index >= 0:
+            index = (current_index + 1) % len(entries)
+        else:
+            index = (_GOPAY_PROXY_CURSOR + 1) % len(entries)
+        _GOPAY_PROXY_CURSOR = index
+        return index
+
+
+def gopay_proxy_for_attempt(attempt: int, state: dict = None) -> tuple[str, int, int]:
+    entries = _require_gopay_proxy_pool()
+    first_proxy = state.get(_GOPAY_PROXY_FIRST_STATE_KEY, "") if isinstance(state, dict) else ""
+    if attempt <= 1:
+        index = _state_proxy_index(state, entries)
+        if index < 0:
+            index = _next_proxy_index(entries)
+    else:
+        current_proxy = state.get(_GOPAY_PROXY_STATE_KEY, "") if isinstance(state, dict) else ""
+        index = _next_proxy_index(entries, current_proxy)
+    proxy = entries[index]
+    if attempt > 1 and first_proxy and proxy == first_proxy:
+        raise GopayProxyPoolExhausted("GOPAY_PROXY_POOL exhausted before login methods succeeded")
+    if isinstance(state, dict):
+        if attempt <= 1 or not state.get(_GOPAY_PROXY_FIRST_STATE_KEY):
+            state[_GOPAY_PROXY_FIRST_STATE_KEY] = proxy
+        state[_GOPAY_PROXY_STATE_KEY] = proxy
+    return proxy, index + 1, len(entries)
+
+
+def reset_gopay_proxy_rotation(state: dict) -> None:
+    if isinstance(state, dict):
+        state.pop(_GOPAY_PROXY_FIRST_STATE_KEY, None)
+
+
+def gopay_proxy_for_state(state: dict) -> str:
+    entries = _require_gopay_proxy_pool()
+    index = _state_proxy_index(state, entries)
+    if index < 0:
+        proxy, _, _ = gopay_proxy_for_attempt(1, state)
+        return proxy
+    return entries[index]
 
 
 def wait_otp(prompt: str = "Enter OTP: ") -> str:
@@ -160,9 +252,30 @@ def _signup_basic_authorization() -> str:
 
 def new_logon_device_profile() -> dict:
     """Create a fresh device profile for a new login/signup attempt."""
-    device = generate_device_fingerprint(randomize_model=True)
+    device = generate_random_device_fingerprint()
     device["profile_id"] = os.urandom(8).hex()
     device["profile_created_at"] = int(time.time())
+    return device
+
+
+def ensure_state_device(state: dict) -> dict:
+    """Return the persisted device profile for this account/login state."""
+    device = state.get("device") if isinstance(state.get("device"), dict) else None
+    if device is None:
+        device = new_logon_device_profile()
+        state["device"] = device
+        save_state(state)
+        return device
+
+    before = json.dumps(device, sort_keys=True, default=str)
+    ensure_device_fingerprint(device)
+    if not device.get("profile_id"):
+        device["profile_id"] = os.urandom(8).hex()
+    if not device.get("profile_created_at"):
+        device["profile_created_at"] = int(time.time())
+    if json.dumps(device, sort_keys=True, default=str) != before:
+        state["device"] = device
+        save_state(state)
     return device
 
 
@@ -175,26 +288,36 @@ def _otp_method_from_channel(value: str = "") -> str:
     return ""
 
 
-def _choose_otp_method(methods, preferred: str = "") -> str:
+def _available_otp_methods(methods) -> list:
+    return [str(method).strip() for method in (methods or []) if str(method).strip()]
+
+
+def _choose_otp_method(methods, preferred: str = "", default_method: str = "") -> str:
     explicit = _otp_method_from_channel(preferred)
+    available = _available_otp_methods(methods)
+    if str(preferred or "").strip() and not explicit:
+        return ""
     if explicit:
+        if available and explicit not in available:
+            return ""
         return explicit
-    preferred = _otp_method_from_channel(GOPAY_LOGIN_OTP_METHOD) or "otp_wa"
-    for method in (preferred, "otp_wa", "otp_sms"):
-        if method and method in methods:
+    default_method = _otp_method_from_channel(default_method) or _otp_method_from_channel(GOPAY_LOGIN_OTP_METHOD) or "otp_wa"
+    fallbacks = (default_method, "otp_sms", "otp_wa") if default_method == "otp_sms" else (default_method, "otp_wa", "otp_sms")
+    for method in fallbacks:
+        if method and (not available or method in available):
             return method
-    return preferred or "otp_wa"
+    return default_method
 
 
 def _choose_method(methods, preferred: str = "") -> str:
-    explicit = _otp_method_from_channel(preferred)
-    if explicit:
-        return explicit
-    preferred = _otp_method_from_channel(GOPAY_LOGIN_OTP_METHOD) or "otp_wa"
-    for method in (preferred, "otp_wa", "otp_sms"):
-        if method and method in methods:
-            return method
-    return preferred or "otp_wa"
+    return _choose_otp_method(methods, preferred, default_method="otp_sms")
+
+
+def _otp_method_unavailable(methods, requested: str) -> str:
+    method = _otp_method_from_channel(requested)
+    if method:
+        return f"{method} unavailable: {_available_otp_methods(methods)}"
+    return f"otp method unavailable: {_available_otp_methods(methods)}"
 
 
 def _response_error(label: str, response: dict) -> str:
@@ -234,9 +357,25 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
     attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
+    fingerprint_rotations = 0
+    proxy_rotations = 0
+    proxy_state = {}
     for attempt in range(1, attempts + 1):
+        try:
+            proxy, proxy_index, proxy_count = gopay_proxy_for_attempt(attempt, proxy_state)
+        except GopayProxyPoolExhausted as exc:
+            return {
+                "success": False,
+                "available": False,
+                "status": "rate_limited",
+                "error": str(exc),
+                "attempts": attempt - 1,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": len(gopay_proxy_pool_entries()),
+            }
         device = new_logon_device_profile()
-        c = GopayClient("", proxy=PROXY, device=device)
+        c = GopayClient("", proxy=proxy, device=device)
         r = c.post(f"{GOTO_AUTH}/goto-auth/login/methods", body=_auth_body(
             country_code=cc,
             device_verification_token_id="",
@@ -250,10 +389,31 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
                 "available": False,
                 "status": "registered",
                 "methods": data.get("methods") or [],
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
             }
         if login_methods_invalid_user(r):
-            return {"success": True, "available": True, "status": "available"}
+            return {
+                "success": True,
+                "available": True,
+                "status": "available",
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
+            }
         if _is_rate_limited(r) and attempt < attempts:
+            fingerprint_rotations += 1
+            if proxy_count > 0:
+                proxy_rotations += 1
+            print(
+                "[gopay-app] check phone rate limited; rotating fingerprint/proxy "
+                f"attempt={attempt}/{attempts} profile_id={device.get('profile_id', '')} "
+                f"proxy_index={proxy_index}/{proxy_count}",
+                flush=True,
+            )
             time.sleep(1)
             continue
         if _is_rate_limited(r):
@@ -262,12 +422,20 @@ def check_phone_by_login_methods(phone: str, country_code: str = "") -> dict:
                 "available": False,
                 "status": "rate_limited",
                 "error": _response_error("login methods rate limited", r),
+                "attempts": attempt,
+                "fingerprint_rotations": fingerprint_rotations,
+                "proxy_rotations": proxy_rotations,
+                "proxy_pool_size": proxy_count,
             }
         return {
             "success": False,
             "available": False,
             "status": "error",
             "error": _response_error("login methods failed", r),
+            "attempts": attempt,
+            "fingerprint_rotations": fingerprint_rotations,
+            "proxy_rotations": proxy_rotations,
+            "proxy_pool_size": proxy_count,
         }
     return {
         "success": False,
@@ -306,7 +474,7 @@ def login_pending_expired(state: dict, now: int = None) -> bool:
         return now >= expires_at
     sent_at = _int_state(state.get("_login_otp_sent_at"))
     if sent_at:
-        return now >= sent_at + GOPAY_LOGIN_OTP_TIMEOUT_SECONDS
+        return now >= sent_at + GOPAY_OTP_TIMEOUT_SECONDS
     return True
 
 
@@ -332,7 +500,7 @@ def signup_pending_expired(state: dict, now: int = None) -> bool:
         "signup_otp_pending",
         "_signup_otp_sent_at",
         "_signup_otp_expires_at",
-        GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS,
+        GOPAY_OTP_TIMEOUT_SECONDS,
         now=now,
     )
 
@@ -343,7 +511,7 @@ def signup_pin_pending_expired(state: dict, now: int = None) -> bool:
         "signup_pin_otp_pending",
         "_signup_pin_otp_sent_at",
         "_signup_pin_otp_expires_at",
-        GOPAY_SIGNUP_PIN_OTP_TIMEOUT_SECONDS,
+        GOPAY_OTP_TIMEOUT_SECONDS,
         now=now,
     )
 
@@ -479,7 +647,7 @@ def persist_login_otp_state(
     state["_login_2fa_token"] = two_fa_token
     now = int(time.time())
     state["_login_otp_sent_at"] = now
-    state["_login_otp_expires_at"] = now + GOPAY_LOGIN_OTP_TIMEOUT_SECONDS
+    state["_login_otp_expires_at"] = now + GOPAY_OTP_TIMEOUT_SECONDS
     state["stage"] = "login_otp_pending"
     state.pop("last_error", None)
     save_state(state)
@@ -503,7 +671,18 @@ def persist_signup_otp_state(state: dict, verification_id: str, method: str, otp
     state["_signup_verification_method"] = method
     state["_signup_otp_token"] = otp_token
     state["_signup_otp_sent_at"] = now
-    state["_signup_otp_expires_at"] = now + GOPAY_SIGNUP_OTP_TIMEOUT_SECONDS
+    state["_signup_otp_expires_at"] = now + GOPAY_OTP_TIMEOUT_SECONDS
+    state["stage"] = "signup_otp_pending"
+    state.pop("last_error", None)
+    save_state(state)
+
+
+def persist_signup_otp_retry_state(state: dict, otp_token: str = "") -> None:
+    if otp_token:
+        state["_signup_otp_token"] = otp_token
+    now = int(time.time())
+    state["_signup_otp_sent_at"] = now
+    state["_signup_otp_expires_at"] = now + GOPAY_OTP_TIMEOUT_SECONDS
     state["stage"] = "signup_otp_pending"
     state.pop("last_error", None)
     save_state(state)
@@ -549,12 +728,11 @@ def refresh_access_token(state: dict) -> dict:
     if not refresh_token:
         return {"success": False, "error": "refresh_token missing"}
 
-    device = state.get("device") or generate_device_fingerprint()
-    state["device"] = device
-    c = GopayClient("", proxy=PROXY, device=device)
+    device = ensure_state_device(state)
+    c = GopayClient(str(state.get("token") or "").strip(), proxy=gopay_proxy_for_state(state), device=device)
     candidates = [
-        _auth_body(grant_type="refresh_token", refresh_token=refresh_token),
         _auth_body(grant_type="refresh_token", token=refresh_token),
+        _auth_body(grant_type="refresh_token", refresh_token=refresh_token),
     ]
     last_response = None
     for body in candidates:
@@ -646,14 +824,30 @@ def _gopay_wallet_balance(data) -> tuple:
     return None, ""
 
 
+def get_qr_id(state: dict) -> dict:
+    token = str(state.get("token") or "").strip()
+    if not token:
+        return {"success": False, "error": "access_token missing"}
+    device = ensure_state_device(state)
+    c = GopayClient(token, proxy=gopay_proxy_for_state(state), device=device)
+    r = c.get(f"{GOPAY_CUSTOMER}/v1/users/profile")
+    if r.get("status") != 200:
+        return {"success": False, "error": _response_error("users/profile failed", r)}
+    data = r.get("data") if isinstance(r.get("data"), dict) else {}
+    qr_id = str(data.get("qr_id") or "").strip()
+    if not qr_id:
+        raw = r.get("raw") if isinstance(r.get("raw"), dict) else r.get("data")
+        return {"success": False, "error": f"qr_id not found in response: {json.dumps(raw, default=str)[:500]}"}
+    return {"success": True, "qr_id": qr_id}
+
+
 def check_gopay_balance(state: dict) -> dict:
     token = str(state.get("token") or "").strip()
     if not token:
         return {"success": False, "error": "access_token missing", "status": 0}
 
-    device = state.get("device") or generate_device_fingerprint()
-    state["device"] = device
-    c = GopayClient(token, proxy=PROXY, device=device)
+    device = ensure_state_device(state)
+    c = GopayClient(token, proxy=gopay_proxy_for_state(state), device=device)
     r = c.get(f"{GOPAY_CUSTOMER}/v1/payment-options/balances")
     now = int(time.time())
     state["last_balance_check_at"] = now
@@ -701,9 +895,8 @@ def verify_access_token(state: dict) -> dict:
     token = str(state.get("token") or "").strip()
     if not token:
         return {"success": False, "error": "access_token missing", "status": 0}
-    device = state.get("device") or generate_device_fingerprint()
-    state["device"] = device
-    c = GopayClient(token, proxy=PROXY, device=device)
+    device = ensure_state_device(state)
+    c = GopayClient(token, proxy=gopay_proxy_for_state(state), device=device)
     r = c.get(f"{GOPAY_CUSTOMER}/v1/users/profile")
     if r.get("status") == 200:
         data = r.get("data") if isinstance(r.get("data"), dict) else {}
@@ -764,11 +957,16 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
     attempts = max(1, GOPAY_LOGIN_FP_RETRIES)
+    reset_gopay_proxy_rotation(state)
     for attempt in range(1, attempts + 1):
+        try:
+            proxy, proxy_index, proxy_count = gopay_proxy_for_attempt(attempt, state)
+        except GopayProxyPoolExhausted as exc:
+            return {"success": False, "error": str(exc)}
         device = new_logon_device_profile()
         persist_login_start_state(state, device, normalized_phone)
 
-        c = GopayClient("", proxy=PROXY, device=device)
+        c = GopayClient("", proxy=proxy, device=device)
         r = c.post(f"{GOTO_AUTH}/goto-auth/login/methods", body=_auth_body(
             country_code=cc,
             device_verification_token_id="",
@@ -778,7 +976,11 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
         if r["status"] in (200, 201):
             break
         if _is_rate_limited(r) and attempt < attempts:
-            print(f"  → login methods rate limited, rotating fingerprint ({attempt}/{attempts})")
+            print(
+                "[gopay-app] login methods rate limited; rotating fingerprint/proxy "
+                f"attempt={attempt}/{attempts} proxy_index={proxy_index}/{proxy_count}",
+                flush=True,
+            )
             time.sleep(1)
             continue
         if login_methods_invalid_user(r):
@@ -874,6 +1076,8 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
         return {"success": False, "error": _response_error("token exchange failed", r)}
 
     method = _choose_otp_method(r["data"].get("methods", []), otp_channel)
+    if not method:
+        return {"success": False, "error": _otp_method_unavailable(r["data"].get("methods", []), otp_channel)}
     r = c.post(
         f"{GOTO_AUTH}/cvs/v1/initiate",
         body=_auth_body(
@@ -900,8 +1104,8 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", 
 
 
 def complete_login(state: dict, otp: str) -> str:
-    device = state.get("device")
-    c = GopayClient("", proxy=PROXY, device=device)
+    device = ensure_state_device(state)
+    c = GopayClient("", proxy=gopay_proxy_for_state(state), device=device)
     verification_id = state.get("_login_verification_id", "")
     otp_token = state.get("_login_otp_token", "")
     method = state.get("_login_verification_method", "otp_wa")
@@ -946,15 +1150,14 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
         return {"success": False, "error": "signup phone missing"}
     if not name:
         return {"success": False, "error": "signup name missing"}
-    if not email:
-        return {"success": False, "error": "signup email missing"}
 
     clear_signup_state(state)
     clear_login_state(state)
     device = new_logon_device_profile()
     persist_signup_start_state(state, device, normalized_phone, cc, name, email)
 
-    c = GopayClient(state.get("token", ""), proxy=PROXY, device=device)
+    proxy = gopay_proxy_for_state(state)
+    c = GopayClient(state.get("token", ""), proxy=proxy, device=device)
     r = c.post(f"{GOTO_AUTH}/cvs/v1/methods", body=_auth_body(
         country_code=cc,
         device_verification_token_id=None,
@@ -962,13 +1165,16 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
         flow="signup",
         phone_number=normalized_phone,
     ))
+    log_api_response("signup methods response", r)
     if r["status"] != 200:
-        return {"success": False, "error": _response_error("signup methods failed", r)}
+        return {"success": False, "error": _response_error("signup methods failed", r), "raw_json": safe_response_json(r)}
 
     verification_id = r["data"].get("verification_id", "")
     if not verification_id:
-        return {"success": False, "error": "signup verification_id missing"}
-    method = _choose_method(r["data"].get("methods", []), otp_channel or r["data"].get("default_method", ""))
+        return {"success": False, "error": "signup verification_id missing", "raw_json": safe_response_json(r)}
+    method = _choose_method(r["data"].get("methods", []), otp_channel)
+    if not method:
+        return {"success": False, "error": _otp_method_unavailable(r["data"].get("methods", []), otp_channel), "raw_json": safe_response_json(r)}
 
     r = c.post(f"{GOTO_AUTH}/cvs/v1/initiate", body=_auth_body(
         country_code=cc,
@@ -980,20 +1186,46 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
         verification_id=verification_id,
         verification_method=method,
     ))
+    log_api_response("signup otp initiate response", r)
     if r["status"] != 200:
-        return {"success": False, "error": _response_error("signup otp initiate failed", r)}
+        return {"success": False, "error": _response_error("signup otp initiate failed", r), "raw_json": safe_response_json(r)}
 
     otp_token = r["data"].get("otp_token", "")
     if not otp_token:
-        return {"success": False, "error": "signup otp_token missing"}
+        return {"success": False, "error": "signup otp_token missing", "raw_json": safe_response_json(r)}
 
     persist_signup_otp_state(state, verification_id, method, otp_token)
+    retry_timers = r.get("data", {}).get("retry_timer_in_seconds") if isinstance(r.get("data"), dict) else []
     return {
         "success": True,
         "otp_sent": True,
         "verification_id": verification_id,
         "method": method,
+        "retry_timer_seconds": retry_timers if isinstance(retry_timers, list) else [],
+        "raw_json": safe_response_json(r),
     }
+
+
+def retry_signup_otp(state: dict) -> dict:
+    if state.get("stage") != "signup_otp_pending":
+        return {"success": False, "error": f"not waiting for signup otp: {state.get('stage', 'idle')}"}
+    otp_token = state.get("_signup_otp_token", "")
+    method = state.get("_signup_verification_method", "otp_sms")
+    if not otp_token:
+        return {"success": False, "error": "signup otp state missing"}
+
+    c = GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
+    r = c.post(f"{GOTO_AUTH}/cvs/v1/retry", body=_auth_body(
+        flow="signup",
+        verification_method=method,
+        data={"otp_token": otp_token},
+    ))
+    log_api_response("signup otp retry response", r)
+    if r["status"] != 200:
+        return {"success": False, "error": _response_error("signup otp retry failed", r), "raw_json": safe_response_json(r)}
+    data = r.get("data") if isinstance(r.get("data"), dict) else {}
+    persist_signup_otp_retry_state(state, data.get("otp_token", ""))
+    return {"success": True, "otp_sent": True, "raw_json": safe_response_json(r)}
 
 
 def complete_signup(state: dict, otp: str) -> dict:
@@ -1008,53 +1240,57 @@ def complete_signup(state: dict, otp: str) -> dict:
     name = state.get("_signup_name", "")
     email = state.get("_signup_email", "")
     verification_id = state.get("_signup_verification_id", "")
-    method = state.get("_signup_verification_method", "otp_wa")
+    method = state.get("_signup_verification_method", "otp_sms")
     otp_token = state.get("_signup_otp_token", "")
     if not phone or not verification_id or not otp_token:
         return {"success": False, "error": "signup otp state missing"}
 
-    c = GopayClient(state.get("token", ""), proxy=PROXY, device=state.get("device"))
+    c = GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
     r = c.post(f"{GOTO_AUTH}/cvs/v1/verify", body=_auth_body(
         data={"otp": otp, "otp_token": otp_token},
         flow="signup",
         verification_id=verification_id,
         verification_method=method,
     ))
+    log_api_response("signup otp verify response", r)
     if r["status"] != 200:
-        return {"success": False, "error": _response_error("signup otp verify failed", r)}
+        return {"success": False, "error": _response_error("signup otp verify failed", r), "raw_json": safe_response_json(r)}
     verification_token = r["data"].get("verification_token", "")
     if not verification_token:
-        return {"success": False, "error": "signup verification_token missing"}
+        return {"success": False, "error": "signup verification_token missing", "raw_json": safe_response_json(r)}
+    signup_body = {
+        "client_name": GOTO_CLIENT_ID,
+        "client_secret": GOTO_CLIENT_SECRET,
+        "data": {
+            "name": name,
+            "phone": f"{cc}{phone}",
+            "email": email,
+            "signed_up_country": cc,
+            "onboarding_partner": "gopay_consumer_app",
+        },
+    }
+    log_api_response("customer signup request", {"body": signup_body})
     r = c.post(
         f"{GOJEK_API}/v7/customers/signup",
-        body={
-            "client_name": GOTO_CLIENT_ID,
-            "client_secret": GOTO_CLIENT_SECRET,
-            "data": {
-                "name": name,
-                "phone": f"{cc}{phone}",
-                "email": email,
-                "signed_up_country": cc,
-                "onboarding_partner": "gopay_consumer_app",
-            },
-        },
+        body=signup_body,
         extra_headers={
             "Authorization": _signup_basic_authorization(),
             "Verification-Token": f"Bearer {verification_token}",
         },
     )
+    log_api_response("customer signup response", r)
     if r["status"] != 201:
-        return {"success": False, "error": _response_error("customer signup failed", r)}
+        return {"success": False, "error": _response_error("customer signup failed", r), "raw_json": safe_response_json(r)}
 
     persist_signup_complete_state(state, r["data"], phone, name, email)
     refresh = ensure_access_token(state, force=True)
     if not refresh.get("success"):
         state["last_error"] = refresh.get("error", "signup token refresh failed")
         save_state(state)
-        return {"success": False, "error": state["last_error"]}
+        return {"success": False, "error": state["last_error"], "raw_json": safe_response_json(r)}
     state["stage"] = "signup_pin_required"
     save_state(state)
-    return {"success": True, "phone": phone, "pin_setup_required": True}
+    return {"success": True, "phone": phone, "pin_setup_required": True, "raw_json": safe_response_json(r)}
 
 
 def start_signup_pin(state: dict, pin: str, otp_channel: str = "") -> dict:
@@ -1069,44 +1305,41 @@ def start_signup_pin(state: dict, pin: str, otp_channel: str = "") -> dict:
     if not phone:
         return {"success": False, "error": "signup phone missing"}
 
-    c = GopayClient(state.get("token", ""), proxy=PROXY, device=state.get("device"))
+    c = GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
     r = c.post(f"{GOPAY_CUSTOMER}/api/v1/users/pins/allowed", body={"pin": pin})
+    log_api_response("pin allowed response", r)
     if r["status"] != 200:
         return {"success": False, "error": _response_error("pin allowed failed", r)}
-
-    r = c.post(f"{GOPAY_CUSTOMER}/api/v1/users/pin/challenges", body={"flow": "pin_change"})
-    if r["status"] != 200:
-        return {"success": False, "error": _response_error("pin challenge failed", r)}
-    challenge_id = r["data"].get("challenge_id", "")
-    client_id = r["data"].get("client_id", "")
-    if not challenge_id or not client_id:
-        return {"success": False, "error": "pin challenge missing id"}
 
     r = c.post(f"{GOTO_AUTH}/cvs/v1/methods", body=_auth_body(
         country_code=None,
         device_verification_token_id=None,
         email_address=None,
-        flow="goto_pin_wa_sms_gp_app",
-        phone_number=phone,
+        flow="goto_pin_wa_sms",
+        phone_number=None,
     ))
+    log_api_response("pin otp methods response", r)
     if r["status"] != 200:
         return {"success": False, "error": _response_error("pin otp methods failed", r)}
 
     verification_id = r["data"].get("verification_id", "")
     if not verification_id:
         return {"success": False, "error": "pin verification_id missing"}
-    method = _choose_method(r["data"].get("methods", []), otp_channel or r["data"].get("default_method", ""))
+    method = _choose_method(r["data"].get("methods", []), otp_channel)
+    if not method:
+        return {"success": False, "error": _otp_method_unavailable(r["data"].get("methods", []), otp_channel)}
 
     r = c.post(f"{GOTO_AUTH}/cvs/v1/initiate", body=_auth_body(
         country_code=None,
         device_verification_token_id=None,
         email_address=None,
-        flow="goto_pin_wa_sms_gp_app",
+        flow="goto_pin_wa_sms",
         is_multiple_method=None,
-        phone_number=phone,
+        phone_number=None,
         verification_id=verification_id,
         verification_method=method,
     ))
+    log_api_response("pin otp initiate response", r)
     if r["status"] != 200:
         return {"success": False, "error": _response_error("pin otp initiate failed", r)}
 
@@ -1115,13 +1348,13 @@ def start_signup_pin(state: dict, pin: str, otp_channel: str = "") -> dict:
         return {"success": False, "error": "pin otp_token missing"}
 
     now = int(time.time())
-    state["_signup_pin_challenge_id"] = challenge_id
-    state["_signup_pin_client_id"] = client_id
+    state["_signup_pin_challenge_id"] = ""
+    state["_signup_pin_client_id"] = ""
     state["_signup_pin_verification_id"] = verification_id
     state["_signup_pin_verification_method"] = method
     state["_signup_pin_otp_token"] = otp_token
     state["_signup_pin_otp_sent_at"] = now
-    state["_signup_pin_otp_expires_at"] = now + GOPAY_SIGNUP_PIN_OTP_TIMEOUT_SECONDS
+    state["_signup_pin_otp_expires_at"] = now + GOPAY_OTP_TIMEOUT_SECONDS
     state["stage"] = "signup_pin_otp_pending"
     state.pop("last_error", None)
     save_state(state)
@@ -1131,6 +1364,41 @@ def start_signup_pin(state: dict, pin: str, otp_channel: str = "") -> dict:
         "verification_id": verification_id,
         "method": method,
     }
+
+
+def retry_signup_pin_otp(state: dict) -> dict:
+    if state.get("stage") != "signup_pin_otp_pending":
+        return {"success": False, "error": f"not waiting for signup pin otp: {state.get('stage', 'idle')}"}
+    otp_token = state.get("_signup_pin_otp_token", "")
+    method = state.get("_signup_pin_verification_method", "otp_sms")
+    if not otp_token:
+        return {"success": False, "error": "signup pin otp state missing"}
+
+    refresh = ensure_access_token(state)
+    if not refresh.get("success") and not access_token_usable(state, 0):
+        return {"success": False, "error": refresh.get("error", "token refresh failed")}
+
+    c = GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
+    r = c.post(f"{GOTO_AUTH}/cvs/v1/retry", body=_auth_body(
+        flow="goto_pin_wa_sms",
+        verification_method=method,
+        data={"otp_token": otp_token},
+    ))
+    log_api_response("pin otp retry response", r)
+    if r["status"] != 200:
+        return {"success": False, "error": _response_error("pin otp retry failed", r)}
+    data = r.get("data") if isinstance(r.get("data"), dict) else {}
+    new_otp_token = data.get("otp_token", "")
+    if not new_otp_token:
+        return {"success": False, "error": "pin retry otp_token missing"}
+
+    now = int(time.time())
+    state["_signup_pin_otp_token"] = new_otp_token
+    state["_signup_pin_otp_sent_at"] = now
+    state["_signup_pin_otp_expires_at"] = now + GOPAY_OTP_TIMEOUT_SECONDS
+    state.pop("last_error", None)
+    save_state(state)
+    return {"success": True, "otp_sent": True}
 
 
 def complete_signup_pin(state: dict, otp: str, pin: str) -> dict:
@@ -1148,20 +1416,21 @@ def complete_signup_pin(state: dict, otp: str, pin: str) -> dict:
         return {"success": False, "error": refresh.get("error", "token refresh failed")}
 
     verification_id = state.get("_signup_pin_verification_id", "")
-    method = state.get("_signup_pin_verification_method", "otp_wa")
+    method = state.get("_signup_pin_verification_method", "otp_sms")
     otp_token = state.get("_signup_pin_otp_token", "")
     challenge_id = state.get("_signup_pin_challenge_id", "")
     client_id = state.get("_signup_pin_client_id", "")
-    if not verification_id or not otp_token or not challenge_id or not client_id:
+    if not verification_id or not otp_token:
         return {"success": False, "error": "signup pin otp state missing"}
 
-    c = GopayClient(state.get("token", ""), proxy=PROXY, device=state.get("device"))
+    c = GopayClient(state.get("token", ""), proxy=gopay_proxy_for_state(state), device=ensure_state_device(state))
     r = c.post(f"{GOTO_AUTH}/cvs/v1/verify", body=_auth_body(
         data={"otp": otp, "otp_token": otp_token},
-        flow="goto_pin_wa_sms_gp_app",
+        flow="goto_pin_wa_sms",
         verification_id=verification_id,
         verification_method=method,
     ))
+    log_api_response("pin otp verify response", r)
     if r["status"] != 200:
         return {"success": False, "error": _response_error("pin otp verify failed", r)}
     verification_token = r["data"].get("verification_token", "")
@@ -1170,9 +1439,13 @@ def complete_signup_pin(state: dict, otp: str, pin: str) -> dict:
 
     r = c.post(
         f"{GOPAY_CUSTOMER}/api/v2/users/pins/setup/tokens",
-        body={"pin": pin, "client_id": client_id, "challenge_id": challenge_id},
-        extra_headers={"Verification-Token": f"Bearer {verification_token}"},
+        body={"client_id": client_id, "pin": pin, "challenge_id": challenge_id},
+        extra_headers={
+            "Verification-Token": f"Bearer {verification_token}",
+            "Is-Token-Required": "false",
+        },
     )
+    log_api_response("pin setup response", r)
     if r["status"] != 200:
         return {"success": False, "error": _response_error("pin setup failed", r)}
 
@@ -1209,8 +1482,8 @@ def get_client(state) -> GopayClient:
     if not token or not result.get("success"):
         print("ERROR: No token. Run --step login first.")
         sys.exit(1)
-    device = state.get("device")
-    return GopayClient(token, proxy=PROXY, device=device)
+    device = ensure_state_device(state)
+    return GopayClient(token, proxy=gopay_proxy_for_state(state), device=device)
 
 
 # === 改手机号 ===

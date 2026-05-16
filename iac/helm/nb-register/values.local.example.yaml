@@ -69,12 +69,20 @@ secrets:
     OUTLOOK_REGISTER_PROXY: socks5://proxy.internal:10810
     GOPAY_PHONE_NUMBER: ""
     GOPAY_PIN: ""
-    GOPAY_PROXY_URL: http://proxy.internal:10809
+    GOPAY_PROXY_POOL: socks5://proxy.internal:10810,socks5://proxy.internal:10811,socks5://proxy.internal:10813,http://proxy.internal:10814
     GOPAY_SIGNUP_AUTH_UUID: ""
+    GOPAY_ADD_BALANCE_ENVELOPE_LINK: ""
+    GOPAY_ADD_BALANCE_TRANSFER_INSTRUCTIONS: ""
     GOPAY_HMAC_KEY: ""
     GOPAY_X_E2: ""
     GOTO_CLIENT_SECRET: ""
     GOTO_SSO_CLIENT_SECRET: ""
+    GOPAY_UNIQUE_ID: ""
+    GOPAY_APPSFLYER_ID: ""
+    GOPAY_WIDEVINE_ID: ""
+    GOPAY_M1_SIGNATURE: ""
+    GOPAY_SCREEN: ""
+    GOPAY_D1: ""
     HEROSMS_API_KEY: ""
 
 gopayPaymentConfig:

@@ -2,8 +2,10 @@ package workflows
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
 
@@ -24,7 +26,13 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 	if otpChannel == "" {
 		otpChannel = "sms"
 	}
-	combined := map[string]any{"otp_channel": otpChannel}
+	addBalance := input.GetAddBalance()
+	addBalanceMethod := goPayAddBalanceMethod(addBalance)
+	stateJSON := "{}"
+	combined := map[string]any{
+		"otp_channel":        otpChannel,
+		"add_balance_method": addBalanceMethod,
+	}
 
 	var account AccountRef
 	setWorkflowProgress(ctx, progress, "resolve_account")
@@ -43,7 +51,8 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 		AccountId: account.GetAccountId(),
 		Action:    actionGoPayPayment,
 		Params: map[string]string{
-			"otp_channel": otpChannel,
+			"otp_channel":        otpChannel,
+			"add_balance_method": addBalanceMethod,
 		},
 	}).Get(ctx, nil); err != nil {
 		result.ErrorMessage = err.Error()
@@ -67,49 +76,145 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepProbePlusTrial, statusFailedFinal, false, false, fmt.Errorf("account is not plus trial eligible"), combined), nil
 	}
 
-	var phone GoPayAppAcquireSignupPhoneOutput
-	setWorkflowProgress(ctx, progress, stepGoPayAppSignupPhone)
-	if err := workflow.ExecuteActivity(gopayCtx, goPayAppAcquireSignupPhoneActivityName, GoPayAppAcquireSignupPhoneInput{
-		JobId: input.GetJobId(),
-	}).Get(ctx, &phone); err != nil {
-		combined["signup_phone"] = protoDataMap(phone.GetData())
-		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppSignupPhone, statusFailedRetryable, false, true, err, combined), nil
-	}
-	combined["signup_phone"] = protoDataMap(phone.GetData())
-	result.ActivationId = phone.GetActivationId()
-	result.Phone = phone.GetPhone()
+	var otpOpts goPayAppOTPOptions
+	var signup GoPayAppStepOutput
+	signupAttempts := []any{}
 
-	otpOpts := goPayAppOTPOptions{
-		Phone:           phone.GetPhone(),
-		OTPChannel:      otpChannel,
-		SMSActivationID: phone.GetActivationId(),
-		ResetState:      true,
-	}
-	finishSMS := func(reason string) {
-		if phone.GetActivationId() == "" {
-			return
-		}
-		_ = workflow.ExecuteActivity(retryCtx, goPayAppSMSFinishActivityName, GoPayAppSMSActivationInput{
+	for attempt := 1; attempt <= goPayAppSignupMaxPhoneAttempts; attempt++ {
+		attemptData := map[string]any{"attempt": attempt}
+
+		var phone GoPayAppAcquireSignupPhoneOutput
+		setWorkflowProgress(ctx, progress, stepGoPayAppSignupPhone)
+		if err := workflow.ExecuteActivity(gopayCtx, goPayAppAcquireSignupPhoneActivityName, GoPayAppAcquireSignupPhoneInput{
 			JobId:        input.GetJobId(),
-			ActivationId: phone.GetActivationId(),
-			Reason:       reason,
-		}).Get(ctx, nil)
-	}
+			FailureCount: int32(attempt - 1),
+		}).Get(ctx, &phone); err != nil {
+			attemptData["signup_phone"] = protoDataMap(phone.GetData())
+			attemptData["error_message"] = err.Error()
+			signupAttempts = append(signupAttempts, attemptData)
+			combined["signup_attempts"] = signupAttempts
+			combined["signup_phone"] = protoDataMap(phone.GetData())
+			result.ActivationId = phone.GetActivationId()
+			result.Phone = phone.GetPhone()
+			if attempt < goPayAppSignupMaxPhoneAttempts && isGoPaySignupPhoneRotatableError(err) {
+				continue
+			}
+			return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppSignupPhone, statusFailedRetryable, false, true, err, combined), nil
+		}
+		attemptData["signup_phone"] = protoDataMap(phone.GetData())
+		combined["signup_phone"] = protoDataMap(phone.GetData())
+		result.ActivationId = phone.GetActivationId()
+		result.Phone = phone.GetPhone()
 
-	setWorkflowProgress(ctx, progress, stepGoPayAppSignup)
-	signup, err := runGoPayAppSignup(ctx, gopayCtx, retryCtx, input.GetJobId(), otpOpts)
-	if err != nil {
-		finishSMS("signup failed")
+		otpOpts = goPayAppOTPOptions{
+			Phone:           phone.GetPhone(),
+			OTPChannel:      otpChannel,
+			SMSActivationID: phone.GetActivationId(),
+			ResetState:      true,
+			StateJSON:       stateJSON,
+		}
+
+		setWorkflowProgress(ctx, progress, stepGoPayAppSignup)
+		currentSignup, err := runGoPayAppSignup(ctx, gopayCtx, retryCtx, input.GetJobId(), otpOpts)
+		signup = currentSignup
+		stateJSON = signup.GetStateJson()
+		attemptData["signup"] = protoDataMap(signup.GetData())
+		if err == nil {
+			signupAttempts = append(signupAttempts, attemptData)
+			combined["signup_attempts"] = signupAttempts
+			combined["signup"] = protoDataMap(signup.GetData())
+			break
+		}
+
+		attemptData["error_message"] = err.Error()
+		if isGoPaySignupOTPNotReceived(err) {
+			var discarded GoPayAppSMSActivationOutput
+			discardErr := workflow.ExecuteActivity(retryCtx, goPayAppDiscardSignupPhoneActivityName, GoPayAppSMSActivationInput{
+				JobId:        input.GetJobId(),
+				ActivationId: phone.GetActivationId(),
+				FailureCount: int32(attempt),
+				Reason:       err.Error(),
+			}).Get(ctx, &discarded)
+			attemptData["discard_signup_phone"] = protoDataMap(discarded.GetData())
+			if discardErr != nil {
+				attemptData["discard_error_message"] = discardErr.Error()
+			}
+			signupAttempts = append(signupAttempts, attemptData)
+			combined["signup_attempts"] = signupAttempts
+			combined["signup"] = protoDataMap(signup.GetData())
+			if attempt < goPayAppSignupMaxPhoneAttempts {
+				continue
+			}
+			return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppSignup, statusFailedRetryable, false, true, err, combined), nil
+		}
+
+		signupAttempts = append(signupAttempts, attemptData)
+		combined["signup_attempts"] = signupAttempts
 		combined["signup"] = protoDataMap(signup.GetData())
 		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppSignup, statusFailedRetryable, false, true, err, combined), nil
 	}
-	combined["signup"] = protoDataMap(signup.GetData())
 	result.SignupComplete = signup.GetSignupComplete()
 
-	setWorkflowProgress(ctx, progress, stepGoPayAppCreatePin)
-	createPin, err := runGoPayAppCreatePin(ctx, gopayCtx, retryCtx, input.GetJobId(), otpOpts)
+	var balance GoPayAppAddBalanceOutput
+	setWorkflowProgress(ctx, progress, stepGoPayAppAddBalance)
+	addBalanceCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 5 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	})
+	if err := workflow.ExecuteActivity(addBalanceCtx, goPayAppAddBalanceActivityName, GoPayAppAddBalanceInput{
+		JobId:      input.GetJobId(),
+		StateJson:  stateJSON,
+		AddBalance: addBalance,
+	}).Get(ctx, &balance); err != nil {
+		stateJSON = balance.GetStateJson()
+		combined["add_balance"] = protoDataMap(balance.GetData())
+		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppAddBalance, statusFailedRetryable, false, true, err, combined), nil
+	}
+	stateJSON = balance.GetStateJson()
+	combined["add_balance"] = protoDataMap(balance.GetData())
+	result.AddBalanceMethod = balance.GetMethod()
+	result.AddBalanceStatus = balance.GetStatus()
+	if goPayAddBalanceMethod(addBalance) == "manual_transfer" {
+		setWorkflowProgress(ctx, progress, stepGoPayAppAddBalanceConfirm)
+		if err := waitForManualAddBalance(ctx, input.GetAddBalanceConfirmTimeoutSeconds()); err != nil {
+			combined["add_balance_confirmation"] = map[string]any{
+				"confirmed": false,
+				"method":    "manual_transfer",
+			}
+			return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppAddBalanceConfirm, statusFailedRetryable, false, true, err, combined), nil
+		}
+		combined["add_balance_confirmation"] = map[string]any{
+			"confirmed": true,
+			"method":    "manual_transfer",
+		}
+		result.AddBalanceStatus = "confirmed"
+	}
+	result.AddBalanceComplete = true
+
+	var paymentPrepare GoPayPaymentPrepareOutput
+	setWorkflowProgress(ctx, progress, stepGoPayPaymentPrepare)
+	paymentPrepare, err := prepareGoPayPayment(ctx, paymentCtx, GoPayActivityInput{
+		JobId:             input.GetJobId(),
+		AccountId:         account.GetAccountId(),
+		UseAccountToken:   false,
+		Tokenization:      "true",
+		CheckoutUrl:       probe.GetCheckoutUrl(),
+		CheckoutSessionId: probe.GetCheckoutSessionId(),
+		GopayPhone:        result.GetPhone(),
+		StateJson:         stateJSON,
+	})
+	stateJSON = paymentPrepare.GetStateJson()
+	combined["gopay_payment_prepare"] = protoDataMap(paymentPrepare.GetData())
 	if err != nil {
-		finishSMS("create pin failed")
+		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayPaymentPrepare, statusFailedRetryable, false, true, err, combined), nil
+	}
+
+	setWorkflowProgress(ctx, progress, stepGoPayAppCreatePin)
+	otpOpts.StateJSON = stateJSON
+	createPin, err := runGoPayAppCreatePin(ctx, gopayCtx, retryCtx, input.GetJobId(), otpOpts)
+	stateJSON = createPin.GetStateJson()
+	if err != nil {
+		cancelGoPayPayment(ctx, retryCtx, paymentPrepare.GetFlowId())
 		combined["create_pin"] = protoDataMap(createPin.GetData())
 		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppCreatePin, statusFailedRetryable, false, true, err, combined), nil
 	}
@@ -117,11 +222,9 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 	result.SignupPinComplete = createPin.GetSignupPinComplete()
 	result.AccountTokenReady = createPin.GetAccountTokenReady()
 	if !createPin.GetAccountTokenReady() {
-		finishSMS("account token not ready after create pin")
+		cancelGoPayPayment(ctx, retryCtx, paymentPrepare.GetFlowId())
 		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppCreatePin, statusFailedRetryable, false, true, fmt.Errorf("gopay account token is not ready after create pin"), combined), nil
 	}
-
-	finishSMS("gopay signup complete")
 
 	var payment GoPayActivityOutput
 	setWorkflowProgress(ctx, progress, stepGoPayPayment)
@@ -132,7 +235,13 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 		Tokenization:      "true",
 		CheckoutUrl:       probe.GetCheckoutUrl(),
 		CheckoutSessionId: probe.GetCheckoutSessionId(),
+		PreparedFlowId:    paymentPrepare.GetFlowId(),
+		GopayPhone:        result.GetPhone(),
+		OtpChannel:        otpChannel,
+		SmsActivationId:   otpOpts.SMSActivationID,
+		StateJson:         stateJSON,
 	})
+	stateJSON = payment.GetStateJson()
 	if err != nil {
 		combined["gopay_payment"] = protoDataMap(payment.GetData())
 		return failGoPayPaymentWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayPayment, statusFailedRetryable, false, true, err, combined), nil
@@ -160,4 +269,12 @@ func GoPayPaymentWorkflow(ctx workflow.Context, input GoPayPaymentWorkflowInput)
 	result.SnapToken = payment.GetSnapToken()
 	setWorkflowProgressSucceeded(ctx, progress)
 	return result, nil
+}
+
+func isGoPaySignupPhoneRotatableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "signup phone already registered")
 }

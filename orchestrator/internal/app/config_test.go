@@ -21,10 +21,15 @@ func TestLoadOrchestratorConfigDefaults(t *testing.T) {
 	t.Setenv("GOPAY_APP_STEP_BODY_LIMIT", "")
 	t.Setenv("GOPAY_APP_LINK_PAYMENT_TIMEOUT_SECONDS", "")
 	t.Setenv("GOPAY_APP_UNLINK_TIMEOUT_SECONDS", "")
+	t.Setenv("GOPAY_ADD_BALANCE_MODE", "")
+	t.Setenv("GOPAY_ADD_BALANCE_ENVELOPE_LINK", "")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_INSTRUCTIONS", "")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_AMOUNT_RP", "")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_CURRENCY", "")
+	t.Setenv("GOPAY_ADD_BALANCE_CONFIRM_TIMEOUT_SECONDS", "")
 	t.Setenv("OUTLOOK_REGISTER_ENABLE_OAUTH2", "")
 	t.Setenv("GOPAY_CHANGE_PHONE_DISABLED", "")
 	t.Setenv("GOPAY_CHANGE_PHONE_MAX_FAILURES", "")
-	t.Setenv("GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS", "")
 	t.Setenv("GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS", "")
 	t.Setenv("GOPAY_CHANGE_PHONE_GET_NUMBER_RETRY_SECONDS", "")
 	t.Setenv("GOPAY_CHANGE_PHONE_SMS_CANCEL_TIMEOUT_SECONDS", "")
@@ -60,7 +65,7 @@ func TestLoadOrchestratorConfigDefaults(t *testing.T) {
 	if cfg.GoPayOTPServiceAddr != "whatsapp-otp-relay:50051" {
 		t.Fatalf("GoPayOTPServiceAddr = %q", cfg.GoPayOTPServiceAddr)
 	}
-	if cfg.GoPayOTPTimeout != 60 {
+	if cfg.GoPayOTPTimeout != 180 {
 		t.Fatalf("GoPayOTPTimeout = %d", cfg.GoPayOTPTimeout)
 	}
 	if cfg.RegistrationOTPWait != 180 {
@@ -75,6 +80,14 @@ func TestLoadOrchestratorConfigDefaults(t *testing.T) {
 	if cfg.GoPayAppUnlinkTimeout != 15*time.Second {
 		t.Fatalf("GoPayAppUnlinkTimeout = %s", cfg.GoPayAppUnlinkTimeout)
 	}
+	if cfg.GoPayAddBalanceMode != "manual_transfer" ||
+		cfg.GoPayAddBalanceEnvelopeLink != "" ||
+		cfg.GoPayAddBalanceTransferInstructions != "" ||
+		cfg.GoPayAddBalanceTransferAmountRp != 1 ||
+		cfg.GoPayAddBalanceTransferCurrency != "IDR" ||
+		cfg.GoPayAddBalanceConfirmTimeoutSeconds != 1800 {
+		t.Fatalf("gopay add balance defaults = %+v", cfg)
+	}
 	if !cfg.OutlookRegisterEnableOAuth2 {
 		t.Fatalf("OutlookRegisterEnableOAuth2 = false")
 	}
@@ -83,9 +96,6 @@ func TestLoadOrchestratorConfigDefaults(t *testing.T) {
 	}
 	if cfg.ChangePhoneMaxFailures != defaultChangePhoneMaxFailures {
 		t.Fatalf("ChangePhoneMaxFailures = %d", cfg.ChangePhoneMaxFailures)
-	}
-	if cfg.ChangePhoneOTPWaitSeconds != defaultChangePhoneOTPWaitSeconds {
-		t.Fatalf("ChangePhoneOTPWaitSeconds = %d", cfg.ChangePhoneOTPWaitSeconds)
 	}
 	if cfg.ChangePhoneOTPRetryAttempts != defaultChangePhoneOTPRetryAttempts {
 		t.Fatalf("ChangePhoneOTPRetryAttempts = %d", cfg.ChangePhoneOTPRetryAttempts)
@@ -134,10 +144,15 @@ func TestLoadOrchestratorConfigOverrides(t *testing.T) {
 	t.Setenv("GOPAY_APP_STEP_BODY_LIMIT", "7000")
 	t.Setenv("GOPAY_APP_LINK_PAYMENT_TIMEOUT_SECONDS", "181")
 	t.Setenv("GOPAY_APP_UNLINK_TIMEOUT_SECONDS", "16")
+	t.Setenv("GOPAY_ADD_BALANCE_MODE", "envelope")
+	t.Setenv("GOPAY_ADD_BALANCE_ENVELOPE_LINK", "https://example.invalid/envelope")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_INSTRUCTIONS", "transfer then confirm")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_AMOUNT_RP", "2000")
+	t.Setenv("GOPAY_ADD_BALANCE_TRANSFER_CURRENCY", "IDR")
+	t.Setenv("GOPAY_ADD_BALANCE_CONFIRM_TIMEOUT_SECONDS", "901")
 	t.Setenv("OUTLOOK_REGISTER_ENABLE_OAUTH2", "false")
 	t.Setenv("GOPAY_CHANGE_PHONE_DISABLED", "yes")
 	t.Setenv("GOPAY_CHANGE_PHONE_MAX_FAILURES", "4")
-	t.Setenv("GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS", "121")
 	t.Setenv("GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS", "2")
 	t.Setenv("GOPAY_CHANGE_PHONE_GET_NUMBER_RETRY_SECONDS", "6")
 	t.Setenv("GOPAY_CHANGE_PHONE_SMS_CANCEL_TIMEOUT_SECONDS", "131")
@@ -182,6 +197,14 @@ func TestLoadOrchestratorConfigOverrides(t *testing.T) {
 	if cfg.GoPayAppUnlinkTimeout != 16*time.Second {
 		t.Fatalf("GoPayAppUnlinkTimeout = %s", cfg.GoPayAppUnlinkTimeout)
 	}
+	if cfg.GoPayAddBalanceMode != "envelope" ||
+		cfg.GoPayAddBalanceEnvelopeLink != "https://example.invalid/envelope" ||
+		cfg.GoPayAddBalanceTransferInstructions != "transfer then confirm" ||
+		cfg.GoPayAddBalanceTransferAmountRp != 2000 ||
+		cfg.GoPayAddBalanceTransferCurrency != "IDR" ||
+		cfg.GoPayAddBalanceConfirmTimeoutSeconds != 901 {
+		t.Fatalf("gopay add balance config not overridden: %+v", cfg)
+	}
 	if cfg.OutlookRegisterEnableOAuth2 {
 		t.Fatalf("OutlookRegisterEnableOAuth2 = true")
 	}
@@ -189,7 +212,6 @@ func TestLoadOrchestratorConfigOverrides(t *testing.T) {
 		t.Fatalf("ChangePhoneDisabled = false")
 	}
 	if cfg.ChangePhoneMaxFailures != 4 ||
-		cfg.ChangePhoneOTPWaitSeconds != 121 ||
 		cfg.ChangePhoneOTPRetryAttempts != 2 {
 		t.Fatalf("change phone scalar config not overridden: %+v", cfg)
 	}

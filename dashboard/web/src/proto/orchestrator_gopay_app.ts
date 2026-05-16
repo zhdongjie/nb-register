@@ -44,6 +44,10 @@ export interface GoPayPaymentRequest {
   source_job_id: string;
   /** sms 或 wa；默认 sms */
   otp_channel: string;
+  /** 续跑已取号流程时复用同一个短信激活号 */
+  sms_activation_id: string;
+  add_balance: GoPayAddBalance | undefined;
+  add_balance_confirm_timeout_seconds: number;
 }
 
 export interface GoPayPaymentResponse {
@@ -55,6 +59,39 @@ export interface GoPayPaymentResponse {
   snap_token: string;
   activation_id: string;
   phone: string;
+  add_balance_complete: boolean;
+  add_balance_method: string;
+  add_balance_status: string;
+}
+
+export interface GoPayAddBalance {
+  envelope?: GoPayEnvelopeAddBalance | undefined;
+  manual_transfer?: GoPayManualTransferAddBalance | undefined;
+}
+
+export interface GoPayEnvelopeAddBalance {
+  link: string;
+  envelope_request_id: string;
+}
+
+export interface GoPayManualTransferAddBalance {
+  instructions: string;
+  amount: number;
+  currency: string;
+}
+
+export interface ManualAddBalanceSignal {
+  kind: string;
+}
+
+export interface ConfirmManualAddBalanceRequest {
+  job_id: string;
+}
+
+export interface ConfirmManualAddBalanceResponse {
+  success: boolean;
+  job_id: string;
+  error_message: string;
 }
 
 export interface GoPayUserStatusRequest {
@@ -153,7 +190,7 @@ export interface GoPayUserSignupStartRequest {
   name: string;
   email: string;
   country_code: string;
-  /** sms 或 wa；为空时使用服务默认配置 */
+  /** sms 或 wa；为空默认 sms */
   otp_channel: string;
 }
 
@@ -180,7 +217,7 @@ export interface GoPayUserSignupCompleteResponse {
 export interface GoPayUserCreatePinStartRequest {
   state_key: string;
   pin: string;
-  /** sms 或 wa；为空时使用服务默认配置 */
+  /** sms 或 wa；为空默认 sms */
   otp_channel: string;
 }
 
@@ -227,6 +264,9 @@ export interface GoPayPaymentWorkflowInput {
   source_job_id: string;
   /** sms 或 wa；默认 sms */
   otp_channel: string;
+  sms_activation_id: string;
+  add_balance: GoPayAddBalance | undefined;
+  add_balance_confirm_timeout_seconds: number;
 }
 
 export interface GoPayPaymentWorkflowResult {
@@ -240,11 +280,15 @@ export interface GoPayPaymentWorkflowResult {
   signup_pin_complete: boolean;
   charge_ref: string;
   snap_token: string;
+  add_balance_complete: boolean;
+  add_balance_method: string;
+  add_balance_status: string;
 }
 
 export interface GoPayAppStepInput {
   job_id: string;
   activation_id: string;
+  state_json: string;
 }
 
 export interface GoPayAppStepOutput {
@@ -258,11 +302,13 @@ export interface GoPayAppStepOutput {
   signup_complete: boolean;
   signup_pin_complete: boolean;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppChangePhoneStartInput {
   job_id: string;
   failure_count: number;
+  state_json: string;
 }
 
 export interface GoPayAppChangePhoneStartOutput {
@@ -273,6 +319,7 @@ export interface GoPayAppChangePhoneStartOutput {
   otp_timeout_seconds: number;
   otp_retry_attempts: number;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppAcquireSignupPhoneInput {
@@ -289,10 +336,26 @@ export interface GoPayAppAcquireSignupPhoneOutput {
   data: { [key: string]: any } | undefined;
 }
 
+export interface GoPayAppAddBalanceInput {
+  job_id: string;
+  state_json: string;
+  add_balance: GoPayAddBalance | undefined;
+}
+
+export interface GoPayAppAddBalanceOutput {
+  success: boolean;
+  error_message: string;
+  method: string;
+  status: string;
+  data: { [key: string]: any } | undefined;
+  state_json: string;
+}
+
 export interface GoPayAppChangePhoneRetryInput {
   job_id: string;
   activation_id: string;
   otp_attempt: number;
+  state_json: string;
 }
 
 export interface GoPayAppChangePhoneRetryOutput {
@@ -300,6 +363,7 @@ export interface GoPayAppChangePhoneRetryOutput {
   otp_sent: boolean;
   error_message: string;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppSMSActivationInput {
@@ -322,6 +386,7 @@ export interface GoPayAppChangePhoneCompleteInput {
   activation_id: string;
   code: string;
   failure_count: number;
+  state_json: string;
 }
 
 export interface GoPayAppChangePhoneCompleteOutput {
@@ -334,11 +399,13 @@ export interface GoPayAppChangePhoneCompleteOutput {
   stage: string;
   phone: string;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppDeactivateStartInput {
   job_id: string;
   activation_id: string;
+  state_json: string;
 }
 
 export interface GoPayAppDeactivateStartOutput {
@@ -346,18 +413,21 @@ export interface GoPayAppDeactivateStartOutput {
   otp_required: boolean;
   timeout_seconds: number;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppDeactivateCompleteInput {
   job_id: string;
   activation_id: string;
   code: string;
+  state_json: string;
 }
 
 export interface GoPayAppDeactivateCompleteOutput {
   activation_id: string;
   deactivate_complete: boolean;
   data: { [key: string]: any } | undefined;
+  state_json: string;
 }
 
 export interface GoPayAppOTPStartInput {
@@ -365,10 +435,20 @@ export interface GoPayAppOTPStartInput {
   operation: string;
   step_name: string;
   phone: string;
-  /** sms 或 wa；默认沿用 gopay-app 配置 */
+  /** sms 或 wa；默认 sms */
   otp_channel: string;
   sms_activation_id: string;
   reset_state: boolean;
+  state_json: string;
+}
+
+export interface GoPayAppCreatePinStartInput {
+  job_id: string;
+  /** sms 或 wa；默认 sms */
+  otp_channel: string;
+  sms_activation_id: string;
+  state_json: string;
+  data: { [key: string]: any } | undefined;
 }
 
 export interface GoPayAppOTPOutput {
@@ -386,6 +466,19 @@ export interface GoPayAppOTPOutput {
   data: { [key: string]: any } | undefined;
   verification_method: string;
   otp_channel: string;
+  state_json: string;
+}
+
+export interface GoPayAppCreatePinCompleteInput {
+  job_id: string;
+  otp_param: string;
+  submitted_at_param: string;
+  issued_after_unix: number;
+  otp_source: string;
+  data: { [key: string]: any } | undefined;
+  otp_channel: string;
+  sms_activation_id: string;
+  state_json: string;
 }
 
 export interface GoPayAppOTPCompleteInput {
@@ -398,4 +491,5 @@ export interface GoPayAppOTPCompleteInput {
   data: { [key: string]: any } | undefined;
   otp_channel: string;
   sms_activation_id: string;
+  state_json: string;
 }

@@ -13,17 +13,22 @@ type orchestratorConfig struct {
 	EmailAddr           string
 	MailboxRegisterAddr string
 
-	GoPayOTPServiceAddr         string
-	GoPayOTPTimeout             int32
-	RegistrationOTPWait         int32
-	GoPayAppStepBodyLimit       int32
-	GoPayAppLinkPaymentTimeout  time.Duration
-	GoPayAppUnlinkTimeout       time.Duration
-	OutlookRegisterEnableOAuth2 bool
+	GoPayOTPServiceAddr                  string
+	GoPayOTPTimeout                      int32
+	RegistrationOTPWait                  int32
+	GoPayAppStepBodyLimit                int32
+	GoPayAppLinkPaymentTimeout           time.Duration
+	GoPayAppUnlinkTimeout                time.Duration
+	GoPayAddBalanceMode                  string
+	GoPayAddBalanceEnvelopeLink          string
+	GoPayAddBalanceTransferInstructions  string
+	GoPayAddBalanceTransferAmountRp      int64
+	GoPayAddBalanceTransferCurrency      string
+	GoPayAddBalanceConfirmTimeoutSeconds int32
+	OutlookRegisterEnableOAuth2          bool
 
 	ChangePhoneMaxFailures            int
 	ChangePhoneDisabled               bool
-	ChangePhoneOTPWaitSeconds         int32
 	ChangePhoneOTPRetryAttempts       int
 	ChangePhoneGetNumberRetryDelay    time.Duration
 	ChangePhoneSMSCancelTimeout       time.Duration
@@ -55,17 +60,22 @@ func loadOrchestratorConfig() orchestratorConfig {
 		EmailAddr:           envDefault("EMAIL_ADDR", "outlook-imap-service:50051"),
 		MailboxRegisterAddr: envDefault("MAILBOX_REGISTER_ADDR", "outlook-register-service:50051"),
 
-		GoPayOTPServiceAddr:         otpServiceAddr,
-		GoPayOTPTimeout:             envInt32("GOPAY_OTP_TIMEOUT_SECONDS", 60),
-		RegistrationOTPWait:         envInt32("REGISTRATION_OTP_TIMEOUT_SECONDS", 180),
-		GoPayAppStepBodyLimit:       int32(envInt("GOPAY_APP_STEP_BODY_LIMIT", 6000)),
-		GoPayAppLinkPaymentTimeout:  envPositiveDurationSeconds("GOPAY_APP_LINK_PAYMENT_TIMEOUT_SECONDS", 180*time.Second),
-		GoPayAppUnlinkTimeout:       envPositiveDurationSeconds("GOPAY_APP_UNLINK_TIMEOUT_SECONDS", 15*time.Second),
-		OutlookRegisterEnableOAuth2: envBool("OUTLOOK_REGISTER_ENABLE_OAUTH2", true),
+		GoPayOTPServiceAddr:                  otpServiceAddr,
+		GoPayOTPTimeout:                      envInt32("GOPAY_OTP_TIMEOUT_SECONDS", 180),
+		RegistrationOTPWait:                  envInt32("REGISTRATION_OTP_TIMEOUT_SECONDS", 180),
+		GoPayAppStepBodyLimit:                int32(envInt("GOPAY_APP_STEP_BODY_LIMIT", 6000)),
+		GoPayAppLinkPaymentTimeout:           envPositiveDurationSeconds("GOPAY_APP_LINK_PAYMENT_TIMEOUT_SECONDS", 180*time.Second),
+		GoPayAppUnlinkTimeout:                envPositiveDurationSeconds("GOPAY_APP_UNLINK_TIMEOUT_SECONDS", 15*time.Second),
+		GoPayAddBalanceMode:                  envDefault("GOPAY_ADD_BALANCE_MODE", "manual_transfer"),
+		GoPayAddBalanceEnvelopeLink:          envDefault("GOPAY_ADD_BALANCE_ENVELOPE_LINK", ""),
+		GoPayAddBalanceTransferInstructions:  envDefault("GOPAY_ADD_BALANCE_TRANSFER_INSTRUCTIONS", ""),
+		GoPayAddBalanceTransferAmountRp:      int64(envInt("GOPAY_ADD_BALANCE_TRANSFER_AMOUNT_RP", 1)),
+		GoPayAddBalanceTransferCurrency:      envDefault("GOPAY_ADD_BALANCE_TRANSFER_CURRENCY", "IDR"),
+		GoPayAddBalanceConfirmTimeoutSeconds: envInt32("GOPAY_ADD_BALANCE_CONFIRM_TIMEOUT_SECONDS", 1800),
+		OutlookRegisterEnableOAuth2:          envBool("OUTLOOK_REGISTER_ENABLE_OAUTH2", true),
 
 		ChangePhoneMaxFailures:            envInt("GOPAY_CHANGE_PHONE_MAX_FAILURES", defaultChangePhoneMaxFailures),
 		ChangePhoneDisabled:               envBool("GOPAY_CHANGE_PHONE_DISABLED", false),
-		ChangePhoneOTPWaitSeconds:         envInt32("GOPAY_CHANGE_PHONE_OTP_WAIT_SECONDS", defaultChangePhoneOTPWaitSeconds),
 		ChangePhoneOTPRetryAttempts:       envIntNonNegative("GOPAY_CHANGE_PHONE_OTP_RETRY_ATTEMPTS", defaultChangePhoneOTPRetryAttempts),
 		ChangePhoneGetNumberRetryDelay:    envNonNegativeDurationSeconds("GOPAY_CHANGE_PHONE_GET_NUMBER_RETRY_SECONDS", defaultChangePhoneGetNumberRetryDelay),
 		ChangePhoneSMSCancelTimeout:       envPositiveDurationSeconds("GOPAY_CHANGE_PHONE_SMS_CANCEL_TIMEOUT_SECONDS", defaultChangePhoneSMSCancelTimeout),

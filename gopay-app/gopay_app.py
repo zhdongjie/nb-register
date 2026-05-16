@@ -110,7 +110,7 @@ TMP_TOKEN_METADATA_KEYS = (
 
 
 def wait_otp(prompt: str = "Enter OTP: ") -> str:
-    """等待 OTP：CLI 只支持手动输入；自动接码由 orchestrator 调用 CodeReceiverService。"""
+    """等待 OTP：CLI 只支持手动输入；自动接码由 orchestrator 调用 SmsService。"""
     return input(prompt).strip()
 
 
@@ -1201,12 +1201,12 @@ def get_client(state) -> GopayClient:
 # === 改手机号 ===
 
 def change_phone(state, new_phone: str, pin: str):
-    """改手机号：3步。自动取号由 orchestrator + CodeReceiverService 负责。"""
+    """改手机号：3步。自动取号由 orchestrator + SmsService 负责。"""
     c = get_client(state)
     email = state.get("email", "")
     name = state.get("name", "")
     if not new_phone:
-        raise RuntimeError("new_phone required; acquire temporary numbers through orchestrator CodeReceiverService")
+        raise RuntimeError("new_phone required; acquire temporary numbers through orchestrator SmsService")
 
     body = {"email": email, "name": name, "phone": f"+62{new_phone}", "profile_image_url": None}
 

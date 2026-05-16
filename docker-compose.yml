@@ -130,7 +130,7 @@ services:
       - GOPAY_COUNTRY_CODE=${GOPAY_COUNTRY_CODE:-62}
       - GOPAY_PHONE_NUMBER=${GOPAY_PHONE_NUMBER}
       - GOPAY_PIN=${GOPAY_PIN}
-      - CODE_RECEIVER_ADDR=${CODE_RECEIVER_ADDR:-herosms-sms-service:50051}
+      - SMS_ADDR=${SMS_ADDR:-herosms-sms-service:50051}
       - ACCOUNT_DB_ADDR=account-db:50051
       - EMAIL_ADDR=outlook-imap-service:50051
       - MAILBOX_REGISTER_ADDR=outlook-register-service:50051

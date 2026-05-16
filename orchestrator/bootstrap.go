@@ -1,7 +1,7 @@
 package main
 
-import "orchestrator/internal/runtime"
+import "orchestrator/internal/app"
 
 func main() {
-	runtime.Run()
+	app.Run()
 }

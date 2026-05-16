@@ -46,7 +46,7 @@ message JobStep {
   bool recoverable = 3;
   bool retryable = 4;
   string error_message = 5;
-  string result_json = 6;
+  google.protobuf.Struct detail = 6;
   int64 started_at = 7;
   int64 completed_at = 8;
 }
@@ -60,7 +60,7 @@ message Job {
   bool retryable = 6;
   string last_step = 7;
   string error_message = 8;
-  string result_json = 9;
+  google.protobuf.Struct result = 9;
   int64 created_at = 10;
   int64 updated_at = 11;
   repeated JobStep steps = 12;

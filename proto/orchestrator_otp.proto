@@ -7,7 +7,7 @@ import "google/protobuf/struct.proto";
 option go_package = "./;pb";
 
 service OTPService {
-  rpc SubmitRegistrationOtp(SubmitRegistrationOtpRequest) returns (SubmitRegistrationOtpResponse);
+  rpc SubmitOTP(SubmitOTPRequest) returns (SubmitOTPResponse);
 }
 
 message OTPWaitInput {
@@ -50,13 +50,13 @@ message ManualOTPSignal {
   string kind = 1;
 }
 
-message SubmitRegistrationOtpRequest {
+message SubmitOTPRequest {
   string job_id = 1;
   string account_id = 2;
   string otp = 3;
 }
 
-message SubmitRegistrationOtpResponse {
+message SubmitOTPResponse {
   bool success = 1;
   string job_id = 2;
   string error_message = 3;

@@ -46,13 +46,13 @@ export interface ManualOTPSignal {
   kind: string;
 }
 
-export interface SubmitRegistrationOtpRequest {
+export interface SubmitOTPRequest {
   job_id: string;
   account_id: string;
   otp: string;
 }
 
-export interface SubmitRegistrationOtpResponse {
+export interface SubmitOTPResponse {
   success: boolean;
   job_id: string;
   error_message: string;

@@ -751,7 +751,14 @@ function App() {
                 </PanelHeader>
                 <PanelIntro text="登录、换绑、注销、注册和建 PIN 按工作流顺序执行。" />
                 <div className="mailboxRegisterBody">
-                  <RegistrationSummary job={latestGoPayAppJob} runningCount={runningGoPayAppCount} />
+                  <WorkflowSummary
+                    job={latestGoPayAppJob}
+                    runningCount={runningGoPayAppCount}
+                    runningTitle={(count) => `${count} 个 GoPay App 任务运行中`}
+                    runningText="GoPay App 同一时间只跑一个流程，重复触发会被后端锁拦截。"
+                    idleTitle="暂无 GoPay App 任务"
+                    idleText="点击“启动”后会执行 GoPay App 登录、换绑、注销、注册和建 PIN 流程。"
+                  />
                   {latestGoPayAppJob && canSubmitOtp(latestGoPayAppJob) && (
                     <OtpSubmitter job={latestGoPayAppJob} onSubmit={submitJobOtp} />
                   )}
@@ -815,7 +822,14 @@ function App() {
 	                  </div>
 	                </PanelHeader>
 	                <div className="mailboxRegisterBody">
-                    <RegistrationSummary job={latestMailboxRegisterJob} runningCount={runningMailboxRegisterCount} />
+                    <WorkflowSummary
+                      job={latestMailboxRegisterJob}
+                      runningCount={runningMailboxRegisterCount}
+                      runningTitle={(count) => `${count} 个邮箱注册任务运行中`}
+                      runningText="邮箱注册器同一时间只跑一个进程，重复触发会被后端锁拦截。"
+                      idleTitle="暂无邮箱注册任务"
+                      idleText="点击“启动注册”后会创建 Outlook 邮箱并导入邮箱池。"
+                    />
 	                  <MailboxStatusStrip mailboxes={primaryMailboxes} />
 	                  <div className="sectionTitle">
 	                    <h3>邮箱注册工作流</h3>
@@ -1127,10 +1141,10 @@ function JobDetails({ job, progress, onCopy, onOtpSubmit }: {
                 </div>
                 {progressText && <p className="stepProgress">{progressText}</p>}
                 {step.error_message && <p>{step.error_message}</p>}
-                {step.result_json && (
+                {step.detail && (
                   <details className="jsonDetails">
                     <summary>结果数据</summary>
-                    <pre>{formatJSON(step.result_json)}</pre>
+                    <pre>{formatJSON(step.detail)}</pre>
                   </details>
                 )}
               </div>
@@ -1606,14 +1620,21 @@ function BanResults({ bans, showSecrets }: {
   );
 }
 
-function RegistrationSummary({ job, runningCount }: { job?: Job; runningCount: number }) {
+function WorkflowSummary({ job, runningCount, runningTitle, runningText, idleTitle, idleText }: {
+  job?: Job;
+  runningCount: number;
+  runningTitle: (count: number) => string;
+  runningText: string;
+  idleTitle: string;
+  idleText: string;
+}) {
   const icon = runningCount > 0 ? <Clock size={16} /> : job?.status?.startsWith('FAILED') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />;
-  const title = runningCount > 0 ? `${runningCount} 个注册任务运行中` : job ? `最近一次：${statusText(job.status)}` : '暂无注册任务';
+  const title = runningCount > 0 ? runningTitle(runningCount) : job ? `最近一次：${statusText(job.status)}` : idleTitle;
   const text = runningCount > 0
-    ? '注册器同一时间只跑一个进程，重复触发会被后端锁拦截。'
+    ? runningText
     : job
       ? `${actionText(job.action)} · ${stepText(job.last_step)}${job.error_message ? ` · ${compactCellError(job.error_message)}` : ''}`
-      : '点击“启动注册”后会创建 Outlook 邮箱并导入邮箱池。';
+      : idleText;
 
   return (
     <div className={`registrationSummary ${job?.status?.startsWith('FAILED') ? 'bad' : runningCount > 0 ? 'mid' : 'good'}`}>
@@ -2071,12 +2092,7 @@ function canSubmitOtp(job: Job) {
 
 function stepResultData(job: Job, stepName: string): any | null {
   const step = (job.steps || []).find((item) => item.step_name === stepName);
-  if (!step?.result_json) return null;
-  try {
-    return JSON.parse(step.result_json);
-  } catch {
-    return null;
-  }
+  return stepDetailData(step);
 }
 
 function otpSubmitLabel(job: Job) {
@@ -2250,7 +2266,7 @@ function stepDuration(step: Step) {
 }
 
 function stepProgressText(step: Step, workflowProgress?: WorkflowProgress | null) {
-  const data = parseJSON(step.result_json);
+  const data = stepDetailData(step);
   if (data && typeof data === 'object') {
     const record = data as Record<string, any>;
     const progress = record.progress && typeof record.progress === 'object' ? record.progress as Record<string, any> : {};
@@ -2299,21 +2315,17 @@ function compactCellError(value: string) {
   return text.length > 24 ? `${text.slice(0, 24)}...` : text;
 }
 
-function formatJSON(value: string) {
+function formatJSON(value: unknown) {
 	try {
-		return JSON.stringify(JSON.parse(value), null, 2);
+		return typeof value === 'string' ? JSON.stringify(JSON.parse(value), null, 2) : JSON.stringify(value, null, 2);
 	} catch {
-		return value;
+		return String(value ?? '');
 	}
 }
 
-function parseJSON(value: string): unknown {
-  if (!value) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
+function stepDetailData(step?: Step): Record<string, any> | null {
+  if (!step?.detail || typeof step.detail !== 'object') return null;
+  return step.detail as Record<string, any>;
 }
 
 function stringValue(value: unknown) {

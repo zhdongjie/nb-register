@@ -86,6 +86,6 @@ python3 -m grpc_tools.protoc \
   -I "${ROOT}/proto" \
   --python_out="${ROOT}/herosms-sms-service" \
   --grpc_python_out="${ROOT}/herosms-sms-service" \
-  "$(root_proto code_receiver.proto)"
+  "$(root_proto sms.proto)"
 
 gen_ts_dashboard

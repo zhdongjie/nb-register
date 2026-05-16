@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/structpb"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -358,7 +359,7 @@ func ToProto(job *db.Job, steps []db.JobStep) *pb.Job {
 		Retryable:    job.Retryable,
 		LastStep:     job.LastStep,
 		ErrorMessage: job.ErrorMessage,
-		ResultJson:   job.ResultJSON,
+		Result:       structFromJSON(job.ResultJSON),
 		CreatedAt:    job.CreatedAt,
 		UpdatedAt:    job.UpdatedAt,
 		Steps:        make([]*pb.JobStep, 0, len(steps)),
@@ -370,10 +371,26 @@ func ToProto(job *db.Job, steps []db.JobStep) *pb.Job {
 			Recoverable:  steps[i].Recoverable,
 			Retryable:    steps[i].Retryable,
 			ErrorMessage: steps[i].ErrorMessage,
-			ResultJson:   steps[i].ResultJSON,
+			Detail:       structFromJSON(steps[i].ResultJSON),
 			StartedAt:    steps[i].StartedAt,
 			CompletedAt:  steps[i].CompletedAt,
 		})
+	}
+	return out
+}
+
+func structFromJSON(raw string) *structpb.Struct {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		data = map[string]any{"raw": raw, "parse_error": err.Error()}
+	}
+	out, err := structpb.NewStruct(data)
+	if err != nil {
+		out, _ = structpb.NewStruct(map[string]any{"raw": raw, "marshal_error": err.Error()})
 	}
 	return out
 }

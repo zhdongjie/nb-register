@@ -1,5 +1,5 @@
 """
-HeroSMS code receiver gRPC service.
+HeroSMS sms gRPC service.
 
 The service is stateless for activations. Provider credentials and defaults are
 loaded from Postgres on each operation and can be managed through gRPC CRUD.
@@ -16,17 +16,17 @@ import urllib.request
 from concurrent import futures
 
 import grpc
-import code_receiver_pb2
-import code_receiver_pb2_grpc
+import sms_pb2
+import sms_pb2_grpc
 
 DEFAULT_API_BASE = "https://hero-sms.com/stubs/handler_api.php"
-PORT = int(os.environ.get("SMS_PORT", os.environ.get("CODE_RECEIVER_PORT", "50051")))
+PORT = int(os.environ.get("SMS_PORT", "50051"))
 PG_DSN = (
-    os.environ.get("CODE_RECEIVER_PG_DSN", "").strip()
+    os.environ.get("SMS_PG_DSN", "").strip()
     or os.environ.get("PG_DSN", "").strip()
 )
-CONFIG_TABLE = os.environ.get("CODE_RECEIVER_CONFIG_TABLE", "code_receiver_provider_configs").strip() or "code_receiver_provider_configs"
-DEFAULT_CONFIG_ID = os.environ.get("CODE_RECEIVER_DEFAULT_CONFIG_ID", "default").strip() or "default"
+CONFIG_TABLE = os.environ.get("SMS_CONFIG_TABLE", "sms_provider_configs").strip() or "sms_provider_configs"
+DEFAULT_CONFIG_ID = os.environ.get("SMS_DEFAULT_CONFIG_ID", "default").strip() or "default"
 _CONFIG_STORE = None
 _CONFIG_STORE_LOCK = threading.RLock()
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -91,14 +91,14 @@ def _normalize_provider(value: str) -> str:
 
 def _validate_table_name(value: str) -> str:
     if not _IDENTIFIER_RE.match(value):
-        raise RuntimeError("CODE_RECEIVER_CONFIG_TABLE must be a simple SQL identifier")
+        raise RuntimeError("SMS_CONFIG_TABLE must be a simple SQL identifier")
     return value
 
 
-def _config_to_pb(row) -> code_receiver_pb2.CodeReceiverProviderConfig:
-    if isinstance(row, code_receiver_pb2.CodeReceiverProviderConfig):
+def _config_to_pb(row) -> sms_pb2.SmsProviderConfig:
+    if isinstance(row, sms_pb2.SmsProviderConfig):
         return row
-    return code_receiver_pb2.CodeReceiverProviderConfig(
+    return sms_pb2.SmsProviderConfig(
         config_id=str(row.get("config_id") or ""),
         provider=str(row.get("provider") or ""),
         enabled=bool(row.get("enabled")),
@@ -114,11 +114,11 @@ def _config_to_pb(row) -> code_receiver_pb2.CodeReceiverProviderConfig:
     )
 
 
-def _config_from_pb(config: code_receiver_pb2.CodeReceiverProviderConfig) -> code_receiver_pb2.CodeReceiverProviderConfig:
+def _config_from_pb(config: sms_pb2.SmsProviderConfig) -> sms_pb2.SmsProviderConfig:
     provider = _normalize_provider(config.provider)
     if provider != "herosms":
-        raise ValueError(f"unsupported code receiver provider: {provider}")
-    return code_receiver_pb2.CodeReceiverProviderConfig(
+        raise ValueError(f"unsupported sms provider: {provider}")
+    return sms_pb2.SmsProviderConfig(
         config_id=_normalize_config_id(config.config_id),
         provider=provider,
         enabled=bool(config.enabled),
@@ -190,7 +190,7 @@ class PostgresProviderConfigStore:
                 self._bootstrapped = True
                 return
             self.upsert(
-                code_receiver_pb2.CodeReceiverProviderConfig(
+                sms_pb2.SmsProviderConfig(
                     config_id=DEFAULT_CONFIG_ID,
                     provider="herosms",
                     enabled=True,
@@ -205,7 +205,7 @@ class PostgresProviderConfigStore:
             )
             self._bootstrapped = True
 
-    def upsert(self, config: code_receiver_pb2.CodeReceiverProviderConfig) -> code_receiver_pb2.CodeReceiverProviderConfig:
+    def upsert(self, config: sms_pb2.SmsProviderConfig) -> sms_pb2.SmsProviderConfig:
         config = _config_from_pb(config)
         now = int(time.time())
         created_at = config.created_at_unix or now
@@ -267,7 +267,7 @@ class PostgresProviderConfigStore:
             ).fetchone()
         if not row:
             return None
-        return code_receiver_pb2.CodeReceiverProviderConfig(
+        return sms_pb2.SmsProviderConfig(
             config_id=row[0],
             provider=row[1],
             enabled=row[2],
@@ -298,7 +298,7 @@ class PostgresProviderConfigStore:
                 """
             ).fetchall()
         return [
-            code_receiver_pb2.CodeReceiverProviderConfig(
+            sms_pb2.SmsProviderConfig(
                 config_id=row[0],
                 provider=row[1],
                 enabled=row[2],
@@ -325,35 +325,35 @@ class PostgresProviderConfigStore:
 def _config_store() -> PostgresProviderConfigStore:
     global _CONFIG_STORE
     if not PG_DSN:
-        raise RuntimeError("CODE_RECEIVER_PG_DSN or PG_DSN is required")
+        raise RuntimeError("SMS_PG_DSN or PG_DSN is required")
     with _CONFIG_STORE_LOCK:
         if _CONFIG_STORE is None:
             _CONFIG_STORE = PostgresProviderConfigStore(PG_DSN, CONFIG_TABLE)
         return _CONFIG_STORE
 
 
-def _load_provider_config(config_id: str) -> code_receiver_pb2.CodeReceiverProviderConfig:
+def _load_provider_config(config_id: str) -> sms_pb2.SmsProviderConfig:
     store = _config_store()
     store._bootstrap_from_env()
     config = store.get(config_id)
     if not config:
-        raise RuntimeError(f"code receiver provider config not found: {_normalize_config_id(config_id)}")
+        raise RuntimeError(f"sms provider config not found: {_normalize_config_id(config_id)}")
     if not config.enabled:
-        raise RuntimeError(f"code receiver provider config disabled: {config.config_id}")
+        raise RuntimeError(f"sms provider config disabled: {config.config_id}")
     if _normalize_provider(config.provider) != "herosms":
-        raise RuntimeError(f"unsupported code receiver provider: {config.provider}")
+        raise RuntimeError(f"unsupported sms provider: {config.provider}")
     if not config.api_key:
-        raise RuntimeError(f"api_key is required for code receiver provider config: {config.config_id}")
+        raise RuntimeError(f"api_key is required for sms provider config: {config.config_id}")
     return config
 
 
-def _calling_code(config: code_receiver_pb2.CodeReceiverProviderConfig, country: int) -> str:
+def _calling_code(config: sms_pb2.SmsProviderConfig, country: int) -> str:
     if country == config.default_country and config.default_country_calling_code:
         return config.default_country_calling_code
     return _COUNTRY_CALLING_CODES.get(country, "")
 
 
-def _normalize_phone(config: code_receiver_pb2.CodeReceiverProviderConfig, phone: str, country: int) -> str:
+def _normalize_phone(config: sms_pb2.SmsProviderConfig, phone: str, country: int) -> str:
     value = str(phone or "").strip().lstrip("+")
     prefix = _calling_code(config, country)
     if prefix and value.startswith(prefix):
@@ -361,7 +361,7 @@ def _normalize_phone(config: code_receiver_pb2.CodeReceiverProviderConfig, phone
     return value
 
 
-def _provider_call(config: code_receiver_pb2.CodeReceiverProviderConfig, action: str, **params) -> str:
+def _provider_call(config: sms_pb2.SmsProviderConfig, action: str, **params) -> str:
     params["api_key"] = config.api_key
     params["action"] = action
     url = f"{(config.api_base or DEFAULT_API_BASE).strip()}?{urllib.parse.urlencode(params)}"
@@ -381,7 +381,7 @@ def _provider_call(config: code_receiver_pb2.CodeReceiverProviderConfig, action:
         raise
 
 
-def _set_status(config: code_receiver_pb2.CodeReceiverProviderConfig, activation_id: str, status: int) -> tuple[bool, str]:
+def _set_status(config: sms_pb2.SmsProviderConfig, activation_id: str, status: int) -> tuple[bool, str]:
     if not activation_id:
         return False, "activation_id required"
     if status not in _STATUS_OK:
@@ -400,40 +400,40 @@ def _action_response(config, response_type, activation_id: str, status: int):
     )
 
 
-class CodeReceiverServicer(code_receiver_pb2_grpc.CodeReceiverServiceServicer):
+class SmsServicer(sms_pb2_grpc.SmsServiceServicer):
     def UpsertProvider(self, request, context):
         try:
             config = _config_store().upsert(request.config)
-            return code_receiver_pb2.UpsertCodeReceiverProviderResponse(success=True, config=config)
+            return sms_pb2.UpsertSmsProviderResponse(success=True, config=config)
         except Exception as e:
-            return code_receiver_pb2.UpsertCodeReceiverProviderResponse(success=False, error_message=str(e))
+            return sms_pb2.UpsertSmsProviderResponse(success=False, error_message=str(e))
 
     def GetProvider(self, request, context):
         try:
             config = _config_store().get(request.config_id)
             if not config:
-                return code_receiver_pb2.GetCodeReceiverProviderResponse(success=False, error_message="provider config not found")
-            return code_receiver_pb2.GetCodeReceiverProviderResponse(success=True, config=config)
+                return sms_pb2.GetSmsProviderResponse(success=False, error_message="provider config not found")
+            return sms_pb2.GetSmsProviderResponse(success=True, config=config)
         except Exception as e:
-            return code_receiver_pb2.GetCodeReceiverProviderResponse(success=False, error_message=str(e))
+            return sms_pb2.GetSmsProviderResponse(success=False, error_message=str(e))
 
     def ListProviders(self, request, context):
         try:
-            return code_receiver_pb2.ListCodeReceiverProvidersResponse(
+            return sms_pb2.ListSmsProvidersResponse(
                 success=True,
                 configs=_config_store().list(request.include_disabled),
             )
         except Exception as e:
-            return code_receiver_pb2.ListCodeReceiverProvidersResponse(success=False, error_message=str(e))
+            return sms_pb2.ListSmsProvidersResponse(success=False, error_message=str(e))
 
     def DeleteProvider(self, request, context):
         try:
             deleted = _config_store().delete(request.config_id)
             if not deleted:
-                return code_receiver_pb2.DeleteCodeReceiverProviderResponse(success=False, error_message="provider config not found")
-            return code_receiver_pb2.DeleteCodeReceiverProviderResponse(success=True)
+                return sms_pb2.DeleteSmsProviderResponse(success=False, error_message="provider config not found")
+            return sms_pb2.DeleteSmsProviderResponse(success=True)
         except Exception as e:
-            return code_receiver_pb2.DeleteCodeReceiverProviderResponse(success=False, error_message=str(e))
+            return sms_pb2.DeleteSmsProviderResponse(success=False, error_message=str(e))
 
     def AcquireNumber(self, request, context):
         try:
@@ -449,14 +449,14 @@ class CodeReceiverServicer(code_receiver_pb2_grpc.CodeReceiverServiceServicer):
             if result.startswith("ACCESS_NUMBER"):
                 parts = result.split(":", 2)
                 if len(parts) != 3:
-                    return code_receiver_pb2.AcquireNumberResponse(success=False, error_message=f"bad ACCESS_NUMBER response: {result}")
+                    return sms_pb2.AcquireNumberResponse(success=False, error_message=f"bad ACCESS_NUMBER response: {result}")
                 activation_id = parts[1]
                 raw_phone = parts[2]
                 phone = _normalize_phone(config, raw_phone, country)
                 prefix = _calling_code(config, country)
                 display_phone = f"+{prefix}{phone}" if prefix else raw_phone
                 print(f"[herosms-sms] AcquireNumber config={config.config_id} service={service} country={country}: {display_phone} id={activation_id}")
-                return code_receiver_pb2.AcquireNumberResponse(
+                return sms_pb2.AcquireNumberResponse(
                     success=True,
                     activation_id=activation_id,
                     phone=phone,
@@ -464,66 +464,66 @@ class CodeReceiverServicer(code_receiver_pb2_grpc.CodeReceiverServiceServicer):
                 )
             error = _result_error(result)
             print(f"[herosms-sms] AcquireNumber failed config={config.config_id} service={service}: {error}")
-            return code_receiver_pb2.AcquireNumberResponse(success=False, error_message=error, provider=config.provider)
+            return sms_pb2.AcquireNumberResponse(success=False, error_message=error, provider=config.provider)
         except Exception as e:
-            return code_receiver_pb2.AcquireNumberResponse(success=False, error_message=str(e))
+            return sms_pb2.AcquireNumberResponse(success=False, error_message=str(e))
 
     def WaitCode(self, request, context):
         try:
             if not request.activation_id:
-                return code_receiver_pb2.WaitCodeResponse(success=False, error_message="activation_id required")
+                return sms_pb2.WaitCodeResponse(success=False, error_message="activation_id required")
             config = _load_provider_config(request.config_id)
             timeout = request.timeout_seconds or 120
             deadline = time.time() + timeout
             while time.time() < deadline:
                 if context is not None and not context.is_active():
-                    return code_receiver_pb2.WaitCodeResponse(success=False, error_message="cancelled")
+                    return sms_pb2.WaitCodeResponse(success=False, error_message="cancelled")
                 result = _provider_call(config, "getStatus", id=request.activation_id)
                 if result.startswith("STATUS_OK"):
                     parts = result.split(":", 1)
                     code = parts[1].strip() if len(parts) == 2 else ""
                     if not code:
-                        return code_receiver_pb2.WaitCodeResponse(success=False, error_message=f"bad STATUS_OK response: {result}")
+                        return sms_pb2.WaitCodeResponse(success=False, error_message=f"bad STATUS_OK response: {result}")
                     print(f"[herosms-sms] WaitCode: got code {code} for {request.activation_id}")
-                    return code_receiver_pb2.WaitCodeResponse(success=True, code=code)
+                    return sms_pb2.WaitCodeResponse(success=True, code=code)
                 if result == "STATUS_CANCEL":
                     print(f"[herosms-sms] WaitCode: cancelled {request.activation_id}")
-                    return code_receiver_pb2.WaitCodeResponse(success=False, error_message="cancelled")
+                    return sms_pb2.WaitCodeResponse(success=False, error_message="cancelled")
                 if result == "STATUS_WAIT_CODE" or result.startswith("STATUS_WAIT_RETRY"):
                     time.sleep(min(5, max(0.0, deadline - time.time())))
                     continue
-                return code_receiver_pb2.WaitCodeResponse(success=False, error_message=_result_error(result))
-            return code_receiver_pb2.WaitCodeResponse(success=False, error_message="timeout")
+                return sms_pb2.WaitCodeResponse(success=False, error_message=_result_error(result))
+            return sms_pb2.WaitCodeResponse(success=False, error_message="timeout")
         except Exception as e:
-            return code_receiver_pb2.WaitCodeResponse(success=False, error_message=str(e))
+            return sms_pb2.WaitCodeResponse(success=False, error_message=str(e))
 
     def MarkMessageSent(self, request, context):
         try:
             config = _load_provider_config(request.config_id)
-            return _action_response(config, code_receiver_pb2.ProviderActionResponse, request.activation_id, 1)
+            return _action_response(config, sms_pb2.ProviderActionResponse, request.activation_id, 1)
         except Exception as e:
-            return code_receiver_pb2.ProviderActionResponse(success=False, error_message=str(e))
+            return sms_pb2.ProviderActionResponse(success=False, error_message=str(e))
 
     def RequestAdditionalCode(self, request, context):
         try:
             config = _load_provider_config(request.config_id)
-            return _action_response(config, code_receiver_pb2.ProviderActionResponse, request.activation_id, 3)
+            return _action_response(config, sms_pb2.ProviderActionResponse, request.activation_id, 3)
         except Exception as e:
-            return code_receiver_pb2.ProviderActionResponse(success=False, error_message=str(e))
+            return sms_pb2.ProviderActionResponse(success=False, error_message=str(e))
 
     def FinishActivation(self, request, context):
         try:
             config = _load_provider_config(request.config_id)
-            return _action_response(config, code_receiver_pb2.ProviderActionResponse, request.activation_id, 6)
+            return _action_response(config, sms_pb2.ProviderActionResponse, request.activation_id, 6)
         except Exception as e:
-            return code_receiver_pb2.ProviderActionResponse(success=False, error_message=str(e))
+            return sms_pb2.ProviderActionResponse(success=False, error_message=str(e))
 
     def CancelActivation(self, request, context):
         try:
             config = _load_provider_config(request.config_id)
-            return _action_response(config, code_receiver_pb2.ProviderActionResponse, request.activation_id, 8)
+            return _action_response(config, sms_pb2.ProviderActionResponse, request.activation_id, 8)
         except Exception as e:
-            return code_receiver_pb2.ProviderActionResponse(success=False, error_message=str(e))
+            return sms_pb2.ProviderActionResponse(success=False, error_message=str(e))
 
     def GetProviderBalance(self, request, context):
         try:
@@ -531,14 +531,14 @@ class CodeReceiverServicer(code_receiver_pb2_grpc.CodeReceiverServiceServicer):
             result = _provider_call(config, "getBalance")
             if result.startswith("ACCESS_BALANCE:"):
                 result = result.split(":", 1)[1]
-            return code_receiver_pb2.GetProviderBalanceResponse(success=True, balance=_result_error(result))
+            return sms_pb2.GetProviderBalanceResponse(success=True, balance=_result_error(result))
         except Exception as e:
-            return code_receiver_pb2.GetProviderBalanceResponse(success=False, error_message=str(e))
+            return sms_pb2.GetProviderBalanceResponse(success=False, error_message=str(e))
 
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    code_receiver_pb2_grpc.add_CodeReceiverServiceServicer_to_server(CodeReceiverServicer(), server)
+    sms_pb2_grpc.add_SmsServiceServicer_to_server(SmsServicer(), server)
     server.add_insecure_port(f"0.0.0.0:{PORT}")
     server.start()
     print(f"[herosms-sms-service] gRPC listening on :{PORT}")

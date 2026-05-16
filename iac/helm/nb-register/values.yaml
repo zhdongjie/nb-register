@@ -454,7 +454,7 @@ workloads:
       BROWSER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "browser-reg") }}:50051'
       PAYMENT_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "gopay-payment") }}:50051'
       GOPAY_APP_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "gopay-app") }}:50051'
-      CODE_RECEIVER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "herosms-sms-service") }}:50051'
+      SMS_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "herosms-sms-service") }}:50051'
       ACCOUNT_DB_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "account-db") }}:50051'
       EMAIL_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-imap-service") }}:50051'
       MAILBOX_REGISTER_ADDR: '{{ include "nb-register.componentFullname" (dict "root" . "component" "outlook-register-service") }}:50051'

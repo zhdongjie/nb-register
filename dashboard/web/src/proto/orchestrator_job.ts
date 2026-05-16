@@ -46,7 +46,7 @@ export interface JobStep {
   recoverable: boolean;
   retryable: boolean;
   error_message: string;
-  result_json: string;
+  detail: { [key: string]: any } | undefined;
   started_at: number;
   completed_at: number;
 }
@@ -60,7 +60,7 @@ export interface Job {
   retryable: boolean;
   last_step: string;
   error_message: string;
-  result_json: string;
+  result: { [key: string]: any } | undefined;
   created_at: number;
   updated_at: number;
   steps: JobStep[];

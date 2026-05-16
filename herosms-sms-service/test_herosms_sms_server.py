@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-import code_receiver_pb2
+import sms_pb2
 import herosms_sms_server
 
 
@@ -11,7 +11,7 @@ class ActiveContext:
 
 
 def provider_config():
-    return code_receiver_pb2.CodeReceiverProviderConfig(
+    return sms_pb2.SmsProviderConfig(
         config_id="default",
         provider="herosms",
         enabled=True,
@@ -49,17 +49,17 @@ class FakeStore:
         return None
 
 
-class HeroSMSCodeReceiverTests(unittest.TestCase):
+class HeroSMSSmsTests(unittest.TestCase):
     def test_provider_crud_uses_store(self):
         store = FakeStore()
         with patch.object(herosms_sms_server, "_config_store", return_value=store):
-            servicer = herosms_sms_server.CodeReceiverServicer()
+            servicer = herosms_sms_server.SmsServicer()
             upsert = servicer.UpsertProvider(
-                code_receiver_pb2.UpsertCodeReceiverProviderRequest(config=provider_config()),
+                sms_pb2.UpsertSmsProviderRequest(config=provider_config()),
                 None,
             )
-            listed = servicer.ListProviders(code_receiver_pb2.ListCodeReceiverProvidersRequest(), None)
-            deleted = servicer.DeleteProvider(code_receiver_pb2.DeleteCodeReceiverProviderRequest(config_id="default"), None)
+            listed = servicer.ListProviders(sms_pb2.ListSmsProvidersRequest(), None)
+            deleted = servicer.DeleteProvider(sms_pb2.DeleteSmsProviderRequest(config_id="default"), None)
 
         self.assertTrue(upsert.success)
         self.assertTrue(listed.success)
@@ -70,8 +70,8 @@ class HeroSMSCodeReceiverTests(unittest.TestCase):
         config = provider_config()
         with patch.object(herosms_sms_server, "_load_provider_config", return_value=config), \
              patch.object(herosms_sms_server, "_provider_call", return_value="ACCESS_NUMBER:new-id:6281299999999") as call:
-            resp = herosms_sms_server.CodeReceiverServicer().AcquireNumber(
-                code_receiver_pb2.AcquireNumberRequest(),
+            resp = herosms_sms_server.SmsServicer().AcquireNumber(
+                sms_pb2.AcquireNumberRequest(),
                 None,
             )
 
@@ -85,8 +85,8 @@ class HeroSMSCodeReceiverTests(unittest.TestCase):
         config = provider_config()
         with patch.object(herosms_sms_server, "_load_provider_config", return_value=config), \
              patch.object(herosms_sms_server, "_provider_call", return_value="STATUS_OK:123456") as call:
-            resp = herosms_sms_server.CodeReceiverServicer().WaitCode(
-                code_receiver_pb2.WaitCodeRequest(activation_id="act-1", timeout_seconds=1),
+            resp = herosms_sms_server.SmsServicer().WaitCode(
+                sms_pb2.WaitCodeRequest(activation_id="act-1", timeout_seconds=1),
                 ActiveContext(),
             )
 
@@ -98,8 +98,8 @@ class HeroSMSCodeReceiverTests(unittest.TestCase):
         config = provider_config()
         with patch.object(herosms_sms_server, "_load_provider_config", return_value=config), \
              patch.object(herosms_sms_server, "_provider_call", return_value="ACCESS_CANCEL") as call:
-            resp = herosms_sms_server.CodeReceiverServicer().CancelActivation(
-                code_receiver_pb2.CancelActivationRequest(activation_id="act-1"),
+            resp = herosms_sms_server.SmsServicer().CancelActivation(
+                sms_pb2.CancelActivationRequest(activation_id="act-1"),
                 None,
             )
 
@@ -111,8 +111,8 @@ class HeroSMSCodeReceiverTests(unittest.TestCase):
         config = provider_config()
         with patch.object(herosms_sms_server, "_load_provider_config", return_value=config), \
              patch.object(herosms_sms_server, "_provider_call", return_value="ACCESS_ACTIVATION") as call:
-            resp = herosms_sms_server.CodeReceiverServicer().FinishActivation(
-                code_receiver_pb2.FinishActivationRequest(activation_id="act-1"),
+            resp = herosms_sms_server.SmsServicer().FinishActivation(
+                sms_pb2.FinishActivationRequest(activation_id="act-1"),
                 None,
             )
 

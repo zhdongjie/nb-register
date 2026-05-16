@@ -924,7 +924,7 @@ func (s *server) submitJobOTP(w http.ResponseWriter, r *http.Request, jobID stri
 		return
 	}
 
-	resp, err := s.otpClient.SubmitRegistrationOtp(r.Context(), &pb.SubmitRegistrationOtpRequest{
+	resp, err := s.otpClient.SubmitOTP(r.Context(), &pb.SubmitOTPRequest{
 		JobId: jobID,
 		Otp:   req.OTP,
 	})

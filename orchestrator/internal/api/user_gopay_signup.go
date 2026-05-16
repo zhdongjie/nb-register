@@ -24,6 +24,7 @@ func (s *Server) GoPayUserSignupStart(ctx context.Context, req *pb.GoPayUserSign
 		Name:        req.GetName(),
 		Email:       req.GetEmail(),
 		CountryCode: req.GetCountryCode(),
+		OtpChannel:  req.GetOtpChannel(),
 		StateJson:   stateJSON,
 	})
 	if err == nil {

@@ -24,6 +24,11 @@ func failGoPayAppWorkflow(ctx workflow.Context, activityCtx workflow.Context, re
 	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
 	return result
 }
+func failGoPayPaymentWorkflow(ctx workflow.Context, activityCtx workflow.Context, result GoPayPaymentWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) GoPayPaymentWorkflowResult {
+	result.ErrorMessage = err.Error()
+	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)
+	return result
+}
 func failProbeAccountWorkflow(ctx workflow.Context, activityCtx workflow.Context, result ProbeAccountWorkflowResult, jobID, stepName, status string, recoverable, retryable bool, err error, data map[string]any) ProbeAccountWorkflowResult {
 	result.ErrorMessage = err.Error()
 	markWorkflowFailure(ctx, activityCtx, jobID, stepName, status, recoverable, retryable, err, data)

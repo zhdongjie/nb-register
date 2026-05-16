@@ -261,6 +261,15 @@ func (s *Server) waitSMSOTP(ctx context.Context, input OTPWaitInput) (OTPWaitOut
 		if otpResp != nil && otpResp.GetSuccess() && strings.TrimSpace(otpResp.GetCode()) != "" {
 			output.Found = true
 			output.Code = normalizeOTP(otpResp.GetCode())
+			if input.GetOtpParam() != "" {
+				if err := s.setJobParams(ctx, input.GetJobId(), map[string]string{
+					input.GetOtpParam():         output.GetCode(),
+					input.GetSubmittedAtParam(): fmt.Sprintf("%d", time.Now().Unix()),
+				}); err != nil {
+					data["error_message"] = err.Error()
+					return data, err
+				}
+			}
 			data["found"] = true
 			return data, nil
 		}

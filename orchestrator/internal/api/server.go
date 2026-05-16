@@ -53,6 +53,7 @@ const (
 	actionActivate            = contracts.ActionActivate
 	actionAutopay             = contracts.ActionAutopay
 	actionGoPayApp            = contracts.ActionGoPayApp
+	actionGoPayPayment        = contracts.ActionGoPayPayment
 	actionProbeAccount        = contracts.ActionProbeAccount
 	actionLoginSession        = contracts.ActionLoginSession
 	actionRegisterAndActivate = contracts.ActionRegisterAndActivate

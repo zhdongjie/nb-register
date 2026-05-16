@@ -720,7 +720,7 @@ class LoginStartTests(unittest.TestCase):
             state.clear()
             state.update(next_state)
 
-        def fake_start_login(target, phone, pin, country_code):
+        def fake_start_login(target, phone, pin, country_code, otp_channel=""):
             captured["phone"] = phone
             captured["pin"] = pin
             captured["country_code"] = country_code
@@ -842,7 +842,7 @@ class LoginStartTests(unittest.TestCase):
             state.clear()
             state.update(next_state)
 
-        def fake_start_login(target, phone, pin, country_code):
+        def fake_start_login(target, phone, pin, country_code, otp_channel=""):
             captured["phone"] = phone
             captured["country_code"] = country_code
             return {
@@ -879,7 +879,7 @@ class LoginStartTests(unittest.TestCase):
             state.clear()
             state.update(next_state)
 
-        def fake_start_signup(target, phone, name, email, country_code):
+        def fake_start_signup(target, phone, name, email, country_code, otp_channel=""):
             captured["phone"] = phone
             captured["name"] = name
             captured["email"] = email

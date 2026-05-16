@@ -43,6 +43,34 @@ func normalizeTier(tier string) string {
 	return strings.ToLower(strings.TrimSpace(tier))
 }
 
+func normalizeGoPayOTPChannel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "wa", "whatsapp", "otp_wa":
+		return "wa"
+	case "sms", "otp_sms":
+		return "sms"
+	default:
+		return ""
+	}
+}
+
+func goPayOTPWaitInput(jobID, stepName string, start GoPayAppOTPOutput, channel string, activationID string) OTPWaitInput {
+	input := OTPWaitInput{
+		JobId:            jobID,
+		StepName:         stepName,
+		TimeoutSeconds:   start.GetTimeoutSeconds(),
+		IssuedAfterUnix:  start.GetIssuedAfterUnix(),
+		OtpParam:         paymentOTPParam,
+		SubmittedAtParam: paymentOTPSubmittedAtParam,
+	}
+	if normalizeGoPayOTPChannel(channel) == "sms" {
+		input.Target = &pb.OTPWaitInput_Sms{Sms: &pb.OTPWaitSMSTarget{ActivationId: activationID}}
+		return input
+	}
+	input.Target = &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: goPayLocalSource}}
+	return input
+}
+
 func ensureLogonData(resp *pb.EnsureLogonResponse) map[string]any {
 	if resp == nil || ensureLogonResponseEmpty(resp) {
 		return nil

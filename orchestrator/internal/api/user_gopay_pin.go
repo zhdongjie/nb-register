@@ -19,7 +19,7 @@ func (s *Server) GoPayUserCreatePinStart(ctx context.Context, req *pb.GoPayUserC
 	if err != nil {
 		return &pb.GoPayUserCreatePinStartResponse{ErrorMessage: err.Error()}, nil
 	}
-	resp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: req.GetPin(), StateJson: stateJSON})
+	resp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: req.GetPin(), OtpChannel: req.GetOtpChannel(), StateJson: stateJSON})
 	if err == nil {
 		err = s.saveGoPayAppStateForKey(ctx, stateKey, resp.GetStateJson())
 	}

@@ -141,6 +141,7 @@ func main() {
 	mux.HandleFunc("/api/workflows/login", s.handleLogin)
 	mux.HandleFunc("/api/workflows/probe", s.handleProbeAccount)
 	mux.HandleFunc("/api/workflows/gopay-app", s.handleGoPayApp)
+	mux.HandleFunc("/api/workflows/gopay-payment", s.handleGoPayPayment)
 	mux.HandleFunc("/api/workflows/register-and-activate", s.handleRegisterAndActivate)
 	mux.HandleFunc("/", s.handleStatic)
 
@@ -1048,6 +1049,28 @@ func (s *server) handleGoPayApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := s.gopayAppClient.RunGoPayApp(r.Context(), &req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	statusCode := http.StatusAccepted
+	if !resp.GetStarted() || resp.GetErrorMessage() != "" {
+		statusCode = http.StatusBadGateway
+	}
+	writeJSON(w, statusCode, resp)
+}
+
+func (s *server) handleGoPayPayment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req pb.GoPayPaymentRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	resp, err := s.gopayAppClient.RunGoPayPayment(r.Context(), &req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

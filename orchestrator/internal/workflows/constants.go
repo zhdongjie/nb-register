@@ -10,6 +10,7 @@ const (
 	actionActivate            = contracts.ActionActivate
 	actionAutopay             = contracts.ActionAutopay
 	actionGoPayApp            = contracts.ActionGoPayApp
+	actionGoPayPayment        = contracts.ActionGoPayPayment
 	actionProbeAccount        = contracts.ActionProbeAccount
 	actionLoginSession        = contracts.ActionLoginSession
 	actionRegisterAndActivate = contracts.ActionRegisterAndActivate
@@ -49,6 +50,7 @@ const (
 	stepGoPayAppChangePhoneRetry    = "gopay_app_change_phone_retry"
 	stepGoPayAppChangePhoneCancel   = "gopay_app_change_phone_cancel"
 	stepGoPayAppChangePhoneComplete = "gopay_app_change_phone_complete"
+	stepGoPayAppSignupPhone         = "gopay_app_signup_phone"
 	stepGoPayAppDeactivate          = "gopay_app_deactivate"
 	stepGoPayAppDeactivateStart     = "gopay_app_deactivate_start"
 	stepGoPayAppDeactivateSMSWait   = "gopay_app_deactivate_sms_wait"
@@ -56,6 +58,8 @@ const (
 	stepGoPayAppDeactivateComplete  = "gopay_app_deactivate_complete"
 	stepGoPayAppSignup              = "gopay_app_signup"
 	stepGoPayAppCreatePin           = "gopay_app_create_pin"
+	stepGoPayAppSMSFinish           = "gopay_app_sms_finish"
+	stepGoPayAppSMSRequestMore      = "gopay_app_sms_request_more"
 	stepGoPayPayment                = "gopay_payment"
 	stepProbePlusTrial              = "probe_plus_trial"
 	stepProbeTier                   = "probe_tier"

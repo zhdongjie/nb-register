@@ -166,8 +166,20 @@ def new_logon_device_profile() -> dict:
     return device
 
 
-def _choose_otp_method(methods) -> str:
-    preferred = (GOPAY_LOGIN_OTP_METHOD or "otp_wa").strip()
+def _otp_method_from_channel(value: str = "") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"sms", "otp_sms"}:
+        return "otp_sms"
+    if normalized in {"wa", "whatsapp", "otp_wa"}:
+        return "otp_wa"
+    return ""
+
+
+def _choose_otp_method(methods, preferred: str = "") -> str:
+    explicit = _otp_method_from_channel(preferred)
+    if explicit:
+        return explicit
+    preferred = _otp_method_from_channel(GOPAY_LOGIN_OTP_METHOD) or "otp_wa"
     for method in (preferred, "otp_wa", "otp_sms"):
         if method and method in methods:
             return method
@@ -175,7 +187,10 @@ def _choose_otp_method(methods) -> str:
 
 
 def _choose_method(methods, preferred: str = "") -> str:
-    preferred = (preferred or GOPAY_LOGIN_OTP_METHOD or "otp_wa").strip()
+    explicit = _otp_method_from_channel(preferred)
+    if explicit:
+        return explicit
+    preferred = _otp_method_from_channel(GOPAY_LOGIN_OTP_METHOD) or "otp_wa"
     for method in (preferred, "otp_wa", "otp_sms"):
         if method and method in methods:
             return method
@@ -744,7 +759,7 @@ def check_token_valid(state: dict) -> dict:
     }
 
 
-def start_login(state: dict, phone: str, pin: str = "", country_code: str = "") -> dict:
+def start_login(state: dict, phone: str, pin: str = "", country_code: str = "", otp_channel: str = "") -> dict:
     """Start GoTo login and stop at 2FA OTP if needed."""
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
@@ -858,7 +873,7 @@ def start_login(state: dict, phone: str, pin: str = "", country_code: str = "") 
     if r["status"] != 403 or not two_fa_token or not verification_id:
         return {"success": False, "error": _response_error("token exchange failed", r)}
 
-    method = _choose_otp_method(r["data"].get("methods", []))
+    method = _choose_otp_method(r["data"].get("methods", []), otp_channel)
     r = c.post(
         f"{GOTO_AUTH}/cvs/v1/initiate",
         body=_auth_body(
@@ -922,7 +937,7 @@ def complete_login(state: dict, otp: str) -> str:
     return state["token"]
 
 
-def start_signup(state: dict, phone: str, name: str, email: str, country_code: str = "") -> dict:
+def start_signup(state: dict, phone: str, name: str, email: str, country_code: str = "", otp_channel: str = "") -> dict:
     cc = _country_code(country_code)
     normalized_phone = _normalize_phone(phone, cc)
     name = str(name or "").strip()
@@ -953,7 +968,7 @@ def start_signup(state: dict, phone: str, name: str, email: str, country_code: s
     verification_id = r["data"].get("verification_id", "")
     if not verification_id:
         return {"success": False, "error": "signup verification_id missing"}
-    method = _choose_method(r["data"].get("methods", []), r["data"].get("default_method", ""))
+    method = _choose_method(r["data"].get("methods", []), otp_channel or r["data"].get("default_method", ""))
 
     r = c.post(f"{GOTO_AUTH}/cvs/v1/initiate", body=_auth_body(
         country_code=cc,
@@ -1042,7 +1057,7 @@ def complete_signup(state: dict, otp: str) -> dict:
     return {"success": True, "phone": phone, "pin_setup_required": True}
 
 
-def start_signup_pin(state: dict, pin: str) -> dict:
+def start_signup_pin(state: dict, pin: str, otp_channel: str = "") -> dict:
     pin = str(pin or "").strip()
     if not pin:
         return {"success": False, "error": "gopay pin missing"}
@@ -1080,7 +1095,7 @@ def start_signup_pin(state: dict, pin: str) -> dict:
     verification_id = r["data"].get("verification_id", "")
     if not verification_id:
         return {"success": False, "error": "pin verification_id missing"}
-    method = _choose_method(r["data"].get("methods", []), r["data"].get("default_method", ""))
+    method = _choose_method(r["data"].get("methods", []), otp_channel or r["data"].get("default_method", ""))
 
     r = c.post(f"{GOTO_AUTH}/cvs/v1/initiate", body=_auth_body(
         country_code=None,

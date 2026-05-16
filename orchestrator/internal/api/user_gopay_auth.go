@@ -27,6 +27,7 @@ func (s *Server) GoPayUserAuthStart(ctx context.Context, req *pb.GoPayUserAuthSt
 		Phone:       phone,
 		CountryCode: req.GetCountryCode(),
 		Pin:         req.GetPin(),
+		OtpChannel:  req.GetOtpChannel(),
 		StateJson:   stateJSON,
 	})
 	if err == nil {
@@ -49,13 +50,14 @@ func (s *Server) GoPayUserAuthStart(ctx context.Context, req *pb.GoPayUserAuthSt
 		}
 	}
 	return &pb.GoPayUserAuthStartResponse{
-		Success:        resp.GetSuccess(),
-		ErrorMessage:   resp.GetErrorMessage(),
-		Mode:           "login",
-		Stage:          stage,
-		OtpSent:        resp.GetOtpSent(),
-		VerificationId: resp.GetVerificationId(),
-		Ready:          ready,
+		Success:            resp.GetSuccess(),
+		ErrorMessage:       resp.GetErrorMessage(),
+		Mode:               "login",
+		Stage:              stage,
+		OtpSent:            resp.GetOtpSent(),
+		VerificationId:     resp.GetVerificationId(),
+		VerificationMethod: resp.GetVerificationMethod(),
+		Ready:              ready,
 	}, nil
 }
 

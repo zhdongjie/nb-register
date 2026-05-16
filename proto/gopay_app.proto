@@ -75,6 +75,7 @@ message LoginStartRequest {
   string phone = 1;  // 登录手机号；必填，由上游编排传入
   string country_code = 2; // 电话区号，例如 "+62"；必填，由上游编排传入
   string pin = 3;          // 登录 PIN；必填，由上游编排传入
+  string otp_channel = 4;  // sms 或 wa；为空时使用服务默认配置
   string state_json = 100;
 }
 
@@ -83,6 +84,7 @@ message LoginStartResponse {
   string error_message = 2;
   bool otp_sent = 3;
   string verification_id = 4;
+  string verification_method = 5;
   string state_json = 100;
 }
 
@@ -107,6 +109,7 @@ message SignupStartRequest {
   string name = 2;
   string email = 3;
   string country_code = 4; // 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62
+  string otp_channel = 5;  // sms 或 wa；由服务映射为 otp_sms / otp_wa
   string state_json = 100;
 }
 
@@ -134,6 +137,7 @@ message SignupCompleteResponse {
 
 message CreatePinStartRequest {
   string pin = 1;
+  string otp_channel = 2;  // sms 或 wa；由服务映射为 otp_sms / otp_wa
   string state_json = 100;
 }
 
@@ -166,6 +170,7 @@ message AuthStartRequest {
   string phone = 1;        // 手机号；必填，由上游编排传入
   string country_code = 2; // 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62
   string pin = 3;          // login 或 signup PIN setup 使用；为空时使用 GOPAY_PIN
+  string otp_channel = 4;  // sms 或 wa；为空时使用服务默认配置
   string state_json = 100;
 }
 

@@ -60,7 +60,7 @@ func ActivateAccountWorkflow(ctx workflow.Context, input ActivateAccountWorkflow
 	}
 
 	setWorkflowProgress(ctx, progress, stepGoPayAppLogin)
-	logon, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId())
+	logon, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId(), goPayAppOTPOptions{})
 	if err != nil {
 		return failActivateWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppLogin, statusFailedRetryable, false, true, err, map[string]any{"probe_plus_trial": protoDataMap(probe.GetData()), "gopay_login": protoDataMap(logon.GetData())}), nil
 	}
@@ -157,7 +157,7 @@ func AutoPayWorkflow(ctx workflow.Context, input AutoPayWorkflowInput) (AutoPayW
 	}
 
 	setWorkflowProgress(ctx, progress, stepGoPayAppLogin)
-	logon, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId())
+	logon, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId(), goPayAppOTPOptions{})
 	if err != nil {
 		return failAutoPayWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppLogin, statusFailedRetryable, false, true, err, map[string]any{"probe_plus_trial": protoDataMap(probe.GetData()), "gopay_login": protoDataMap(logon.GetData())}), nil
 	}

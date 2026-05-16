@@ -875,13 +875,14 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                     success=True,
                     otp_sent=True,
                     verification_id=state.get("_login_verification_id", ""),
+                    verification_method=state.get("_login_verification_method", ""),
                 )
 
             pin = str(request.pin or "").strip()
             if not pin:
                 return gopay_app_pb2.LoginStartResponse(
                     success=False, error_message="login pin required")
-            result = start_login(state, normalized_phone, pin, country_code)
+            result = start_login(state, normalized_phone, pin, country_code, request.otp_channel)
             if not result.get("success"):
                 if result.get("not_registered"):
                     return gopay_app_pb2.LoginStartResponse(
@@ -901,6 +902,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                 success=True,
                 otp_sent=bool(result.get("otp_sent")),
                 verification_id=result.get("verification_id", ""),
+                verification_method=result.get("method", ""),
             )
         except Exception as e:
             return gopay_app_pb2.LoginStartResponse(success=False, error_message=str(e))
@@ -936,7 +938,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
             name = str(request.name or GOPAY_SIGNUP_NAME or "").strip()
             email = str(request.email or GOPAY_SIGNUP_EMAIL or "").strip()
             country_code = _phone_country_code(request.country_code)
-            result = start_signup(state, phone, name, email, country_code)
+            result = start_signup(state, phone, name, email, country_code, request.otp_channel)
             if not result.get("success"):
                 return gopay_app_pb2.SignupStartResponse(
                     success=False,
@@ -975,7 +977,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
             state = load_state()
             if expire_signup_if_needed(state):
                 save_state(state)
-            result = start_signup_pin(state, _pin(request.pin))
+            result = start_signup_pin(state, _pin(request.pin), request.otp_channel)
             if not result.get("success"):
                 return gopay_app_pb2.CreatePinStartResponse(
                     success=False,
@@ -1048,7 +1050,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                 )
             if stage == "signup_pin_required":
                 resp = self.CreatePinStart(
-                    gopay_app_pb2.CreatePinStartRequest(pin=request.pin),
+                    gopay_app_pb2.CreatePinStartRequest(pin=request.pin, otp_channel=request.otp_channel),
                     context,
                 )
                 state = load_state()
@@ -1081,7 +1083,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
             if normalized_phone.startswith(prefix):
                 normalized_phone = normalized_phone[len(prefix):]
 
-            result = start_login(state, normalized_phone, _pin(request.pin), country_code)
+            result = start_login(state, normalized_phone, _pin(request.pin), country_code, request.otp_channel)
             if result.get("success"):
                 state = load_state()
                 ready = bool(result.get("ready"))
@@ -1120,6 +1122,7 @@ class GopayAppServicer(gopay_app_pb2_grpc.GopayAppServiceServicer):
                     name=_signup_name(),
                     email=_signup_email(),
                     country_code=country_code,
+                    otp_channel=request.otp_channel,
                 ),
                 context,
             )

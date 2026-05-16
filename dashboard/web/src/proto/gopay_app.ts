@@ -79,6 +79,8 @@ export interface LoginStartRequest {
   country_code: string;
   /** 登录 PIN；必填，由上游编排传入 */
   pin: string;
+  /** sms 或 wa；为空时使用服务默认配置 */
+  otp_channel: string;
   state_json: string;
 }
 
@@ -87,6 +89,7 @@ export interface LoginStartResponse {
   error_message: string;
   otp_sent: boolean;
   verification_id: string;
+  verification_method: string;
   state_json: string;
 }
 
@@ -109,6 +112,8 @@ export interface SignupStartRequest {
   email: string;
   /** 电话区号，例如 "+62"；默认 GOPAY_COUNTRY_CODE=62 */
   country_code: string;
+  /** sms 或 wa；由服务映射为 otp_sms / otp_wa */
+  otp_channel: string;
   state_json: string;
 }
 
@@ -136,6 +141,8 @@ export interface SignupCompleteResponse {
 
 export interface CreatePinStartRequest {
   pin: string;
+  /** sms 或 wa；由服务映射为 otp_sms / otp_wa */
+  otp_channel: string;
   state_json: string;
 }
 
@@ -169,6 +176,8 @@ export interface AuthStartRequest {
   country_code: string;
   /** login 或 signup PIN setup 使用；为空时使用 GOPAY_PIN */
   pin: string;
+  /** sms 或 wa；为空时使用服务默认配置 */
+  otp_channel: string;
   state_json: string;
 }
 

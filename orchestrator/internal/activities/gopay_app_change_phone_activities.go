@@ -299,7 +299,7 @@ func (s *Server) GoPayAppSMSFinishActivity(ctx context.Context, input GoPayAppSM
 		"activation_id": input.GetActivationId(),
 		"reason":        input.GetReason(),
 	}
-	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppDeactivateSMSFinish, false, true)
+	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppSMSFinish, false, true)
 	_, err := step.run(func() (any, error) {
 		if input.GetActivationId() == "" {
 			err := fmt.Errorf("activation id missing")
@@ -308,6 +308,49 @@ func (s *Server) GoPayAppSMSFinishActivity(ctx context.Context, input GoPayAppSM
 		}
 		s.finishSMSActivation(ctx, input.GetActivationId())
 		data["finished"] = true
+		return data, nil
+	})
+	output.Data = protoData(data)
+	return output, err
+}
+
+func (s *Server) GoPayAppSMSRequestAdditionalCodeActivity(ctx context.Context, input GoPayAppSMSActivationInput) (GoPayAppSMSActivationOutput, error) {
+	output := GoPayAppSMSActivationOutput{ActivationId: input.GetActivationId()}
+	data := map[string]any{
+		"activation_id": input.GetActivationId(),
+		"reason":        input.GetReason(),
+	}
+	step := s.activityStep(ctx, input.GetJobId(), stepGoPayAppSMSRequestMore, false, true)
+	_, err := step.run(func() (any, error) {
+		if s.smsClient == nil {
+			err := fmt.Errorf("sms client not configured")
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		if input.GetActivationId() == "" {
+			err := fmt.Errorf("activation id missing")
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		resp, err := s.smsClient.RequestAdditionalCode(ctx, &pb.RequestAdditionalCodeRequest{ActivationId: input.GetActivationId()})
+		if err != nil {
+			err = fmt.Errorf("RequestAdditionalCode: %w", err)
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		if resp == nil || !resp.GetSuccess() {
+			message := ""
+			if resp != nil {
+				message = resp.GetErrorMessage()
+			}
+			if message == "" {
+				message = "empty response"
+			}
+			err := fmt.Errorf("RequestAdditionalCode: %s", message)
+			data["error_message"] = err.Error()
+			return data, err
+		}
+		data["requested"] = true
 		return data, nil
 	})
 	output.Data = protoData(data)

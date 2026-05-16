@@ -12,7 +12,12 @@ import (
 func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStartInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppSignup
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationSignup, TimeoutSeconds: s.paymentOtpTimeout()}
-	data := map[string]any{"operation": goPayAppOTPOperationSignup}
+	otpChannel := normalizeGoPayOTPChannel(input.GetOtpChannel())
+	output.OtpChannel = otpChannel
+	data := map[string]any{
+		"operation":   goPayAppOTPOperationSignup,
+		"otp_channel": otpChannel,
+	}
 	defer func() {
 		output.Data = protoData(data)
 	}()
@@ -24,7 +29,16 @@ func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStart
 	if s.gopayClient == nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay app client not configured"))
 	}
-	phone := configuredGoPayPhone()
+	if input.GetResetState() {
+		if err := s.saveGoPayAppState(ctx, "{}"); err != nil {
+			return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("reset gopay app state: %w", err))
+		}
+		data["state_reset"] = true
+	}
+	phone := strings.TrimSpace(input.GetPhone())
+	if phone == "" {
+		phone = configuredGoPayPhone()
+	}
 	if phone == "" {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("GOPAY_PHONE_NUMBER is required"))
 	}
@@ -73,6 +87,7 @@ func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStart
 	startResp, err := s.gopayClient.SignupStart(ctx, &pb.SignupStartRequest{
 		Phone:       phone,
 		CountryCode: configuredGoPayCountryCode(),
+		OtpChannel:  goPayOTPMethod(otpChannel),
 		StateJson:   stateJSON,
 	})
 	if err == nil && startResp != nil {
@@ -84,6 +99,10 @@ func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStart
 	}
 	if startResp == nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay signup start returned empty response"))
+	}
+	output.VerificationMethod = startResp.GetVerificationMethod()
+	if output.GetOtpChannel() == "" {
+		output.OtpChannel = goPayOTPChannelFromMethod(startResp.GetVerificationMethod())
 	}
 	if !startResp.GetSuccess() {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay signup start: %s", startResp.GetErrorMessage()))
@@ -110,8 +129,15 @@ func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStart
 
 	output.OtpRequired = true
 	output.IssuedAfterUnix = authOtpIssuedAfterUnix(statusAfter, startedAt)
+	if normalizeGoPayOTPChannel(output.GetOtpChannel()) == "sms" {
+		if err := s.markGoPaySMSMessageSent(ctx, input.GetSmsActivationId(), data); err != nil {
+			return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
+		}
+	}
 	data["otp_required"] = true
 	data["issued_after_unix"] = output.GetIssuedAfterUnix()
+	data["verification_method"] = output.GetVerificationMethod()
+	data["otp_channel"] = output.GetOtpChannel()
 	step.update(data)
 	return output, nil
 }
@@ -119,6 +145,7 @@ func (s *Server) startGoPayAppSignup(ctx context.Context, input GoPayAppOTPStart
 func (s *Server) completeGoPayAppSignup(ctx context.Context, input GoPayAppOTPCompleteInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppSignup
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationSignup, TimeoutSeconds: s.paymentOtpTimeout()}
+	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
 	data := protoDataMap(input.GetData())
 	if data == nil {
 		data = map[string]any{}

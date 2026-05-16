@@ -39,6 +39,24 @@ export interface GoPayAppResponse {
   error_message: string;
 }
 
+export interface GoPayPaymentRequest {
+  account_id: string;
+  source_job_id: string;
+  /** sms 或 wa；默认 sms */
+  otp_channel: string;
+}
+
+export interface GoPayPaymentResponse {
+  job_id: string;
+  started: boolean;
+  success: boolean;
+  error_message: string;
+  charge_ref: string;
+  snap_token: string;
+  activation_id: string;
+  phone: string;
+}
+
 export interface GoPayUserStatusRequest {
   state_key: string;
 }
@@ -63,6 +81,8 @@ export interface GoPayUserAuthStartRequest {
   phone: string;
   country_code: string;
   pin: string;
+  /** sms 或 wa；为空时使用服务默认配置 */
+  otp_channel: string;
 }
 
 export interface GoPayUserAuthStartResponse {
@@ -133,6 +153,8 @@ export interface GoPayUserSignupStartRequest {
   name: string;
   email: string;
   country_code: string;
+  /** sms 或 wa；为空时使用服务默认配置 */
+  otp_channel: string;
 }
 
 export interface GoPayUserSignupStartResponse {
@@ -158,6 +180,8 @@ export interface GoPayUserSignupCompleteResponse {
 export interface GoPayUserCreatePinStartRequest {
   state_key: string;
   pin: string;
+  /** sms 或 wa；为空时使用服务默认配置 */
+  otp_channel: string;
 }
 
 export interface GoPayUserCreatePinStartResponse {
@@ -197,6 +221,27 @@ export interface GoPayAppWorkflowResult {
   signup_pin_complete: boolean;
 }
 
+export interface GoPayPaymentWorkflowInput {
+  job_id: string;
+  account_id: string;
+  source_job_id: string;
+  /** sms 或 wa；默认 sms */
+  otp_channel: string;
+}
+
+export interface GoPayPaymentWorkflowResult {
+  job_id: string;
+  success: boolean;
+  error_message: string;
+  activation_id: string;
+  phone: string;
+  account_token_ready: boolean;
+  signup_complete: boolean;
+  signup_pin_complete: boolean;
+  charge_ref: string;
+  snap_token: string;
+}
+
 export interface GoPayAppStepInput {
   job_id: string;
   activation_id: string;
@@ -227,6 +272,20 @@ export interface GoPayAppChangePhoneStartOutput {
   max_failures: number;
   otp_timeout_seconds: number;
   otp_retry_attempts: number;
+  data: { [key: string]: any } | undefined;
+}
+
+export interface GoPayAppAcquireSignupPhoneInput {
+  job_id: string;
+  failure_count: number;
+}
+
+export interface GoPayAppAcquireSignupPhoneOutput {
+  activation_id: string;
+  phone: string;
+  failure_count: number;
+  max_failures: number;
+  otp_timeout_seconds: number;
   data: { [key: string]: any } | undefined;
 }
 
@@ -305,6 +364,11 @@ export interface GoPayAppOTPStartInput {
   job_id: string;
   operation: string;
   step_name: string;
+  phone: string;
+  /** sms 或 wa；默认沿用 gopay-app 配置 */
+  otp_channel: string;
+  sms_activation_id: string;
+  reset_state: boolean;
 }
 
 export interface GoPayAppOTPOutput {
@@ -320,6 +384,8 @@ export interface GoPayAppOTPOutput {
   stage: string;
   phone: string;
   data: { [key: string]: any } | undefined;
+  verification_method: string;
+  otp_channel: string;
 }
 
 export interface GoPayAppOTPCompleteInput {
@@ -330,4 +396,6 @@ export interface GoPayAppOTPCompleteInput {
   issued_after_unix: number;
   otp_source: string;
   data: { [key: string]: any } | undefined;
+  otp_channel: string;
+  sms_activation_id: string;
 }

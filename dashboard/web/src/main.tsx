@@ -163,6 +163,8 @@ type AccountMailboxContext = {
   known: boolean;
 };
 
+type GoPayOTPChannel = 'sms' | 'wa';
+
 type Toast = { kind: 'ok' | 'error'; text: string } | null;
 type ViewKey = 'accounts' | 'gopay' | 'mailboxes' | 'mailboxRegistration' | 'jobs';
 type MailboxDetailTab = 'overview' | 'aliases' | 'inbox';
@@ -219,6 +221,7 @@ const actionLabels: DisplayLabelMap = {
   ACTIVATE: '激活支付',
   AUTOPAY: '自动支付',
   GOPAY_APP: 'GoPay App',
+  GOPAY_PAYMENT: 'GoPay 支付',
   REGISTER_AND_ACTIVATE: '注册并激活',
   PROBE_ACCOUNT: '探测账号',
   REGISTER_MAILBOX: '注册 Outlook 邮箱',
@@ -238,6 +241,7 @@ const stepLabels: DisplayLabelMap = {
   gopay_app_change_phone_retry: '重发换绑短信',
   gopay_app_change_phone_cancel: '取消换绑号码',
   gopay_app_change_phone_complete: '完成换绑',
+  gopay_app_signup_phone: '获取未注册 GoPay 号',
   gopay_app_deactivate: 'GoPay 注销',
   gopay_app_deactivate_start: '开始注销',
   gopay_app_deactivate_sms_wait: '等待注销短信',
@@ -245,6 +249,8 @@ const stepLabels: DisplayLabelMap = {
   gopay_app_deactivate_complete: '完成注销',
   gopay_app_signup: 'GoPay 注册',
   gopay_app_create_pin: '创建 GoPay PIN',
+  gopay_app_sms_finish: '结束 GoPay 接码',
+  gopay_app_sms_request_more: '追加短信接码',
   gopay_login: 'GoPay 登录',
   gopay_payment: 'GoPay 支付',
   probe_plus_trial: '探测 0 元资格',
@@ -270,6 +276,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [showSecrets, setShowSecrets] = useState(false);
+  const [gopayOtpChannel, setGopayOtpChannel] = useState<GoPayOTPChannel>('sms');
   const [mailboxRegistering, setMailboxRegistering] = useState(false);
   const [mailboxOAuthing, setMailboxOAuthing] = useState('');
   const [inboxLoading, setInboxLoading] = useState(false);
@@ -381,6 +388,26 @@ function App() {
         setToast({ kind: 'error', text: resp.error_message });
       } else {
         setToast({ kind: 'ok', text: `GoPay App 已提交: ${resp.job_id || 'ok'}` });
+        await refresh();
+      }
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runGoPayPayment(account: Account) {
+    setBusy(true);
+    try {
+      const resp = await api<any>('/api/workflows/gopay-payment', {
+        method: 'POST',
+        body: JSON.stringify({ account_id: account.account_id, otp_channel: gopayOtpChannel })
+      });
+      if (resp.error_message) {
+        setToast({ kind: 'error', text: resp.error_message });
+      } else {
+        setToast({ kind: 'ok', text: `GoPay 支付已提交: ${resp.job_id || 'ok'}` });
         await refresh();
       }
     } catch (err) {
@@ -636,7 +663,7 @@ function App() {
   const selectedAccountLatestOtp = selectedAccount ? latestOtpForEmail(inboxResponse, mailboxes, selectedAccount.email) : null;
   const mailboxRegisterJobs = jobs.filter((job) => job.action === 'REGISTER_MAILBOX');
   const runningMailboxRegisterCount = mailboxRegisterJobs.filter((job) => job.status === 'RUNNING').length;
-  const gopayAppJobs = jobs.filter((job) => job.action === 'GOPAY_APP');
+  const gopayAppJobs = jobs.filter((job) => job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT');
   const runningGoPayAppCount = gopayAppJobs.filter((job) => job.status === 'RUNNING').length;
   const latestGoPayAppJob = gopayAppJobs[0];
   const latestMailboxRegisterJob = mailboxRegisterJobs[0];
@@ -697,6 +724,14 @@ function App() {
                     <NativeSelect value={accountStatus} onChange={(e) => setAccountStatus(e.target.value)}>
                       {statusOptions.map((s) => <NativeSelectOption key={s} value={s}>{s ? statusText(s) : '全部状态'}</NativeSelectOption>)}
                     </NativeSelect>
+                    <NativeSelect
+                      aria-label="GoPay OTP 接码"
+                      value={gopayOtpChannel}
+                      onChange={(event) => setGopayOtpChannel(event.target.value as GoPayOTPChannel)}
+                    >
+                      <NativeSelectOption value="sms">SMS</NativeSelectOption>
+                      <NativeSelectOption value="wa">WA</NativeSelectOption>
+                    </NativeSelect>
                   </div>
                 </PanelHeader>
                 <PanelIntro text="创建账号时邮箱和密码可留空；系统会从邮箱池取可用邮箱，并自动生成密码。" />
@@ -719,6 +754,7 @@ function App() {
                   onLogin={(account) => runAccountWorkflow(loginActionLabel(account), '/api/workflows/login', account)}
                   onActivate={(account) => runAccountWorkflow('激活支付', '/api/workflows/activate', account)}
 	                  onAutopay={(account) => runAccountWorkflow('自动支付', '/api/workflows/autopay', account)}
+	                  onGoPayPayment={runGoPayPayment}
 	                  onCreateCheckoutLink={createCheckoutLink}
 	                  onProbeAccount={(account) => runAccountWorkflow('探测账号', '/api/workflows/probe', account)}
                   onRegisterActivate={(account) => runAccountWorkflow('注册并激活', '/api/workflows/register-and-activate', account)}
@@ -741,6 +777,15 @@ function App() {
               <div className="panel jobsPanel">
                 <PanelHeader title="GoPay App" icon={<RefreshCcw size={16} />}>
                   <div className="headerControls">
+                    <NativeSelect
+                      className="compactSelect"
+                      aria-label="GoPay OTP 接码"
+                      value={gopayOtpChannel}
+                      onChange={(event) => setGopayOtpChannel(event.target.value as GoPayOTPChannel)}
+                    >
+                      <NativeSelectOption value="sms">SMS</NativeSelectOption>
+                      <NativeSelectOption value="wa">WA</NativeSelectOption>
+                    </NativeSelect>
                     <Button className="primaryButton" onClick={runGoPayApp} disabled={busy || runningGoPayAppCount > 0}>
                       <RefreshCcw size={16} /> {runningGoPayAppCount > 0 ? '执行中' : '启动'}
                     </Button>
@@ -1199,7 +1244,7 @@ function OtpSubmitter({ job, onSubmit }: {
   );
 }
 
-function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refreshingAccessTokenIds, busy, onSelect, onRegister, onLogin, onActivate, onAutopay, onGoPayPayment, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   accounts: Account[];
   selected?: string;
   showSecrets: boolean;
@@ -1211,6 +1256,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
   onAutopay: (a: Account) => void;
+  onGoPayPayment: (a: Account) => void;
   onCreateCheckoutLink: (a: Account) => Promise<void>;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
@@ -1265,6 +1311,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
                     onLogin={onLogin}
                     onActivate={onActivate}
                     onAutopay={onAutopay}
+                    onGoPayPayment={onGoPayPayment}
                     onCreateCheckoutLink={onCreateCheckoutLink}
                     onProbeAccount={onProbeAccount}
                     onRegisterActivate={onRegisterActivate}
@@ -1281,7 +1328,7 @@ function AccountTable({ accounts, selected, showSecrets, runningAccountIds, refr
   );
 }
 
-function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
+function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, onRegister, onLogin, onActivate, onAutopay, onGoPayPayment, onCreateCheckoutLink, onProbeAccount, onRegisterActivate, onRefreshAccessToken, onDelete }: {
   account: Account;
   accountBusy: boolean;
   busy: boolean;
@@ -1290,6 +1337,7 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
   onLogin: (a: Account) => void;
   onActivate: (a: Account) => void;
   onAutopay: (a: Account) => void;
+  onGoPayPayment: (a: Account) => void;
   onCreateCheckoutLink: (a: Account) => Promise<void>;
   onProbeAccount: (a: Account) => void;
   onRegisterActivate: (a: Account) => void;
@@ -1302,6 +1350,7 @@ function AccountRowActions({ account, accountBusy, busy, refreshingAccessToken, 
   if (canRegister(account)) actions.push({ label: '注册账号', icon: <Play size={14} />, onClick: () => onRegister(account), disabled: busy, kind: 'primary' });
   if (canActivate(account)) actions.push({ label: '激活支付', icon: <Zap size={14} />, onClick: () => onActivate(account), disabled: true, kind: 'secondary' });
   if (canAutopay(account)) actions.push({ label: '自动支付', icon: <Zap size={14} />, onClick: () => onAutopay(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
+  if (canGoPayPayment(account)) actions.push({ label: 'GoPay 支付', icon: <Zap size={14} />, onClick: () => onGoPayPayment(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canRefreshAccessToken(account)) actions.push({ label: refreshingAccessToken ? '获取中' : '获取 Access', icon: <KeyRound size={14} />, onClick: () => void onRefreshAccessToken(account), disabled: busy || refreshingAccessToken, kind: actions.length ? 'secondary' : 'primary' });
   if (canLoginSession(account)) actions.push({ label: loginActionLabel(account), icon: <KeyRound size={14} />, onClick: () => onLogin(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
   if (canCreateCheckoutLink(account)) actions.push({ label: '提链', icon: <Copy size={14} />, onClick: () => void onCreateCheckoutLink(account), disabled: busy, kind: actions.length ? 'secondary' : 'primary' });
@@ -2033,6 +2082,10 @@ function canAutopay(account: Account) {
     (!!account.session_token || !!account.access_token);
 }
 
+function canGoPayPayment(account: Account) {
+  return canAutopay(account);
+}
+
 function canProbeAccount(account: Account) {
   return !isUserAlreadyExistsAccount(account) && !!account.session_token;
 }
@@ -2087,7 +2140,7 @@ function isUserAlreadyExistsAccount(account: Account) {
 }
 
 function canSubmitOtp(job: Job) {
-  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'REGISTER_AND_ACTIVATE');
+  return job.status === 'RUNNING' && (job.action === 'REGISTER' || job.action === 'LOGIN_SESSION' || job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT' || job.action === 'REGISTER_AND_ACTIVATE');
 }
 
 function stepResultData(job: Job, stepName: string): any | null {
@@ -2097,7 +2150,7 @@ function stepResultData(job: Job, stepName: string): any | null {
 
 function otpSubmitLabel(job: Job) {
   if (job.action === 'LOGIN_SESSION') return '登录 OTP';
-  if (job.action === 'GOPAY_APP') return 'GoPay OTP';
+  if (job.action === 'GOPAY_APP' || job.action === 'GOPAY_PAYMENT') return 'GoPay OTP';
   if (job.action === 'ACTIVATE' || job.action === 'AUTOPAY' || (job.action === 'REGISTER_AND_ACTIVATE' && (job.last_step === 'gopay_login' || job.last_step === 'gopay_payment'))) {
     return '支付 OTP';
   }

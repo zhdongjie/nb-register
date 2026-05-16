@@ -8,6 +8,13 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
+type goPayAppOTPOptions struct {
+	Phone           string
+	OTPChannel      string
+	SMSActivationID string
+	ResetState      bool
+}
+
 func GoPayAppWorkflow(ctx workflow.Context, input GoPayAppWorkflowInput) (GoPayAppWorkflowResult, error) {
 	progress := newWorkflowProgress(ctx, "GoPayAppWorkflow", input.GetJobId())
 	result := GoPayAppWorkflowResult{JobId: input.GetJobId()}
@@ -28,7 +35,7 @@ func GoPayAppWorkflow(ctx workflow.Context, input GoPayAppWorkflowInput) (GoPayA
 
 	combined := map[string]any{}
 	setWorkflowProgress(ctx, progress, stepGoPayAppLogin)
-	login, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId())
+	login, err := runGoPayAppAuth(ctx, gopayCtx, retryCtx, input.GetJobId(), goPayAppOTPOptions{})
 	if err != nil {
 		combined["login"] = protoDataMap(login.GetData())
 		return failGoPayAppWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppLogin, statusFailedRetryable, false, true, err, combined), nil
@@ -55,7 +62,7 @@ func GoPayAppWorkflow(ctx workflow.Context, input GoPayAppWorkflowInput) (GoPayA
 	result.DeactivateComplete = deactivate.GetDeactivateComplete()
 
 	setWorkflowProgress(ctx, progress, stepGoPayAppSignup)
-	signup, err := runGoPayAppSignup(ctx, gopayCtx, retryCtx, input.GetJobId())
+	signup, err := runGoPayAppSignup(ctx, gopayCtx, retryCtx, input.GetJobId(), goPayAppOTPOptions{})
 	if err != nil {
 		combined["signup"] = protoDataMap(signup.GetData())
 		return failGoPayAppWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppSignup, statusFailedRetryable, false, true, err, combined), nil
@@ -64,7 +71,7 @@ func GoPayAppWorkflow(ctx workflow.Context, input GoPayAppWorkflowInput) (GoPayA
 	result.SignupComplete = signup.GetSignupComplete()
 
 	setWorkflowProgress(ctx, progress, stepGoPayAppCreatePin)
-	createPin, err := runGoPayAppCreatePin(ctx, gopayCtx, retryCtx, input.GetJobId())
+	createPin, err := runGoPayAppCreatePin(ctx, gopayCtx, retryCtx, input.GetJobId(), goPayAppOTPOptions{})
 	if err != nil {
 		combined["create_pin"] = protoDataMap(createPin.GetData())
 		return failGoPayAppWorkflow(ctx, retryCtx, result, input.GetJobId(), stepGoPayAppCreatePin, statusFailedRetryable, false, true, err, combined), nil
@@ -250,12 +257,16 @@ func goPayAppStepFromDeactivateComplete(output GoPayAppDeactivateCompleteOutput)
 		Data:               output.GetData(),
 	}
 }
-func runGoPayAppSignup(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string) (GoPayAppStepOutput, error) {
+func runGoPayAppSignup(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string, opts goPayAppOTPOptions) (GoPayAppStepOutput, error) {
 	var start GoPayAppOTPOutput
 	if err := workflow.ExecuteActivity(activityCtx, goPayAppOTPStartActivityName, GoPayAppOTPStartInput{
-		JobId:     jobID,
-		Operation: goPayAppOTPOperationSignup,
-		StepName:  stepGoPayAppSignup,
+		JobId:           jobID,
+		Operation:       goPayAppOTPOperationSignup,
+		StepName:        stepGoPayAppSignup,
+		Phone:           opts.Phone,
+		OtpChannel:      opts.OTPChannel,
+		SmsActivationId: opts.SMSActivationID,
+		ResetState:      opts.ResetState,
 	}).Get(ctx, &start); err != nil {
 		return goPayAppStepFromOTP(start), err
 	}
@@ -266,15 +277,7 @@ func runGoPayAppSignup(ctx workflow.Context, activityCtx workflow.Context, cance
 		return goPayAppStepFromOTP(start), fmt.Errorf("gopay signup did not request OTP and did not complete")
 	}
 
-	otp, err := waitForOTP(ctx, OTPWaitInput{
-		JobId:            jobID,
-		StepName:         stepGoPayAppSignup,
-		Target:           &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: goPayLocalSource}},
-		TimeoutSeconds:   start.GetTimeoutSeconds(),
-		IssuedAfterUnix:  start.GetIssuedAfterUnix(),
-		OtpParam:         paymentOTPParam,
-		SubmittedAtParam: paymentOTPSubmittedAtParam,
-	})
+	otp, err := waitForOTP(ctx, goPayOTPWaitInput(jobID, stepGoPayAppSignup, start, opts.OTPChannel, opts.SMSActivationID))
 	if err != nil {
 		return goPayAppStepFromOTP(start), err
 	}
@@ -288,6 +291,8 @@ func runGoPayAppSignup(ctx workflow.Context, activityCtx workflow.Context, cance
 		IssuedAfterUnix:  start.GetIssuedAfterUnix(),
 		OtpSource:        otp.GetSource(),
 		Data:             start.GetData(),
+		OtpChannel:       opts.OTPChannel,
+		SmsActivationId:  opts.SMSActivationID,
 	}).Get(ctx, &completed); err != nil {
 		return goPayAppStepFromOTP(completed), err
 	}
@@ -296,13 +301,15 @@ func runGoPayAppSignup(ctx workflow.Context, activityCtx workflow.Context, cance
 	}
 	return goPayAppStepFromOTP(completed), fmt.Errorf("gopay signup did not complete")
 }
-func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string) (GoPayAppStepOutput, error) {
+func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string, opts goPayAppOTPOptions) (GoPayAppStepOutput, error) {
 	var last GoPayAppOTPOutput
 	for attempt := 0; attempt < 4; attempt++ {
 		if err := workflow.ExecuteActivity(activityCtx, goPayAppOTPStartActivityName, GoPayAppOTPStartInput{
-			JobId:     jobID,
-			Operation: goPayAppOTPOperationAuth,
-			StepName:  stepGoPayAppLogin,
+			JobId:           jobID,
+			Operation:       goPayAppOTPOperationAuth,
+			StepName:        stepGoPayAppLogin,
+			OtpChannel:      opts.OTPChannel,
+			SmsActivationId: opts.SMSActivationID,
 		}).Get(ctx, &last); err != nil {
 			return goPayAppStepFromOTP(last), err
 		}
@@ -310,7 +317,7 @@ func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelC
 			return goPayAppStepFromOTP(last), nil
 		}
 		if last.GetPinSetupRequired() {
-			pinResult, err := runGoPayAppCreatePin(ctx, activityCtx, cancelCtx, jobID)
+			pinResult, err := runGoPayAppCreatePin(ctx, activityCtx, cancelCtx, jobID, opts)
 			if err != nil {
 				return pinResult, err
 			}
@@ -320,15 +327,7 @@ func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelC
 			continue
 		}
 
-		otp, err := waitForOTP(ctx, OTPWaitInput{
-			JobId:            jobID,
-			StepName:         stepGoPayAppLogin,
-			Target:           &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: goPayLocalSource}},
-			TimeoutSeconds:   last.GetTimeoutSeconds(),
-			IssuedAfterUnix:  last.GetIssuedAfterUnix(),
-			OtpParam:         paymentOTPParam,
-			SubmittedAtParam: paymentOTPSubmittedAtParam,
-		})
+		otp, err := waitForOTP(ctx, goPayOTPWaitInput(jobID, stepGoPayAppLogin, last, opts.OTPChannel, opts.SMSActivationID))
 		if err != nil {
 			return goPayAppStepFromOTP(last), err
 		}
@@ -341,6 +340,8 @@ func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelC
 			IssuedAfterUnix:  last.GetIssuedAfterUnix(),
 			OtpSource:        otp.GetSource(),
 			Data:             last.GetData(),
+			OtpChannel:       opts.OTPChannel,
+			SmsActivationId:  opts.SMSActivationID,
 		}).Get(ctx, &last); err != nil {
 			return goPayAppStepFromOTP(last), err
 		}
@@ -348,7 +349,7 @@ func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelC
 			return goPayAppStepFromOTP(last), nil
 		}
 		if last.GetPinSetupRequired() {
-			pinResult, err := runGoPayAppCreatePin(ctx, activityCtx, cancelCtx, jobID)
+			pinResult, err := runGoPayAppCreatePin(ctx, activityCtx, cancelCtx, jobID, opts)
 			if err != nil {
 				return pinResult, err
 			}
@@ -356,12 +357,14 @@ func runGoPayAppAuth(ctx workflow.Context, activityCtx workflow.Context, cancelC
 	}
 	return goPayAppStepFromOTP(last), fmt.Errorf("gopay auth did not reach token-valid state")
 }
-func runGoPayAppCreatePin(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string) (GoPayAppStepOutput, error) {
+func runGoPayAppCreatePin(ctx workflow.Context, activityCtx workflow.Context, cancelCtx workflow.Context, jobID string, opts goPayAppOTPOptions) (GoPayAppStepOutput, error) {
 	var start GoPayAppOTPOutput
 	if err := workflow.ExecuteActivity(activityCtx, goPayAppOTPStartActivityName, GoPayAppOTPStartInput{
-		JobId:     jobID,
-		Operation: goPayAppOTPOperationCreatePin,
-		StepName:  stepGoPayAppCreatePin,
+		JobId:           jobID,
+		Operation:       goPayAppOTPOperationCreatePin,
+		StepName:        stepGoPayAppCreatePin,
+		OtpChannel:      opts.OTPChannel,
+		SmsActivationId: opts.SMSActivationID,
 	}).Get(ctx, &start); err != nil {
 		return goPayAppStepFromOTP(start), err
 	}
@@ -371,16 +374,18 @@ func runGoPayAppCreatePin(ctx workflow.Context, activityCtx workflow.Context, ca
 	if !start.GetOtpRequired() {
 		return goPayAppStepFromOTP(start), fmt.Errorf("gopay create pin did not request OTP and did not become ready")
 	}
+	if normalizeGoPayOTPChannel(opts.OTPChannel) == "sms" {
+		var requested GoPayAppSMSActivationOutput
+		if err := workflow.ExecuteActivity(activityCtx, goPayAppSMSRequestAdditionalCodeActivityName, GoPayAppSMSActivationInput{
+			JobId:        jobID,
+			ActivationId: opts.SMSActivationID,
+			Reason:       stepGoPayAppCreatePin,
+		}).Get(ctx, &requested); err != nil {
+			return GoPayAppStepOutput{ActivationId: opts.SMSActivationID, Data: requested.GetData()}, err
+		}
+	}
 
-	otp, err := waitForOTP(ctx, OTPWaitInput{
-		JobId:            jobID,
-		StepName:         stepGoPayAppCreatePin,
-		Target:           &pb.OTPWaitInput_Payment{Payment: &pb.OTPWaitPaymentTarget{Source: goPayLocalSource}},
-		TimeoutSeconds:   start.GetTimeoutSeconds(),
-		IssuedAfterUnix:  start.GetIssuedAfterUnix(),
-		OtpParam:         paymentOTPParam,
-		SubmittedAtParam: paymentOTPSubmittedAtParam,
-	})
+	otp, err := waitForOTP(ctx, goPayOTPWaitInput(jobID, stepGoPayAppCreatePin, start, opts.OTPChannel, opts.SMSActivationID))
 	if err != nil {
 		return goPayAppStepFromOTP(start), err
 	}
@@ -394,6 +399,8 @@ func runGoPayAppCreatePin(ctx workflow.Context, activityCtx workflow.Context, ca
 		IssuedAfterUnix:  start.GetIssuedAfterUnix(),
 		OtpSource:        otp.GetSource(),
 		Data:             start.GetData(),
+		OtpChannel:       opts.OTPChannel,
+		SmsActivationId:  opts.SMSActivationID,
 	}).Get(ctx, &completed); err != nil {
 		return goPayAppStepFromOTP(completed), err
 	}

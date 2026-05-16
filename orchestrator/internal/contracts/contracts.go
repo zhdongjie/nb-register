@@ -7,6 +7,7 @@ const (
 	ActionActivate            = "ACTIVATE"
 	ActionAutopay             = "AUTOPAY"
 	ActionGoPayApp            = "GOPAY_APP"
+	ActionGoPayPayment        = "GOPAY_PAYMENT"
 	ActionProbeAccount        = "PROBE_ACCOUNT"
 	ActionLoginSession        = "LOGIN_SESSION"
 	ActionRegisterAndActivate = "REGISTER_AND_ACTIVATE"
@@ -17,35 +18,37 @@ const (
 const (
 	TaskQueueDefault = "nb-register-orchestrator"
 
-	CreateJobActivityName                       = "CreateJobActivity"
-	EnsureAccountActivityName                   = "EnsureAccountActivity"
-	ResolveAccountActivityName                  = "ResolveAccountFromJobActivity"
-	BrowserAuthStartActivityName                = "BrowserAuthStartActivity"
-	BrowserAuthCompleteActivityName             = "BrowserAuthCompleteActivity"
-	BrowserAuthCancelActivityName               = "BrowserAuthCancelActivity"
-	WaitOTPActivityName                         = "OTPWaitActivity"
-	FetchManualOTPActivityName                  = "FetchManualOTPActivity"
-	EnsureLogonActivityName                     = "EnsureLogonActivity"
-	GoPayPaymentStartActivityName               = "GoPayPaymentStartActivity"
-	GoPayPaymentCompleteActivityName            = "GoPayPaymentCompleteActivity"
-	GoPayPaymentCancelActivityName              = "GoPayPaymentCancelActivity"
-	GoPayAppOTPStartActivityName                = "GoPayAppOTPStartActivity"
-	GoPayAppOTPCompleteActivityName             = "GoPayAppOTPCompleteActivity"
-	GoPayAppChangePhoneStartActivityName        = "GoPayAppChangePhoneStartActivity"
-	GoPayAppChangePhoneRetryActivityName        = "GoPayAppChangePhoneRetryActivity"
-	GoPayAppSMSCancelBeforeRotationActivityName = "GoPayAppSMSCancelBeforeRotationActivity"
-	GoPayAppSMSFinishActivityName               = "GoPayAppSMSFinishActivity"
-	GoPayAppChangePhoneCompleteActivityName     = "GoPayAppChangePhoneCompleteActivity"
-	GoPayAppDeactivateStartActivityName         = "GoPayAppDeactivateStartActivity"
-	GoPayAppDeactivateCompleteActivityName      = "GoPayAppDeactivateCompleteActivity"
-	ProbePlusTrialActivityName                  = "ProbePlusTrialAtomicActivity"
-	ProbeTierActivityName                       = "ProbeTierAtomicActivity"
-	RegisterMailboxActivityName                 = "RegisterMailboxAtomicActivity"
-	MailboxOAuthActivityName                    = "MailboxOAuthAtomicActivity"
-	PersistRegisteredActivityName               = "PersistRegisteredActivity"
-	PersistActivatedActivityName                = "PersistActivatedActivity"
-	MarkJobFailedActivityName                   = "MarkJobFailedActivity"
-	MarkJobSucceededActivityName                = "MarkJobSucceededActivity"
+	CreateJobActivityName                        = "CreateJobActivity"
+	EnsureAccountActivityName                    = "EnsureAccountActivity"
+	ResolveAccountActivityName                   = "ResolveAccountFromJobActivity"
+	BrowserAuthStartActivityName                 = "BrowserAuthStartActivity"
+	BrowserAuthCompleteActivityName              = "BrowserAuthCompleteActivity"
+	BrowserAuthCancelActivityName                = "BrowserAuthCancelActivity"
+	WaitOTPActivityName                          = "OTPWaitActivity"
+	FetchManualOTPActivityName                   = "FetchManualOTPActivity"
+	EnsureLogonActivityName                      = "EnsureLogonActivity"
+	GoPayPaymentStartActivityName                = "GoPayPaymentStartActivity"
+	GoPayPaymentCompleteActivityName             = "GoPayPaymentCompleteActivity"
+	GoPayPaymentCancelActivityName               = "GoPayPaymentCancelActivity"
+	GoPayAppOTPStartActivityName                 = "GoPayAppOTPStartActivity"
+	GoPayAppOTPCompleteActivityName              = "GoPayAppOTPCompleteActivity"
+	GoPayAppAcquireSignupPhoneActivityName       = "GoPayAppAcquireSignupPhoneActivity"
+	GoPayAppChangePhoneStartActivityName         = "GoPayAppChangePhoneStartActivity"
+	GoPayAppChangePhoneRetryActivityName         = "GoPayAppChangePhoneRetryActivity"
+	GoPayAppSMSCancelBeforeRotationActivityName  = "GoPayAppSMSCancelBeforeRotationActivity"
+	GoPayAppSMSFinishActivityName                = "GoPayAppSMSFinishActivity"
+	GoPayAppChangePhoneCompleteActivityName      = "GoPayAppChangePhoneCompleteActivity"
+	GoPayAppDeactivateStartActivityName          = "GoPayAppDeactivateStartActivity"
+	GoPayAppDeactivateCompleteActivityName       = "GoPayAppDeactivateCompleteActivity"
+	GoPayAppSMSRequestAdditionalCodeActivityName = "GoPayAppSMSRequestAdditionalCodeActivity"
+	ProbePlusTrialActivityName                   = "ProbePlusTrialAtomicActivity"
+	ProbeTierActivityName                        = "ProbeTierAtomicActivity"
+	RegisterMailboxActivityName                  = "RegisterMailboxAtomicActivity"
+	MailboxOAuthActivityName                     = "MailboxOAuthAtomicActivity"
+	PersistRegisteredActivityName                = "PersistRegisteredActivity"
+	PersistActivatedActivityName                 = "PersistActivatedActivity"
+	MarkJobFailedActivityName                    = "MarkJobFailedActivity"
+	MarkJobSucceededActivityName                 = "MarkJobSucceededActivity"
 
 	ManualOTPSignalName       = "manual_otp_available"
 	WorkflowProgressQueryName = "progress"
@@ -65,6 +68,8 @@ func WorkflowID(action string, jobID string) (string, bool) {
 		return "autopay-" + jobID, true
 	case ActionGoPayApp:
 		return "gopay-app-" + jobID, true
+	case ActionGoPayPayment:
+		return "gopay-payment-" + jobID, true
 	case ActionProbeAccount:
 		return "probe-" + jobID, true
 	case ActionLoginSession:
@@ -82,7 +87,7 @@ func WorkflowID(action string, jobID string) (string, bool) {
 
 func ManualOTPWorkflowID(action string, jobID string) (string, bool) {
 	switch strings.TrimSpace(action) {
-	case ActionRegister, ActionActivate, ActionAutopay, ActionGoPayApp, ActionRegisterAndActivate, ActionLoginSession:
+	case ActionRegister, ActionActivate, ActionAutopay, ActionGoPayApp, ActionGoPayPayment, ActionRegisterAndActivate, ActionLoginSession:
 		return WorkflowID(action, jobID)
 	default:
 		return "", false

@@ -12,7 +12,12 @@ import (
 func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPStartInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppCreatePin
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationCreatePin, TimeoutSeconds: s.paymentOtpTimeout()}
-	data := map[string]any{"operation": goPayAppOTPOperationCreatePin}
+	otpChannel := normalizeGoPayOTPChannel(input.GetOtpChannel())
+	output.OtpChannel = otpChannel
+	data := map[string]any{
+		"operation":   goPayAppOTPOperationCreatePin,
+		"otp_channel": otpChannel,
+	}
 	defer func() {
 		output.Data = protoData(data)
 	}()
@@ -59,7 +64,7 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 	if err != nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, err)
 	}
-	startResp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: pin, StateJson: stateJSON})
+	startResp, err := s.gopayClient.CreatePinStart(ctx, &pb.CreatePinStartRequest{Pin: pin, OtpChannel: goPayOTPMethod(otpChannel), StateJson: stateJSON})
 	if err == nil && startResp != nil {
 		err = s.saveGoPayAppState(ctx, startResp.GetStateJson())
 	}
@@ -69,6 +74,10 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 	}
 	if startResp == nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay create pin start returned empty response"))
+	}
+	output.VerificationMethod = startResp.GetVerificationMethod()
+	if output.GetOtpChannel() == "" {
+		output.OtpChannel = goPayOTPChannelFromMethod(startResp.GetVerificationMethod())
 	}
 	if !startResp.GetSuccess() {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay create pin start: %s", startResp.GetErrorMessage()))
@@ -98,6 +107,8 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 	output.IssuedAfterUnix = authOtpIssuedAfterUnix(statusAfter, startedAt)
 	data["otp_required"] = true
 	data["issued_after_unix"] = output.GetIssuedAfterUnix()
+	data["verification_method"] = output.GetVerificationMethod()
+	data["otp_channel"] = output.GetOtpChannel()
 	step.update(data)
 	return output, nil
 }
@@ -105,6 +116,7 @@ func (s *Server) startGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPSt
 func (s *Server) completeGoPayAppCreatePin(ctx context.Context, input GoPayAppOTPCompleteInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppCreatePin
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationCreatePin, TimeoutSeconds: s.paymentOtpTimeout()}
+	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
 	data := protoDataMap(input.GetData())
 	if data == nil {
 		data = map[string]any{}

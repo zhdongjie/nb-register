@@ -12,7 +12,9 @@ import (
 func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartInput) (GoPayAppOTPOutput, error) {
 	stepName := gopayAppOTPStepName(input)
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationAuth, TimeoutSeconds: s.paymentOtpTimeout()}
-	data := map[string]any{"operation": goPayAppOTPOperationAuth}
+	otpChannel := normalizeGoPayOTPChannel(input.GetOtpChannel())
+	output.OtpChannel = otpChannel
+	data := map[string]any{"operation": goPayAppOTPOperationAuth, "otp_channel": otpChannel}
 	defer func() {
 		output.Data = protoData(data)
 	}()
@@ -70,6 +72,7 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 		Phone:       phone,
 		CountryCode: configuredGoPayCountryCode(),
 		Pin:         pin,
+		OtpChannel:  goPayOTPMethod(otpChannel),
 		StateJson:   stateJSON,
 	})
 	if err == nil && startResp != nil {
@@ -81,6 +84,10 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 	}
 	if startResp == nil {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay auth start returned empty response"))
+	}
+	output.VerificationMethod = startResp.GetVerificationMethod()
+	if output.GetOtpChannel() == "" {
+		output.OtpChannel = goPayOTPChannelFromMethod(startResp.GetVerificationMethod())
 	}
 	if !startResp.GetSuccess() {
 		return output, s.completeGoPayAppOTPStep(ctx, input.GetJobId(), stepName, data, fmt.Errorf("gopay auth start: %s", startResp.GetErrorMessage()))
@@ -113,6 +120,8 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 	output.IssuedAfterUnix = authOtpIssuedAfterUnix(statusAfter, startedAt)
 	data["otp_required"] = true
 	data["issued_after_unix"] = output.GetIssuedAfterUnix()
+	data["verification_method"] = output.GetVerificationMethod()
+	data["otp_channel"] = output.GetOtpChannel()
 	step.update(data)
 	return output, nil
 }
@@ -120,6 +129,7 @@ func (s *Server) startGoPayAppAuth(ctx context.Context, input GoPayAppOTPStartIn
 func (s *Server) completeGoPayAppAuth(ctx context.Context, input GoPayAppOTPCompleteInput) (GoPayAppOTPOutput, error) {
 	stepName := stepGoPayAppLogin
 	output := GoPayAppOTPOutput{Operation: goPayAppOTPOperationAuth, TimeoutSeconds: s.paymentOtpTimeout()}
+	output.OtpChannel = normalizeGoPayOTPChannel(input.GetOtpChannel())
 	data := protoDataMap(input.GetData())
 	if data == nil {
 		data = map[string]any{}

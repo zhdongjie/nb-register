@@ -133,6 +133,24 @@ func (s *Server) RunGoPayApp(ctx context.Context, req *pb.GoPayAppRequest) (*pb.
 	return &pb.GoPayAppResponse{JobId: jobID, Started: true}, nil
 }
 
+func (s *Server) RunGoPayPayment(ctx context.Context, req *pb.GoPayPaymentRequest) (*pb.GoPayPaymentResponse, error) {
+	jobID := uuid.NewString()
+	otpChannel := strings.TrimSpace(req.GetOtpChannel())
+	if otpChannel == "" {
+		otpChannel = "sms"
+	}
+	_, err := s.temporal.ExecuteWorkflow(ctx, s.workflowOptions(workflowIDForAction(actionGoPayPayment, jobID)), workflows.GoPayPaymentWorkflow, workflows.GoPayPaymentWorkflowInput{
+		JobId:       jobID,
+		AccountId:   strings.TrimSpace(req.GetAccountId()),
+		SourceJobId: strings.TrimSpace(req.GetSourceJobId()),
+		OtpChannel:  otpChannel,
+	})
+	if err != nil {
+		return &pb.GoPayPaymentResponse{JobId: jobID, ErrorMessage: err.Error()}, nil
+	}
+	return &pb.GoPayPaymentResponse{JobId: jobID, Started: true}, nil
+}
+
 func (s *Server) RegisterAndActivateAccount(ctx context.Context, req *pb.RegisterAndActivateAccountRequest) (*pb.RegisterAndActivateAccountResponse, error) {
 	jobID := uuid.NewString()
 	accountID := strings.TrimSpace(req.GetAccountId())

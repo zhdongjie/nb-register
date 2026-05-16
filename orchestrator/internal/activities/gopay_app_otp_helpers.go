@@ -8,6 +8,57 @@ import (
 	pb "orchestrator/pb"
 )
 
+func normalizeGoPayOTPChannel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "sms", "otp_sms":
+		return "sms"
+	case "wa", "whatsapp", "otp_wa":
+		return "wa"
+	default:
+		return ""
+	}
+}
+
+func goPayOTPMethod(channel string) string {
+	switch normalizeGoPayOTPChannel(channel) {
+	case "sms":
+		return "sms"
+	case "wa":
+		return "wa"
+	default:
+		return ""
+	}
+}
+
+func goPayOTPChannelFromMethod(method string) string {
+	return normalizeGoPayOTPChannel(method)
+}
+
+func (s *Server) markGoPaySMSMessageSent(ctx context.Context, activationID string, data map[string]any) error {
+	if strings.TrimSpace(activationID) == "" {
+		return fmt.Errorf("sms activation id missing")
+	}
+	if s.smsClient == nil {
+		return fmt.Errorf("sms client not configured")
+	}
+	resp, err := s.smsClient.MarkMessageSent(ctx, &pb.MarkMessageSentRequest{ActivationId: activationID})
+	data["sms_mark_sent"] = providerActionData(resp, err)
+	if err != nil {
+		return fmt.Errorf("MarkMessageSent: %w", err)
+	}
+	if resp == nil || !resp.GetSuccess() {
+		message := ""
+		if resp != nil {
+			message = resp.GetErrorMessage()
+		}
+		if message == "" {
+			message = "empty response"
+		}
+		return fmt.Errorf("MarkMessageSent: %s", message)
+	}
+	return nil
+}
+
 func (s *Server) finishGoPayAppOTPReady(ctx context.Context, jobID, stepName string, output GoPayAppOTPOutput, data map[string]any) (GoPayAppOTPOutput, error) {
 	tokenResp, err := s.validateGoPayAccountToken(ctx)
 	data["check_token_valid_after"] = checkTokenValidData(tokenResp)
@@ -103,6 +154,18 @@ func createPinStartData(resp *pb.CreatePinStartResponse) map[string]any {
 		"otp_sent":            resp.GetOtpSent(),
 		"verification_method": resp.GetVerificationMethod(),
 	}
+}
+
+func providerActionData(resp *pb.ProviderActionResponse, err error) map[string]any {
+	data := map[string]any{"response_present": resp != nil}
+	if resp != nil {
+		data["success"] = resp.GetSuccess()
+		data["error_message"] = resp.GetErrorMessage()
+	}
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	return data
 }
 
 func signupStartData(resp *pb.SignupStartResponse) map[string]any {

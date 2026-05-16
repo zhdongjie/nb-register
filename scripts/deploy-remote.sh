@@ -27,6 +27,8 @@ IMPORT_HTTP_PORT=${IMPORT_HTTP_PORT:-31888}
 IMPORT_TIMEOUT_SECONDS=${IMPORT_TIMEOUT_SECONDS:-600}
 
 BUILD_CAMOUFOX_BASE=${BUILD_CAMOUFOX_BASE:-auto}
+CAMOUFOX_FETCH_PROXY=${CAMOUFOX_FETCH_PROXY:-http://host.docker.internal:10809}
+CAMOUFOX_BASE_BUILD_FLAGS=${CAMOUFOX_BASE_BUILD_FLAGS:---add-host=host.docker.internal:host-gateway}
 SKIP_SYNC=${SKIP_SYNC:-false}
 SKIP_BUILD=${SKIP_BUILD:-false}
 SKIP_IMPORT=${SKIP_IMPORT:-false}
@@ -77,7 +79,8 @@ Options:
 Environment overrides:
   REMOTE_KUBECONFIG, REMOTE_HELM, IMAGE_PREFIX, IMPORT_METHOD, VM_NAME,
   IMPORT_HOST_IP, IMPORT_HTTP_BIND, IMPORT_HTTP_PORT, HELM_TIMEOUT,
-  ROLLOUT_TIMEOUT, KEEP_REMOTE_TAR.
+  ROLLOUT_TIMEOUT, KEEP_REMOTE_TAR, CAMOUFOX_FETCH_PROXY,
+  CAMOUFOX_BASE_BUILD_FLAGS.
 EOF
 }
 
@@ -309,7 +312,7 @@ build_camoufox_base_if_needed() {
   fi
 
   log "build nb-register-camoufox-base:latest"
-  remote "cd $(shell_quote "$REMOTE_DIR") && docker build -t nb-register-camoufox-base:latest -f docker/camoufox-base/Dockerfile docker/camoufox-base"
+  remote "cd $(shell_quote "$REMOTE_DIR") && docker build $CAMOUFOX_BASE_BUILD_FLAGS --build-arg CAMOUFOX_FETCH_PROXY=$(shell_quote "$CAMOUFOX_FETCH_PROXY") -t nb-register-camoufox-base:latest -f docker/camoufox-base/Dockerfile docker/camoufox-base"
 }
 
 build_images() {

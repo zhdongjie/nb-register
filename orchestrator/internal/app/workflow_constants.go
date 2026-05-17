@@ -37,6 +37,7 @@ const (
 	goPayAppAcquireSignupPhoneActivityName       = contracts.GoPayAppAcquireSignupPhoneActivityName
 	goPayAppDiscardSignupPhoneActivityName       = contracts.GoPayAppDiscardSignupPhoneActivityName
 	goPayAppAddBalanceActivityName               = contracts.GoPayAppAddBalanceActivityName
+	goPayAppChangePhoneGetNumberActivityName     = contracts.GoPayAppChangePhoneGetNumberActivityName
 	goPayAppChangePhoneStartActivityName         = contracts.GoPayAppChangePhoneStartActivityName
 	goPayAppChangePhoneRetryActivityName         = contracts.GoPayAppChangePhoneRetryActivityName
 	goPayAppSMSCancelBeforeRotationActivityName  = contracts.GoPayAppSMSCancelBeforeRotationActivityName

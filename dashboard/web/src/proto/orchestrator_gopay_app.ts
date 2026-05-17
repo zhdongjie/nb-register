@@ -390,6 +390,8 @@ export interface GoPayAppChangePhoneStartInput {
   job_id: string;
   failure_count: number;
   state_json: string;
+  activation_id: string;
+  phone: string;
 }
 
 export interface GoPayAppChangePhoneStartOutput {
@@ -401,6 +403,21 @@ export interface GoPayAppChangePhoneStartOutput {
   otp_retry_attempts: number;
   data: { [key: string]: any } | undefined;
   state_json: string;
+  retryable_failure: boolean;
+  error_message: string;
+}
+
+export interface GoPayAppChangePhoneGetNumberInput {
+  job_id: string;
+  failure_count: number;
+}
+
+export interface GoPayAppChangePhoneGetNumberOutput {
+  activation_id: string;
+  phone: string;
+  failure_count: number;
+  max_failures: number;
+  data: { [key: string]: any } | undefined;
 }
 
 export interface GoPayAppAcquireSignupPhoneInput {

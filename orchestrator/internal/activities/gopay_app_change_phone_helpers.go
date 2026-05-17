@@ -58,6 +58,19 @@ func (s *Server) recordChangePhoneFailure(ctx context.Context, activationID stri
 	return nil
 }
 
+func smsNoNumbers(message string) bool {
+	return strings.Contains(strings.ToUpper(strings.TrimSpace(message)), "NO_NUMBERS")
+}
+
+func changePhoneStartRetryableError(message string) bool {
+	switch strings.ToUpper(strings.TrimSpace(message)) {
+	case "PHONE_REGISTERED", "PHONE_EXHAUSTED":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) recordCompletedChangePhoneFailure(ctx context.Context, activationID string, failures *int, reason string) error {
 	if activationID != "" {
 		s.finishSMSActivation(ctx, activationID)

@@ -53,6 +53,7 @@ func registerTemporalWorker(w worker.Worker, s *activities.Server) {
 	w.RegisterActivityWithOptions(s.GoPayAppAcquireSignupPhoneActivity, activity.RegisterOptions{Name: goPayAppAcquireSignupPhoneActivityName})
 	w.RegisterActivityWithOptions(s.GoPayAppDiscardSignupPhoneActivity, activity.RegisterOptions{Name: goPayAppDiscardSignupPhoneActivityName})
 	w.RegisterActivityWithOptions(s.GoPayAppAddBalanceActivity, activity.RegisterOptions{Name: goPayAppAddBalanceActivityName})
+	w.RegisterActivityWithOptions(s.GoPayAppChangePhoneGetNumberActivity, activity.RegisterOptions{Name: goPayAppChangePhoneGetNumberActivityName})
 	w.RegisterActivityWithOptions(s.GoPayAppChangePhoneStartActivity, activity.RegisterOptions{Name: goPayAppChangePhoneStartActivityName})
 	w.RegisterActivityWithOptions(s.GoPayAppChangePhoneRetryActivity, activity.RegisterOptions{Name: goPayAppChangePhoneRetryActivityName})
 	w.RegisterActivityWithOptions(s.GoPayAppSMSCancelBeforeRotationActivity, activity.RegisterOptions{Name: goPayAppSMSCancelBeforeRotationActivityName})

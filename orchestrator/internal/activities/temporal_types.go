@@ -37,6 +37,8 @@ type GoPayPaymentRebindSourceOutput = pb.GoPayPaymentRebindSourceOutput
 
 type GoPayAppStepInput = pb.GoPayAppStepInput
 type GoPayAppStepOutput = pb.GoPayAppStepOutput
+type GoPayAppChangePhoneGetNumberInput = pb.GoPayAppChangePhoneGetNumberInput
+type GoPayAppChangePhoneGetNumberOutput = pb.GoPayAppChangePhoneGetNumberOutput
 type GoPayAppChangePhoneStartInput = pb.GoPayAppChangePhoneStartInput
 type GoPayAppChangePhoneStartOutput = pb.GoPayAppChangePhoneStartOutput
 type GoPayAppAcquireSignupPhoneInput = pb.GoPayAppAcquireSignupPhoneInput

@@ -51,6 +51,7 @@ const (
 	GoPayAppAcquireSignupPhoneActivityName       = "GoPayAppAcquireSignupPhoneActivity"
 	GoPayAppDiscardSignupPhoneActivityName       = "GoPayAppDiscardSignupPhoneActivity"
 	GoPayAppAddBalanceActivityName               = "GoPayAppAddBalanceActivity"
+	GoPayAppChangePhoneGetNumberActivityName     = "GoPayAppChangePhoneGetNumberActivity"
 	GoPayAppChangePhoneStartActivityName         = "GoPayAppChangePhoneStartActivity"
 	GoPayAppChangePhoneRetryActivityName         = "GoPayAppChangePhoneRetryActivity"
 	GoPayAppSMSCancelBeforeRotationActivityName  = "GoPayAppSMSCancelBeforeRotationActivity"

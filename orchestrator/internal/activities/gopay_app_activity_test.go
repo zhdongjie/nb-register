@@ -78,6 +78,30 @@ func TestGoPayWorkflowStatePresentRequiresNonEmptyObject(t *testing.T) {
 	}
 }
 
+func TestSMSNoNumbers(t *testing.T) {
+	if !smsNoNumbers("NO_NUMBERS") {
+		t.Fatal("NO_NUMBERS was not detected")
+	}
+	if !smsNoNumbers("GetNumber: no_numbers") {
+		t.Fatal("case-insensitive NO_NUMBERS was not detected")
+	}
+	if smsNoNumbers("BAD_KEY") {
+		t.Fatal("unrelated provider error was detected as NO_NUMBERS")
+	}
+}
+
+func TestChangePhoneStartRetryableError(t *testing.T) {
+	if !changePhoneStartRetryableError("PHONE_REGISTERED") {
+		t.Fatal("PHONE_REGISTERED should be retryable")
+	}
+	if !changePhoneStartRetryableError("phone_exhausted") {
+		t.Fatal("PHONE_EXHAUSTED should be retryable")
+	}
+	if changePhoneStartRetryableError("BAD_PIN") {
+		t.Fatal("BAD_PIN should not be retryable")
+	}
+}
+
 func TestCancelSMSActivationAsyncDoesNotBlockCaller(t *testing.T) {
 	client := &blockingSMSClient{
 		started: make(chan string, 1),

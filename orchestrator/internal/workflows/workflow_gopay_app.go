@@ -101,14 +101,37 @@ func runGoPayAppChangePhone(ctx workflow.Context, activityCtx workflow.Context, 
 	var failureCount int32
 	var last GoPayAppStepOutput
 	for {
+		var number GoPayAppChangePhoneGetNumberOutput
+		if err := workflow.ExecuteActivity(activityCtx, goPayAppChangePhoneGetNumberActivityName, GoPayAppChangePhoneGetNumberInput{
+			JobId:        jobID,
+			FailureCount: failureCount,
+		}).Get(ctx, &number); err != nil {
+			return GoPayAppStepOutput{
+				ActivationId: number.GetActivationId(),
+				Phone:        number.GetPhone(),
+				Data:         number.GetData(),
+				StateJson:    stateJSON,
+			}, err
+		}
+		failureCount = number.GetFailureCount()
+		last = GoPayAppStepOutput{
+			ActivationId: number.GetActivationId(),
+			Phone:        number.GetPhone(),
+			Data:         number.GetData(),
+			StateJson:    stateJSON,
+		}
+
 		var start GoPayAppChangePhoneStartOutput
 		if err := workflow.ExecuteActivity(activityCtx, goPayAppChangePhoneStartActivityName, GoPayAppChangePhoneStartInput{
 			JobId:        jobID,
 			FailureCount: failureCount,
 			StateJson:    stateJSON,
+			ActivationId: number.GetActivationId(),
+			Phone:        number.GetPhone(),
 		}).Get(ctx, &start); err != nil {
 			return GoPayAppStepOutput{
 				ActivationId: start.GetActivationId(),
+				Phone:        start.GetPhone(),
 				Data:         start.GetData(),
 				StateJson:    start.GetStateJson(),
 			}, err
@@ -117,8 +140,12 @@ func runGoPayAppChangePhone(ctx workflow.Context, activityCtx workflow.Context, 
 		failureCount = start.GetFailureCount()
 		last = GoPayAppStepOutput{
 			ActivationId: start.GetActivationId(),
+			Phone:        start.GetPhone(),
 			Data:         start.GetData(),
 			StateJson:    stateJSON,
+		}
+		if start.GetRetryableFailure() {
+			continue
 		}
 
 		for otpAttempt := int32(0); otpAttempt <= start.GetOtpRetryAttempts(); otpAttempt++ {

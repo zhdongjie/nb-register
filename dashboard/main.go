@@ -139,6 +139,7 @@ func main() {
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/events", s.streamJobsEvents)
 	mux.HandleFunc("/api/jobs/", s.handleJob)
+	mux.HandleFunc("/api/gopay/state", s.handleGoPayState)
 	mux.HandleFunc("/api/workflows/register", s.handleRegister)
 	mux.HandleFunc("/api/workflows/activate", s.handleActivate)
 	mux.HandleFunc("/api/workflows/autopay", s.handleAutopay)
@@ -1153,6 +1154,23 @@ func (s *server) handleGoPayApp(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusBadGateway
 	}
 	writeJSON(w, statusCode, resp)
+}
+
+func (s *server) handleGoPayState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		userID = "local"
+	}
+	resp, err := s.gopayAppClient.GoPayUserStatus(r.Context(), &pb.GoPayUserStatusRequest{UserId: userID})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) handleGoPayPayment(w http.ResponseWriter, r *http.Request) {

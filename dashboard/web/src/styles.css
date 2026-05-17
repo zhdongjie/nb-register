@@ -584,6 +584,49 @@ input, select {
   width: min(240px, 100%);
 }
 
+.goPayStatePanel {
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 12px;
+}
+
+.goPayStatePanel .registrationSummary {
+  margin-bottom: 12px;
+}
+
+.goPayStateGrid {
+  padding: 0 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 8px;
+}
+
+.goPayStateField {
+  min-width: 0;
+  min-height: 52px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.goPayStateField span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.goPayStateField strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .workflowTabs {
   min-height: 0;
   flex: 1;
@@ -618,6 +661,10 @@ input, select {
 
 .workflowTabToolbar button {
   flex: 0 0 auto;
+}
+
+.goPayRebindToolbar {
+  padding: 12px 14px;
 }
 
 .tableWrap {

@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import type { GoPayUserStatusResponse } from './proto/orchestrator_gopay_app';
 import type { Job, JobEvent, JobSnapshot, JobStep as Step, WorkflowProgress } from './proto/orchestrator_job';
 import './styles.css';
 
@@ -322,6 +323,8 @@ function App() {
   const [mailboxOAuthing, setMailboxOAuthing] = useState('');
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxResponse, setInboxResponse] = useState<InboxResponse | null>(null);
+  const [goPayStateStatus, setGoPayStateStatus] = useState<GoPayUserStatusResponse | null>(null);
+  const [goPayStateLoading, setGoPayStateLoading] = useState(false);
   const [refreshingAccessTokenIds, setRefreshingAccessTokenIds] = useState<Set<string>>(new Set());
   const [loadError, setLoadError] = useState('');
   const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
@@ -379,6 +382,9 @@ function App() {
         const freshMailbox = nextMailboxes.find((mailbox) => mailbox.email_address === selectedMailbox.email_address);
         if (freshMailbox) setSelectedMailbox(freshMailbox);
       }
+      if (activeView === 'gopay') {
+        await loadGoPayStateStatus(false);
+      }
       setLoadError('');
     } catch (err) {
       const message = errorText(err);
@@ -420,20 +426,20 @@ function App() {
     });
   }
 
-  async function runGoPayApp() {
-    setBusy(true);
+  async function loadGoPayStateStatus(showToast = false) {
+    setGoPayStateLoading(true);
     try {
-      const resp = await api<any>('/api/workflows/gopay-app', { method: 'POST', body: '{}' });
-      if (resp.error_message) {
-        setToast({ kind: 'error', text: resp.error_message });
-      } else {
-        setToast({ kind: 'ok', text: `GoPay App 已提交: ${resp.job_id || 'ok'}` });
-        await refresh();
+      const resp = await api<GoPayUserStatusResponse>('/api/gopay/state?user_id=local');
+      setGoPayStateStatus(resp);
+      if (showToast) {
+        setToast(resp.error_message
+          ? { kind: 'error', text: resp.error_message }
+          : { kind: 'ok', text: 'GoPay state 已刷新' });
       }
     } catch (err) {
       setToast({ kind: 'error', text: errorText(err) });
     } finally {
-      setBusy(false);
+      setGoPayStateLoading(false);
     }
   }
 
@@ -749,6 +755,11 @@ function App() {
   }, [selectedJob?.job_id, selectedJob?.status]);
 
   useEffect(() => {
+    if (activeView !== 'gopay') return;
+    void loadGoPayStateStatus(false);
+  }, [activeView]);
+
+  useEffect(() => {
     if (!toast) return;
     const id = window.setTimeout(() => setToast(null), toast.kind === 'error' ? 6000 : 3500);
     return () => window.clearTimeout(id);
@@ -803,10 +814,11 @@ function App() {
   const selectedAccountLatestOtp = selectedAccount ? latestOtpForEmail(inboxResponse, mailboxes, selectedAccount.email) : null;
   const gptWorkflowJobs = jobs.filter((job) => gptWorkflowActions.has(job.action));
   const gopayWorkflowJobs = jobs.filter((job) => gopayWorkflowActions.has(job.action));
+  const goPayRebindJobs = gopayWorkflowJobs.filter((job) => job.action === 'GOPAY_PAYMENT_REBIND');
   const mailboxWorkflowJobs = jobs.filter((job) => mailboxWorkflowActions.has(job.action));
   const mailboxRegisterJobs = mailboxWorkflowJobs.filter((job) => job.action === 'REGISTER_MAILBOX');
   const runningMailboxRegisterCount = runningJobs.filter((job) => job.action === 'REGISTER_MAILBOX').length;
-  const runningGoPayAppCount = runningJobs.filter((job) => job.action === 'GOPAY_APP').length;
+  const runningGoPayRebindCount = runningJobs.filter((job) => job.action === 'GOPAY_PAYMENT_REBIND').length;
   const jobsForWorkflowTab = workflowTab === 'gpt'
     ? gptWorkflowJobs
     : workflowTab === 'gopay'
@@ -815,6 +827,7 @@ function App() {
         ? mailboxWorkflowJobs
         : jobs;
   const latestMailboxRegisterJob = mailboxRegisterJobs[0];
+  const latestGoPayRebindJob = goPayRebindJobs[0];
   const panelState: PanelState = {
     loading: busy && accounts.length === 0 && jobs.length === 0 && mailboxes.length === 0,
     error: loadError
@@ -839,7 +852,7 @@ function App() {
       <section className="appFrame">
         <nav className="navRail" aria-label="主导航">
           <NavItem active={activeView === 'accounts'} icon={<OpenAIIcon size={17} />} label="GPT账号" count={accounts.length} countLabel="全部 GPT 账号数" onClick={() => openView('accounts')} />
-          <NavItem active={activeView === 'gopay'} icon={<RefreshCcw size={17} />} label="GoPay" count={runningGoPayAppCount} countLabel="运行中的 GoPay App 任务" onClick={() => openView('gopay')} />
+          <NavItem active={activeView === 'gopay'} icon={<RefreshCcw size={17} />} label="GoPay" count={runningGoPayRebindCount} countLabel="运行中的 GoPay 换绑任务" onClick={() => openView('gopay')} />
           <NavItem active={activeView === 'mailboxes'} icon={<Inbox size={17} />} label="邮箱管理" count={allocatableMailboxCount} countLabel="可分配邮箱源数" onClick={() => openView('mailboxes')} />
           <NavItem active={activeView === 'jobs'} icon={<ListChecks size={17} />} label="工作流" count={runningJobCount} countLabel="运行中的工作流任务" onClick={() => openView('jobs')} />
         </nav>
@@ -906,13 +919,24 @@ function App() {
 
           {activeView === 'gopay' && (
             <section className="workspace jobsWorkspace">
-              <div className="panel debugPanel">
-                <PanelHeader title="GoPay 调试" icon={<RefreshCcw size={16} />} />
-                <div className="debugActions">
-                  <Button className="primaryButton" onClick={runGoPayApp} disabled={busy || runningGoPayAppCount > 0}>
-                    <RefreshCcw size={16} /> {runningGoPayAppCount > 0 ? '执行中' : '启动 GoPay App'}
+              <div className="panel jobsPanel">
+                <PanelHeader title="GoPay 换绑" icon={<RefreshCcw size={16} />}>
+                  <Button className="secondaryButton" onClick={() => void loadGoPayStateStatus(true)} disabled={goPayStateLoading}>
+                    <RefreshCcw size={16} /> {goPayStateLoading ? '刷新中' : '刷新 state'}
                   </Button>
+                </PanelHeader>
+                <GoPayStateStatusPanel state={goPayStateStatus} loading={goPayStateLoading} />
+                <div className="workflowTabToolbar goPayRebindToolbar">
+                  <WorkflowSummary
+                    job={latestGoPayRebindJob}
+                    runningCount={runningGoPayRebindCount}
+                    runningTitle={(count) => `${count} 个换绑任务运行中`}
+                    runningText="GoPay WA 支付完成后会自动创建换绑任务。"
+                    idleTitle="暂无换绑任务"
+                    idleText="支付任务不在 GoPay 页展示。"
+                  />
                 </div>
+                <JobTable jobs={goPayRebindJobs} selected={selectedJob?.job_id} emptyText="暂无 GoPay 换绑任务" onSelect={selectJob} onGoPayRebindRetry={retryGoPayPaymentRebind} />
               </div>
             </section>
           )}
@@ -2055,6 +2079,90 @@ function WorkflowSummary({ job, runningCount, runningTitle, runningText, idleTit
       </div>
     </div>
   );
+}
+
+function GoPayStateStatusPanel({ state, loading }: { state: GoPayUserStatusResponse | null; loading: boolean }) {
+  const status = state?.status;
+  const error = state?.error_message || status?.error_message || '';
+  const stage = String(status?.stage || '').trim();
+  const cls = error ? 'bad' : status?.token_present && stage === 'ready' ? 'good' : 'mid';
+  const title = loading
+    ? 'State 刷新中'
+    : error
+      ? 'State 异常'
+      : status
+        ? `State：${goPayStateStageText(stage)}`
+        : 'State 未加载';
+  const text = error
+    ? compactCellError(error)
+    : status
+      ? `${status.token_present ? 'Token 已保存' : '无 Token'} · ${status.phone || '无手机号'} · ${goPayBalanceText(status)}`
+      : '打开 GoPay 页后会读取 local state。';
+  const icon = loading ? <Clock size={16} /> : error ? <AlertTriangle size={16} /> : <ShieldCheck size={16} />;
+  const latestOtp = latestGoPayOtpWindow(status);
+
+  return (
+    <div className="goPayStatePanel">
+      <div className={`registrationSummary ${cls}`}>
+        {icon}
+        <div>
+          <strong>{title}</strong>
+          <span title={error || text}>{text}</span>
+        </div>
+      </div>
+      <div className="goPayStateGrid">
+        <GoPayStateField label="User" value="local" />
+        <GoPayStateField label="阶段" value={goPayStateStageText(stage)} raw={stage || '-'} />
+        <GoPayStateField label="手机号" value={status?.phone || '-'} />
+        <GoPayStateField label="Token" value={status?.token_present ? '已保存' : '-'} />
+        <GoPayStateField label="余额" value={status ? goPayBalanceText(status) : '-'} />
+        <GoPayStateField label="设备" value={status?.device_fingerprint || '-'} />
+        <GoPayStateField label="OTP" value={latestOtp || '-'} />
+        <GoPayStateField label="注销时间" value={formatUnix(status?.deactivated_at || 0)} />
+      </div>
+    </div>
+  );
+}
+
+function GoPayStateField({ label, value, raw }: { label: string; value: string; raw?: string }) {
+  return (
+    <div className="goPayStateField" title={raw || value}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function goPayStateStageText(stage: string) {
+  const labels: DisplayLabelMap = {
+    ready: 'ready',
+    login_otp_sent: '登录 OTP',
+    signup_otp_sent: '注册 OTP',
+    signup_pin_otp_sent: 'PIN OTP',
+    change_phone_otp_sent: '换绑 OTP',
+    deactivation_otp_sent: '注销 OTP'
+  };
+  return labels[stage] || stage || '未保存';
+}
+
+function goPayBalanceText(status: NonNullable<GoPayUserStatusResponse['status']>) {
+  const currency = status.balance_currency || 'IDR';
+  const amount = Number(status.balance_amount || 0);
+  if (!status.token_present && amount === 0) return '-';
+  return `${amount} ${currency}${status.has_min_balance ? ' · 足额' : ' · 未达标'}`;
+}
+
+function latestGoPayOtpWindow(status: GoPayUserStatusResponse['status']) {
+  if (!status) return '';
+  const windows = [
+    { label: '登录', sent: status.login_otp_sent_at_unix, expires: status.login_otp_expires_at_unix },
+    { label: '注册', sent: status.signup_otp_sent_at_unix, expires: status.signup_otp_expires_at_unix },
+    { label: 'PIN', sent: status.signup_pin_otp_sent_at_unix, expires: status.signup_pin_otp_expires_at_unix }
+  ].filter((item) => item.sent || item.expires);
+  if (windows.length === 0) return '';
+  windows.sort((a, b) => (b.sent || b.expires) - (a.sent || a.expires));
+  const latest = windows[0];
+  return `${latest.label} · ${formatUnix(latest.sent)} - ${formatUnix(latest.expires)}`;
 }
 
 function MailboxStatusStrip({ mailboxes, allocations }: { mailboxes: Mailbox[]; allocations: GPTEmailAllocation[] }) {

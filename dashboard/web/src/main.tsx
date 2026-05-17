@@ -313,6 +313,10 @@ function App() {
   const runningJobCount = runningJobs.length;
   const runningAccountIds = new Set(runningJobs.filter((job) => job.account_id).map((job) => job.account_id));
   const runningJobByAccountID = latestJobMap(runningJobs.filter((job) => job.account_id), (job) => job.account_id);
+  const runningMailboxJobByEmail = latestJobMap(
+    runningJobs.filter((job) => mailboxWorkflowEmail(job)),
+    (job) => mailboxWorkflowEmail(job)
+  );
   const selectedJob = selectedJobSnapshot?.job || null;
   const selectedJobProgress = selectedJobSnapshot?.progress || null;
   const selectedJobID = selectedJob?.job_id || '';
@@ -909,7 +913,9 @@ function App() {
                   busy={busy}
                   showSecrets={showSecrets}
                   oauthing={mailboxOAuthing}
+                  runningWorkflowByEmail={runningMailboxJobByEmail}
                   onSelect={selectMailbox}
+                  onOpenWorkflow={selectJob}
                   onOAuth={runMailboxOAuth}
                   onDelete={deleteMailbox}
                   onDone={async (message) => {
@@ -1723,14 +1729,16 @@ function JobTable({ jobs, selected, emptyText = '暂无工作流任务', onSelec
   );
 }
 
-function MailboxPanel({ mailboxes, allMailboxes, selected, busy, showSecrets, oauthing, onSelect, onOAuth, onDelete, onDone, onError }: {
+function MailboxPanel({ mailboxes, allMailboxes, selected, busy, showSecrets, oauthing, runningWorkflowByEmail, onSelect, onOpenWorkflow, onOAuth, onDelete, onDone, onError }: {
   mailboxes: Mailbox[];
   allMailboxes: Mailbox[];
   selected?: string;
   busy: boolean;
   showSecrets: boolean;
   oauthing: string;
+  runningWorkflowByEmail: Map<string, Job>;
   onSelect: (mailbox: Mailbox) => void;
+  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onDelete: (mailbox: Mailbox) => Promise<void>;
   onDone: (message: string) => void;
@@ -1795,6 +1803,7 @@ function MailboxPanel({ mailboxes, allMailboxes, selected, busy, showSecrets, oa
               const isOAuthing = oauthing === mailbox.email_address || oauthing === '*';
               const canOAuth = mailbox.is_primary && !!mailbox.password;
               const oauthLabel = authStatus(mailbox) === 'AUTHORIZED' ? '重新 OAuth' : '补 OAuth';
+              const currentWorkflow = runningWorkflowByEmail.get(normalizeUiEmail(mailbox.email_address));
               return (
                 <TableRow key={mailbox.email_address} className={selected === mailbox.email_address ? 'selected' : ''} onClick={() => onSelect(mailbox)}>
                   <TableCell data-label="主邮箱">
@@ -1813,7 +1822,9 @@ function MailboxPanel({ mailboxes, allMailboxes, selected, busy, showSecrets, oa
                   </TableCell>
                   <TableCell data-label="操作">
                     <div className="rowActions" onClick={(event) => event.stopPropagation()}>
-                      {canOAuth ? (
+                      {currentWorkflow ? (
+                        <LinkedWorkflowButton job={currentWorkflow} onOpen={onOpenWorkflow} />
+                      ) : canOAuth ? (
                         <Button className="rowButtonText" {...buttonHint(isOAuthing ? 'OAuth 提交中' : `${oauthLabel}：${showSecrets ? mailbox.email_address : maskEmail(mailbox.email_address)}`)} disabled={busy || !!oauthing} onClick={() => onOAuth(mailbox.email_address)}>
                           <KeyRound size={14} /> {isOAuthing ? '提交中' : oauthLabel}
                         </Button>
@@ -2789,6 +2800,20 @@ function latestJobMap(jobs: Job[], keyOf: (job: Job) => string) {
     }
   }
   return map;
+}
+
+function mailboxWorkflowEmail(job: Job) {
+  if (job.action !== 'MAILBOX_OAUTH') return '';
+  const candidates = [objectValue(job.result)];
+  for (const step of job.steps || []) {
+    const detail = stepDetailData(step);
+    if (detail) candidates.push(detail);
+  }
+  for (const data of candidates) {
+    const email = normalizeUiEmail(stringValue(data.email_address));
+    if (email) return email;
+  }
+  return '';
 }
 
 async function copyText(value: string): Promise<boolean> {

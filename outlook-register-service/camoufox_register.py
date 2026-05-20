@@ -28,47 +28,6 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-OUTLOOK_CONSENT_SELECTORS = [
-    'button:has-text("Agree and continue")',
-    'button:has-text("Accept and continue")',
-    'button:text-is("Agree")',
-    'button:text-is("Accept")',
-    'button:has-text("\u540c\u610f\u5e76\u7ee7\u7eed")',
-    'button:has-text("\u63a5\u53d7\u5e76\u7ee7\u7eed")',
-    'button:text-is("\u540c\u610f")',
-    '[role="button"]:has-text("Agree and continue")',
-    '[role="button"]:has-text("Accept and continue")',
-    '[role="button"]:has-text("\u540c\u610f\u5e76\u7ee7\u7eed")',
-    '[role="button"]:has-text("\u63a5\u53d7\u5e76\u7ee7\u7eed")',
-    'text="Agree and continue"',
-    'text="Accept and continue"',
-    'text="\u540c\u610f\u5e76\u7ee7\u7eed"',
-    'text="\u63a5\u53d7\u5e76\u7ee7\u7eed"',
-    'input[type="submit"][value*="Agree"]',
-    'input[type="submit"][value*="Accept"]',
-    'input[type="submit"][value*="\u540c\u610f"]',
-]
-
-OUTLOOK_EMAIL_INPUT_SELECTORS = [
-    'input[aria-label*="New email"]',
-    'input[aria-label*="Create email"]',
-    'input[aria-label*="email"]',
-    'input[aria-label*="\u65b0\u5efa"]',
-    'input[aria-label*="\u7535\u5b50\u90ae\u4ef6"]',
-    'input[placeholder*="New email"]',
-    'input[placeholder*="email"]',
-    'input[placeholder*="\u65b0\u5efa"]',
-    'input[placeholder*="\u7535\u5b50\u90ae\u4ef6"]',
-    'input[name="MemberName"]',
-    'input[id="MemberName"]',
-    'input[id*="username" i]',
-    '#usernameInput',
-    'input[type="email"]',
-    'input[autocomplete="username"]',
-    'input:not([type="hidden"]):not([type="password"])',
-]
-
-
 def _is_target_closed(exc: Exception) -> bool:
     """Check if an exception is a Playwright TargetClosedError by class name."""
     return type(exc).__name__ == "TargetClosedError"
@@ -82,11 +41,30 @@ def _page_is_closed(page) -> bool:
         return False
 
 
-def _safe_page_url(page) -> str:
+def _safe_screenshot(page, path: str) -> None:
     try:
-        return str(page.url)
-    except Exception:
-        return ""
+        page.screenshot(path=path, timeout=5000)
+    except Exception as exc:
+        logger.warning("[browser] screenshot skipped for %s: %s", path, exc)
+
+
+def _page_snapshot(page, limit: int = 1000) -> str:
+    try:
+        title = page.title()
+    except Exception as exc:
+        title = f"<title error: {exc}>"
+    try:
+        url = page.url
+    except Exception as exc:
+        url = f"<url error: {exc}>"
+    try:
+        text = page.locator("body").inner_text(timeout=2000)
+    except Exception as exc:
+        text = f"<body text error: {exc}>"
+    text = re.sub(r"\s+", " ", str(text)).strip()
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return f"url={url}; title={title}; body={text}"
 
 try:
     BOT_PROTECTION_WAIT = max(0, int(os.environ.get("OUTLOOK_REGISTER_BOT_PROTECTION_WAIT", "0")))
@@ -187,7 +165,9 @@ def _first_visible_locator(page, selectors, timeout=10000):
             except Exception as exc:
                 last_error = exc
         page.wait_for_timeout(250)
-    raise TimeoutError(f"no visible locator found: {selectors}; last_error={last_error}")
+    raise TimeoutError(
+        f"no visible locator found: {selectors}; last_error={last_error}; page={_page_snapshot(page)}"
+    )
 
 
 def _type_into(locator, value, delay=0):
@@ -224,53 +204,28 @@ def _type_into(locator, value, delay=0):
     raise last_error
 
 
-def _accept_outlook_consent_if_visible(page, timeout=3000) -> bool:
-    try:
-        consent = _first_visible_locator(page, OUTLOOK_CONSENT_SELECTORS, timeout=timeout)
-    except Exception:
-        return False
-    page.wait_for_timeout(150)
-    consent.click(timeout=30000)
-    logger.info("[outlook] Consent accepted")
-    try:
-        page.wait_for_load_state("domcontentloaded", timeout=5000)
-    except Exception:
-        pass
-    return True
-
-
-def _outlook_email_input(page, timeout=30000):
-    deadline = time.time() + timeout / 1000
-    last_error = None
-    while time.time() < deadline:
-        if _accept_outlook_consent_if_visible(page, timeout=500):
-            page.wait_for_timeout(800)
-            continue
-        try:
-            return _first_visible_locator(page, OUTLOOK_EMAIL_INPUT_SELECTORS, timeout=700)
-        except Exception as exc:
-            last_error = exc
-        page.wait_for_timeout(250)
-
-    raise TimeoutError(
-        f"no Outlook email input visible after consent handling; "
-        f"url={_safe_page_url(page)}; last_error={last_error}"
-    )
-
-
 def _click_primary(page, timeout=10000):
     button = _first_visible_locator(page, [
         '[data-testid="primaryButton"]',
-        'button[type="submit"]',
         'button:has-text("Next")',
         'button:has-text("Continue")',
+        '[role="button"]:has-text("Next")',
+        '[role="button"]:has-text("Continue")',
+        'button[type="submit"]',
+        'input[type="submit"]',
     ], timeout=timeout)
     errors = []
     actions = [
-        lambda: _click_with_bezier(page, button, box_timeout=1500),
-        lambda: button.click(timeout=2000),
-        lambda: button.click(timeout=2000, force=True),
-        lambda: button.evaluate("(el) => el.click()"),
+        lambda: button.click(timeout=3000),
+        lambda: _click_with_bezier(page, button, box_timeout=3000),
+        lambda: button.click(timeout=3000, force=True),
+        lambda: button.evaluate(
+            """(el) => {
+                el.scrollIntoView({block: 'center', inline: 'center'});
+                el.focus?.();
+                el.click();
+            }"""
+        ),
         lambda: button.dispatch_event("click", timeout=1000),
     ]
     for action in actions:
@@ -301,12 +256,35 @@ def _password_input_visible(page) -> bool:
         return False
 
 
-def _email_input_visible(page) -> bool:
+def _birthday_or_name_input_visible(page) -> bool:
     try:
-        _first_visible_locator(page, OUTLOOK_EMAIL_INPUT_SELECTORS, timeout=400)
+        _first_visible_locator(page, [
+            '[name="BirthYear"]',
+            '#BirthYear',
+            'input[aria-label*="Year"]',
+            'input[inputmode="numeric"]',
+            'input[type="number"]',
+            '[name="FirstName"]',
+            '[name="LastName"]',
+            'input[aria-label*="First name"]',
+            'input[aria-label*="Last name"]',
+        ], timeout=500)
         return True
     except Exception:
         return False
+
+
+def _wait_for_birthday_or_name_page(page, timeout=15000) -> bool:
+    deadline = time.time() + timeout / 1000
+    while time.time() < deadline:
+        if _birthday_or_name_input_visible(page):
+            return True
+        if not _password_input_visible(page):
+            page.wait_for_timeout(300)
+            if _birthday_or_name_input_visible(page):
+                return True
+        page.wait_for_timeout(300)
+    return _birthday_or_name_input_visible(page)
 
 
 def _visible_text_present(page, texts) -> bool:
@@ -319,6 +297,23 @@ def _visible_text_present(page, texts) -> bool:
         except Exception:
             continue
     return False
+
+
+def _accept_consent_if_visible(page, wait_ms: int) -> bool:
+    try:
+        consent = _first_visible_locator(page, [
+            'button:has-text("Agree and continue")',
+            'button:has-text("Accept and continue")',
+            'button:has-text("Agree")',
+            'text="Agree and continue"',
+        ], timeout=5000)
+        page.wait_for_timeout(int(0.1 * wait_ms))
+        consent.click(timeout=30000)
+        logger.info("[outlook] Consent accepted")
+        return True
+    except Exception:
+        logger.info("[outlook] Consent screen not shown, continuing")
+        return False
 
 
 def _is_mailbox_url(current_url: str) -> bool:
@@ -430,62 +425,135 @@ def _wait_for_email_outcome(page, current_local: str, suffix: str, timeout=30000
     return "unknown"
 
 
-def _submit_email_and_wait(page, email_input, current_local: str, suffix: str) -> str:
-    max_submit_attempts = 4
-    outcome_timeout_ms = 20000
+def _find_signup_email_input(page, selectors, timeout=8000):
+    return _first_visible_locator(page, selectors, timeout=timeout)
 
-    for submit_attempt in range(1, max_submit_attempts + 1):
-        logger.info("[outlook] Submitting email (%d/%d)", submit_attempt, max_submit_attempts)
+
+def _email_input_requires_full_address(page, email_input) -> bool:
+    try:
+        input_text = str(email_input.evaluate(
+            """(el) => [
+                el.getAttribute("aria-label") || "",
+                el.getAttribute("placeholder") || "",
+                el.getAttribute("name") || "",
+                el.innerText || "",
+                el.value || "",
+                el.textContent || "",
+            ].join(" ")"""
+        ) or "")
+    except Exception:
+        input_text = ""
+
+    try:
+        body_text = str(page.locator("body").inner_text(timeout=1000) or "")
+    except Exception:
+        body_text = ""
+
+    combined = f"{input_text} {body_text}"
+    if re.search(r"someone@example|format:\s*someone@|email address in the format", combined, re.I):
+        return True
+
+    has_visible_outlook_suffix = re.search(r"@(outlook|hotmail)\.com", combined, re.I)
+    if has_visible_outlook_suffix and re.search(r"new email|create your microsoft account", combined, re.I):
+        return False
+
+    return bool(re.search(r"email address|current email|existing email", combined, re.I))
+
+def _open_signup_entry_form(page, email_input_selectors, wait_ms: int):
+    for wait_timeout in (6000, 12000):
+        try:
+            return _find_signup_email_input(page, email_input_selectors, timeout=wait_timeout)
+        except Exception:
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+
+    current_url = ""
+    try:
+        current_url = page.url
+    except Exception:
+        pass
+
+    if "outlook.live.com/mail" in current_url.lower():
+        logger.warning("[outlook] Signup shell did not render email form; reloading Outlook signup shell")
+        try:
+            page.reload(timeout=45000, wait_until="domcontentloaded")
+            _accept_consent_if_visible(page, wait_ms)
+            return _find_signup_email_input(page, email_input_selectors, timeout=12000)
+        except Exception as exc:
+            logger.warning("[outlook] Outlook signup shell reload did not expose email form: %s", exc)
+
+    for url in (
+        "https://signup.live.com/signup?lic=1",
+        "https://signup.live.com/?lic=1",
+    ):
+        logger.warning("[outlook] Trying fallback signup entry: %s", url)
+        try:
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            _accept_consent_if_visible(page, wait_ms)
+            return _find_signup_email_input(page, email_input_selectors, timeout=15000)
+        except Exception as exc:
+            logger.warning("[outlook] Fallback signup entry did not expose email form: %s", exc)
+
+    return _find_signup_email_input(page, email_input_selectors, timeout=15000)
+
+
+def _submit_email_until_outcome(
+    page,
+    email_input,
+    email_local: str,
+    email_suffix: str,
+    wait_ms: int,
+    expected_input_value: str,
+) -> str:
+    outcome = "unknown"
+    for submit_attempt in range(1, 4):
+        logger.info("[outlook] Submitting email (%d/3)", submit_attempt)
         try:
             _click_primary(page, timeout=5000)
         except Exception as exc:
-            logger.info("[outlook] Primary email submit failed: %s", exc)
+            logger.warning("[outlook] Primary email submit click failed: %s", exc)
 
-        page.wait_for_timeout(1000)
-        outcome = _wait_for_email_outcome(page, current_local, suffix, timeout=outcome_timeout_ms)
+        page.wait_for_timeout(max(800, int(0.01 * wait_ms)))
+        outcome = _wait_for_email_outcome(page, email_local, email_suffix, timeout=7000)
         if outcome != "unknown":
             return outcome
 
-        if not _email_input_visible(page):
-            continue
+        try:
+            email_input.press("Enter", timeout=2000)
+        except Exception as exc:
+            logger.debug("[outlook] Email input Enter submit failed: %s", exc)
 
-        logger.info("[outlook] Still on email entry after submit; retrying")
-        for action in (
-            lambda: email_input.press("Enter", timeout=2000),
-            lambda: page.keyboard.press("Enter", timeout=2000),
-            lambda: page.evaluate(
-                """() => {
-                    const visible = (el) => {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        return rect.width > 0 && rect.height > 0 &&
-                            style.visibility !== 'hidden' && style.display !== 'none';
-                    };
-                    for (const el of document.querySelectorAll('[data-testid="primaryButton"], button[type="submit"], button')) {
-                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (visible(el) && (text === 'next' || text === 'continue' || el.type === 'submit')) {
-                            el.click();
-                            return true;
-                        }
-                    }
-                    const input = document.querySelector('input[type="email"], input[name*="MemberName" i], input[name*="email" i], input[aria-label*="email" i]');
-                    if (input && input.form) {
-                        if (input.form.requestSubmit) input.form.requestSubmit();
-                        else input.form.submit();
-                        return true;
-                    }
-                    return false;
-                }"""
-            ),
-        ):
-            try:
-                action()
-                page.wait_for_timeout(700)
-                break
-            except Exception:
-                continue
+        page.wait_for_timeout(max(800, int(0.01 * wait_ms)))
+        outcome = _wait_for_email_outcome(page, email_local, email_suffix, timeout=7000)
+        if outcome != "unknown":
+            return outcome
 
-    return _wait_for_email_outcome(page, current_local, suffix, timeout=3000)
+        try:
+            page.keyboard.press("Enter")
+        except Exception as exc:
+            logger.debug("[outlook] Page keyboard Enter submit failed: %s", exc)
+
+        page.wait_for_timeout(max(800, int(0.01 * wait_ms)))
+        outcome = _wait_for_email_outcome(page, email_local, email_suffix, timeout=7000)
+        if outcome != "unknown":
+            return outcome
+
+        try:
+            actual_local = email_input.input_value(timeout=1000).strip().lower()
+            if actual_local != expected_input_value.lower():
+                logger.warning(
+                    "[outlook] Email input changed after submit attempt; expected=%s actual=%s; refilling",
+                    expected_input_value,
+                    actual_local,
+                )
+                _type_into(email_input, expected_input_value, delay=int(0.002 * wait_ms))
+        except Exception:
+            pass
+
+    logger.warning("[outlook] Email submit stayed on the same step; page=%s", _page_snapshot(page, limit=500))
+    return outcome
 
 
 def _select_birth_value(page, field_name, value, option_texts):
@@ -853,7 +921,7 @@ def outlook_oauth(
         with Camoufox(
             headless=headless, humanize=True, persistent_context=True,
             user_data_dir=tmp_profile, screen=Screen(max_width=1920, max_height=1080),
-            proxy=cf_proxy, geoip=True,
+            proxy=cf_proxy, geoip=False,
             locale="en-US",
         ) as ctx:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -881,7 +949,7 @@ def outlook_oauth(
                 except Exception:
                     pass
             if not code:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_oauth_error.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_oauth_error.png"))
                 result["error"] = error or "OAuth authorization code was not captured"
                 logger.error("[oauth] %s", result["error"])
                 return result
@@ -997,9 +1065,60 @@ def _handle_captcha(page, max_retries=10) -> bool:
                     el.getAttribute('aria-disabled') !== 'true' &&
                     !el.disabled;
             };
-            const candidates = Array.from(document.querySelectorAll(
-                'button, a[role="button"], [role="button"], input[type="button"], input[type="submit"], [aria-label]'
-            ));
+            const collectElements = (root, selector, out = []) => {
+                try {
+                    out.push(...Array.from(root.querySelectorAll(selector)));
+                    for (const el of Array.from(root.querySelectorAll('*'))) {
+                        if (el.shadowRoot) collectElements(el.shadowRoot, selector, out);
+                    }
+                } catch (_) {}
+                return out;
+            };
+            const candidateSelector = [
+                'button',
+                'a',
+                '[role="button"]',
+                'input[type="button"]',
+                'input[type="submit"]',
+                '[aria-label]',
+                '[tabindex]',
+                '[onclick]',
+                'canvas',
+                'div',
+                'span',
+            ].join(',');
+            const candidates = collectElements(document, candidateSelector);
+            const elementText = (el) => [
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('alt') || '',
+                el.innerText || '',
+                el.value || '',
+                el.textContent || '',
+            ].join(' ').trim();
+            const looksClickable = (el) => {
+                if (!el || el.nodeType !== 1) return false;
+                const tag = String(el.tagName || '').toLowerCase();
+                const role = String(el.getAttribute('role') || '').toLowerCase();
+                const type = String(el.getAttribute('type') || '').toLowerCase();
+                const klass = String(el.className || '').toLowerCase();
+                const id = String(el.id || '').toLowerCase();
+                let cursor = '';
+                try { cursor = window.getComputedStyle(el).cursor || ''; } catch (_) {}
+                return tag === 'button' || tag === 'a' || role === 'button' ||
+                    (tag === 'input' && ['button', 'submit'].includes(type)) ||
+                    el.hasAttribute('tabindex') || el.hasAttribute('onclick') ||
+                    cursor === 'pointer' || /button|btn|captcha|challenge|arkose|enforcement/.test(klass + ' ' + id);
+            };
+            const clickableAncestor = (el) => {
+                let current = el;
+                let guard = 0;
+                while (current && current.nodeType === 1 && guard++ < 8) {
+                    if (looksClickable(current)) return current;
+                    current = current.parentElement || (current.getRootNode && current.getRootNode().host);
+                }
+                return el;
+            };
             const blocked = (el, kind, text) => {
                 if (exclude &&
                     exclude.clickId &&
@@ -1012,7 +1131,7 @@ def _handle_captcha(page, max_retries=10) -> bool:
             };
             const actionType = (text) => {
                 if (/press again|try again/i.test(text)) return 'again';
-                if (/press\\s*&\\s*hold|press and hold/i.test(text)) return 'hold';
+                if (/press\\s*&\\s*hold|press and hold|hold/i.test(text)) return 'hold';
                 if (/next|continue/i.test(text)) return 'advance';
                 if (/press/i.test(text)) return 'press';
                 return '';
@@ -1020,28 +1139,32 @@ def _handle_captcha(page, max_retries=10) -> bool:
             const matches = [];
             for (const el of candidates) {
                 if (!visible(el)) continue;
-                const text = [
-                    el.getAttribute('aria-label') || '',
-                    el.innerText || '',
-                    el.value || '',
-                    el.textContent || '',
-                ].join(' ').trim();
+                const text = elementText(el);
                 if (/Human Challenge completed|challenge completed/i.test(text)) continue;
+                const target = clickableAncestor(el);
+                if (!visible(target)) continue;
                 if (/Accessible challenge/i.test(text)) {
-                    if (kindFilter !== 'action' && !blocked(el, 'accessible', text)) {
-                        matches.push({el, kind: 'accessible'});
+                    if (kindFilter !== 'action' && !blocked(target, 'accessible', text)) {
+                        matches.push({el: target, kind: 'accessible', text});
                     }
                     continue;
                 }
-                if (/Next|Continue|Press|again/i.test(text)) {
+                if (/Next|Continue|Press|hold|again/i.test(text)) {
                     const action = actionType(text);
                     if (kindFilter !== 'accessible' &&
                         (!actionFilter || action === actionFilter) &&
-                        !blocked(el, 'action', text)) {
-                        matches.push({el, kind: 'action', action});
+                        !blocked(target, 'action', text)) {
+                        const rect = target.getBoundingClientRect();
+                        const area = Math.max(1, rect.width * rect.height);
+                        const tagScore = looksClickable(target) ? 0 : 1000000;
+                        matches.push({el: target, kind: 'action', action, text, score: tagScore + area});
                     }
                 }
             }
+            matches.sort((a, b) => {
+                if (a.kind !== b.kind) return a.kind === 'action' ? -1 : 1;
+                return (a.score || 0) - (b.score || 0);
+            });
             let match = null;
             if (opts.randomize) {
                 const actions = matches.filter((item) => item.kind === 'action');
@@ -1058,6 +1181,7 @@ def _handle_captcha(page, max_retries=10) -> bool:
                 match.el.setAttribute(attr, '1');
                 match.el.setAttribute('data-nb-captcha-kind', match.kind);
                 match.el.setAttribute('data-nb-captcha-action', match.action || '');
+                match.el.setAttribute('data-nb-captcha-text', match.text || '');
                 return true;
             }
             return false;
@@ -1091,6 +1215,7 @@ def _handle_captcha(page, max_retries=10) -> bool:
         try:
             return str(locator.evaluate(
                 """(el) => [
+                    el.getAttribute('data-nb-captcha-text') || '',
                     el.getAttribute('aria-label') || '',
                     el.innerText || '',
                     el.value || '',
@@ -1110,6 +1235,7 @@ def _handle_captcha(page, max_retries=10) -> bool:
                         style.visibility !== 'hidden' &&
                         style.display !== 'none',
                     text: [
+                        el.getAttribute('data-nb-captcha-text') || '',
                         el.getAttribute('aria-label') || '',
                         el.innerText || '',
                         el.value || '',
@@ -1323,6 +1449,108 @@ def _handle_captcha(page, max_retries=10) -> bool:
                 page.wait_for_timeout(min(250, remaining_ms))
         return "timeout"
 
+    def _press_and_hold_prompt_visible() -> bool:
+        script = """
+        () => {
+            const visible = (el) => {
+                const style = getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0 &&
+                    style.visibility !== 'hidden' &&
+                    style.display !== 'none';
+            };
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            const ariaText = Array.from(document.querySelectorAll('[aria-label], [title]'))
+                .filter((el) => visible(el))
+                .map((el) => [
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.textContent || '',
+                ].join(' '))
+                .join(' ');
+            return /press\\s*(?:and|&)\\s*hold|hold the button/i.test(bodyText + ' ' + ariaText);
+        }
+        """
+        for frame in _captcha_frames():
+            try:
+                if frame.evaluate(script):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _fallback_press_visible_hold_button(previous_url: str) -> str:
+        if not _press_and_hold_prompt_visible():
+            logger.warning("[captcha] Press-and-hold prompt not visible via DOM; trying viewport fallback anyway")
+
+        try:
+            size = page.viewport_size or {}
+        except Exception:
+            size = {}
+        width = int(size.get("width") or 1280)
+        height = int(size.get("height") or 720)
+        fallback_max_hold_ms = max(captcha_min_hold_ms + 1000, captcha_max_hold_ms, 30000)
+        candidates = [
+            (0.69, 0.94),
+            (0.72, 0.94),
+            (0.75, 0.94),
+            (0.66, 0.94),
+        ]
+
+        for idx, (rx, ry) in enumerate(candidates, start=1):
+            x = max(8, min(width - 8, int(width * rx) + random.randint(-5, 5)))
+            y = max(8, min(height - 8, int(height * ry) + random.randint(-4, 4)))
+            logger.info(
+                "[captcha] Viewport fallback hold candidate %d/%d at (%d,%d) for up to %dms",
+                idx,
+                len(candidates),
+                x,
+                y,
+                fallback_max_hold_ms,
+            )
+            page.mouse.move(x, y, steps=random.randint(4, 8))
+            page.mouse.down()
+            started_at = time.time()
+            try:
+                while (time.time() - started_at) * 1000 < fallback_max_hold_ms:
+                    page.wait_for_timeout(150)
+                    elapsed_ms = int((time.time() - started_at) * 1000)
+                    if elapsed_ms % 900 < 170:
+                        try:
+                            page.mouse.move(
+                                x + random.uniform(-1.5, 1.5),
+                                y + random.uniform(-1.0, 1.0),
+                                steps=1,
+                            )
+                        except Exception:
+                            pass
+                    if elapsed_ms >= captcha_min_hold_ms and _challenge_completed_visible():
+                        break
+                    try:
+                        if page.url != previous_url or _is_mailbox_url(page.url):
+                            break
+                    except Exception as exc:
+                        if _is_target_closed(exc):
+                            return "closed"
+                        raise
+            finally:
+                try:
+                    page.mouse.up()
+                except Exception:
+                    pass
+
+            state = _wait_after_captcha_click(
+                previous_url,
+                timeout=8000,
+                next_kind="action",
+                next_action=None,
+                wait_for_control=True,
+            )
+            logger.info("[captcha] Viewport fallback state: %s", state)
+            if state != "timeout":
+                return state
+        return "timeout"
+
     max_retry_signals = max(1, int(max_retries))
     max_interaction_steps = max(20, max_retry_signals * 6)
     retry_signals = 0
@@ -1346,6 +1574,31 @@ def _handle_captcha(page, max_retries=10) -> bool:
                 randomize=next_search_kind is None,
             )
             if not control:
+                logger.warning("[captcha] Timed out waiting for clickable challenge control; trying viewport fallback")
+                try:
+                    previous_url = page.url
+                    fallback_state = _fallback_press_visible_hold_button(previous_url)
+                except Exception as exc:
+                    logger.error("[captcha] Viewport fallback failed: %s", exc)
+                    return False
+                if fallback_state in {"mailbox", "url_changed", "success_signal"}:
+                    return True
+                if fallback_state == "retry_signal":
+                    retry_signals += 1
+                    if retry_signals >= max_retry_signals:
+                        logger.error(
+                            "[captcha] Challenge retry signals exhausted (%d/%d)",
+                            retry_signals,
+                            max_retry_signals,
+                        )
+                        return False
+                    next_search_kind = None
+                    next_search_action = None
+                    continue
+                if fallback_state == "control":
+                    next_search_kind = None
+                    next_search_action = None
+                    continue
                 logger.error("[captcha] Timed out waiting for clickable challenge control")
                 return False
 
@@ -1535,7 +1788,7 @@ def outlook_register(
         with Camoufox(
             headless=False if debug else headless, humanize=True, persistent_context=True,
             user_data_dir=tmp_profile, screen=Screen(max_width=1920, max_height=1080),
-            proxy=cf_proxy, geoip=True, locale="en-US",
+            proxy=cf_proxy, geoip=False, locale="en-US",
         ) as ctx:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
@@ -1545,11 +1798,9 @@ def outlook_register(
                 page.goto("https://outlook.live.com/mail/0/?prompt=create_account",
                           timeout=60000, wait_until="domcontentloaded")
                 start_time = time.time()
-                page.wait_for_timeout(int(0.1 * wait_ms))
-                if not _accept_outlook_consent_if_visible(page, timeout=5000):
-                    logger.info("[outlook] Consent screen not shown, continuing")
+                _accept_consent_if_visible(page, wait_ms)
             except Exception as e:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_no_consent.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_no_consent.png"))
                 result["error"] = f"IP quality issue, cannot enter signup: {e}"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
@@ -1560,38 +1811,51 @@ def outlook_register(
             try:
                 # Switch domain if hotmail
                 if email_suffix == "@hotmail.com":
-                    _outlook_email_input(page, timeout=30000)
                     page.get_by_text("@outlook.com").click(timeout=10000)
                     page.locator('[role="option"]:text-is("@hotmail.com")').click()
+
+                email_input_selectors = [
+                    'input[aria-label*="New email"]',
+                    'input[name="MemberName"]',
+                    'input[type="email"]',
+                    'input:not([type="hidden"]):not([type="password"])',
+                ]
                 attempted_locals: set[str] = set()
                 max_email_attempts = int(os.environ.get("OUTLOOK_REGISTER_EMAIL_ATTEMPTS", "5"))
-                email_input_timeout = int(os.environ.get("OUTLOOK_REGISTER_EMAIL_INPUT_TIMEOUT_MS", "60000"))
                 for attempt in range(1, max_email_attempts + 1):
                     full_email = email_local + email_suffix
                     result["email"] = full_email
                     attempted_locals.add(email_local.lower())
                     logger.info("[outlook] Trying email (%d/%d): %s", attempt, max_email_attempts, full_email)
 
-                    email_input = _outlook_email_input(page, timeout=email_input_timeout)
-                    _type_into(email_input, email_local, delay=int(0.002 * wait_ms))
+                    email_input = _open_signup_entry_form(page, email_input_selectors, wait_ms)
+                    email_input_value = full_email if _email_input_requires_full_address(page, email_input) else email_local
+                    _type_into(email_input, email_input_value, delay=int(0.002 * wait_ms))
                     try:
                         actual_local = email_input.input_value(timeout=2000).strip().lower()
-                        if actual_local != email_local.lower():
+                        if actual_local != email_input_value.lower():
                             logger.warning(
                                 "[outlook] Email input mismatch; expected=%s actual=%s; refilling",
-                                email_local,
+                                email_input_value,
                                 actual_local,
                             )
-                            email_input.fill(email_local, timeout=5000)
+                            email_input.fill(email_input_value, timeout=5000)
                     except Exception:
                         pass
 
-                    outcome = _submit_email_and_wait(page, email_input, email_local, email_suffix)
+                    outcome = _submit_email_until_outcome(
+                        page,
+                        email_input,
+                        email_local,
+                        email_suffix,
+                        wait_ms,
+                        email_input_value,
+                    )
                     if outcome == "password":
                         break
 
                     if outcome != "unavailable":
-                        page.screenshot(path=os.path.join(ss_dir, "outlook_email_error.png"))
+                        _safe_screenshot(page, os.path.join(ss_dir, "outlook_email_error.png"))
                         result["error"] = "Email submit did not reach password page"
                         logger.error("[outlook] %s", result["error"])
                         _debug_pause(result["error"])
@@ -1608,19 +1872,19 @@ def outlook_register(
                         email_local = _gen_email_local()
                         logger.info("[outlook] Email unavailable; retrying generated local-part: %s", email_local)
                     else:
-                        page.screenshot(path=os.path.join(ss_dir, "outlook_email_error.png"))
+                        _safe_screenshot(page, os.path.join(ss_dir, "outlook_email_error.png"))
                         result["error"] = f"No available Outlook email accepted after {max_email_attempts} attempts"
                         logger.error("[outlook] %s", result["error"])
                         _debug_pause(result["error"])
                         return result
                 else:
-                    page.screenshot(path=os.path.join(ss_dir, "outlook_email_error.png"))
+                    _safe_screenshot(page, os.path.join(ss_dir, "outlook_email_error.png"))
                     result["error"] = f"No available Outlook email accepted after {max_email_attempts} attempts"
                     logger.error("[outlook] %s", result["error"])
                     _debug_pause(result["error"])
                     return result
             except Exception as e:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_email_error.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_email_error.png"))
                 result["error"] = f"Email fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
@@ -1637,11 +1901,33 @@ def outlook_register(
                     'input[autocomplete="new-password"]',
                 ], timeout=30000)
                 _type_into(password_input, password, delay=int(0.004 * wait_ms))
-                page.wait_for_timeout(int(0.02 * wait_ms))
-                _click_primary(page, timeout=5000)
-                page.wait_for_timeout(int(0.03 * wait_ms))
+                page.wait_for_timeout(max(500, int(0.02 * wait_ms)))
+                password_progressed = False
+                for submit_attempt in range(1, 4):
+                    logger.info("[outlook] Submitting password (%d/3)", submit_attempt)
+                    _click_primary(page, timeout=5000)
+                    if _wait_for_birthday_or_name_page(page, timeout=15000):
+                        password_progressed = True
+                        break
+                    logger.warning(
+                        "[outlook] Password submit stayed on password step; page=%s",
+                        _page_snapshot(page, limit=500),
+                    )
+                    try:
+                        password_input = _first_visible_locator(page, [
+                            'input[type="password"]',
+                            '[name="Password"]',
+                            '[name="passwd"]',
+                            'input[aria-label*="Password"]',
+                            'input[autocomplete="new-password"]',
+                        ], timeout=1500)
+                        _type_into(password_input, password, delay=int(0.002 * wait_ms))
+                    except Exception:
+                        pass
+                if not password_progressed:
+                    raise TimeoutError("Password submit did not reach birthday/name page")
             except Exception as e:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_pwd_error.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_pwd_error.png"))
                 result["error"] = f"Password fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
@@ -1712,7 +1998,7 @@ def outlook_register(
                     state='detached', timeout=22000)
                 page.wait_for_timeout(400)
             except Exception as e:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_form_error.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_form_error.png"))
                 result["error"] = f"Form fill failed: {e}"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
@@ -1725,14 +2011,14 @@ def outlook_register(
                 'site is under maintenance',
                 'site is being maintained',
             ]):
-                page.screenshot(path=os.path.join(ss_dir, "outlook_rate_limit.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_rate_limit.png"))
                 result["error"] = "Rate limited (IP flagged)"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
                 return result
 
             if page.locator('iframe#enforcementFrame').count() > 0:
-                page.screenshot(path=os.path.join(ss_dir, "outlook_funcaptcha.png"))
+                _safe_screenshot(page, os.path.join(ss_dir, "outlook_funcaptcha.png"))
                 result["error"] = "FunCaptcha type detected (not press-and-hold)"
                 logger.error("[outlook] %s", result["error"])
                 _debug_pause(result["error"])
@@ -1772,7 +2058,7 @@ def outlook_register(
             captcha_ok = _handle_captcha(page, max_retries=max_captcha_retries)
             if not captcha_ok:
                 try:
-                    page.screenshot(path=os.path.join(ss_dir, "outlook_captcha_fail.png"))
+                    _safe_screenshot(page, os.path.join(ss_dir, "outlook_captcha_fail.png"))
                 except Exception:
                     pass
                 result["error"] = "CAPTCHA failed"
@@ -1783,7 +2069,7 @@ def outlook_register(
             # [7] Confirm registration reached a real mailbox page before saving.
             if not _wait_for_mailbox_success(page, timeout=60000):
                 try:
-                    page.screenshot(path=os.path.join(ss_dir, "outlook_registration_unconfirmed.png"))
+                    _safe_screenshot(page, os.path.join(ss_dir, "outlook_registration_unconfirmed.png"))
                 except Exception:
                     pass
                 result["error"] = "Registration not confirmed after CAPTCHA"

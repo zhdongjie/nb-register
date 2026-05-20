@@ -35,6 +35,7 @@ type server struct {
 	paymentWorkflowClient pb.PaymentWorkflowServiceClient
 	gopayAppClient        pb.GoPayAppWorkflowServiceClient
 	mailboxClient         pb.MailboxWorkflowServiceClient
+	mailboxRegisterClient pb.MailboxRegistrationServiceClient
 	otpClient             pb.OTPServiceClient
 	jobClient             pb.JobServiceClient
 	paymentClient         pb.PaymentServiceClient
@@ -86,6 +87,9 @@ const (
 	nextAuthSessionCookieName         = "__Secure-next-auth.session-token"
 	nextAuthSessionCookieFallbackName = "next-auth.session-token"
 	nextAuthSessionCookieChunkSize    = 4096 - 163
+	emailStatusAvailable              = "AVAILABLE"
+	emailAuthStatusAuthorized         = "AUTHORIZED"
+	emailAuthStatusOAuthPending       = "OAUTH_PENDING"
 )
 
 func main() {
@@ -113,12 +117,19 @@ func main() {
 	}
 	defer emailConn.Close()
 
+	mailboxRegisterConn, err := newGRPCClient(envDefault("MAILBOX_REGISTER_ADDR", "outlook-register-service:50051"))
+	if err != nil {
+		log.Fatalf("connect mailbox registration service: %v", err)
+	}
+	defer mailboxRegisterConn.Close()
+
 	s := &server{
 		accountClient:         pb.NewAccountDatabaseServiceClient(accountConn),
 		accountWorkflowClient: pb.NewAccountWorkflowServiceClient(orchestratorConn),
 		paymentWorkflowClient: pb.NewPaymentWorkflowServiceClient(orchestratorConn),
 		gopayAppClient:        pb.NewGoPayAppWorkflowServiceClient(orchestratorConn),
 		mailboxClient:         pb.NewMailboxWorkflowServiceClient(orchestratorConn),
+		mailboxRegisterClient: pb.NewMailboxRegistrationServiceClient(mailboxRegisterConn),
 		otpClient:             pb.NewOTPServiceClient(orchestratorConn),
 		jobClient:             pb.NewJobServiceClient(orchestratorConn),
 		paymentClient:         pb.NewPaymentServiceClient(paymentConn),
@@ -330,22 +341,81 @@ func (s *server) handleMailboxRegister(w http.ResponseWriter, r *http.Request) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(envInt("MAILBOX_REGISTER_TIMEOUT_SECONDS", 1800))*time.Second)
 		defer cancel()
-		resp, err := s.mailboxClient.RegisterMailbox(ctx, &pb.RegisterMailboxRequest{})
+		success, exitCode, importedCount, errMsg, err := s.runMailboxRegistration(ctx, false)
 		if err != nil {
-			log.Printf("mailbox registration workflow failed to start: %v", err)
+			log.Printf("mailbox registration failed: %v", err)
 			return
 		}
-		if resp.GetErrorMessage() != "" {
-			log.Printf("mailbox registration workflow job=%s failed: %s", resp.GetJobId(), resp.GetErrorMessage())
+		if errMsg != "" {
+			log.Printf("mailbox registration failed: %s", errMsg)
 			return
 		}
-		log.Printf("mailbox registration workflow job=%s completed success=%v exit_code=%d", resp.GetJobId(), resp.GetSuccess(), resp.GetExitCode())
+		log.Printf("mailbox registration completed success=%v exit_code=%d imported=%d", success, exitCode, importedCount)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"started": true,
 		"backend": "outlook-register-service",
 	})
+}
+
+func (s *server) runMailboxRegistration(ctx context.Context, importOnly bool) (bool, int32, int, string, error) {
+	resp, err := s.mailboxRegisterClient.RunMailboxRegistration(ctx, &pb.RunMailboxRegistrationRequest{
+		Enabled:    !importOnly,
+		ImportOnly: importOnly,
+	})
+	if err != nil {
+		return false, 1, 0, "", err
+	}
+	if resp == nil {
+		return false, 1, 0, "mailbox registration service returned empty response", nil
+	}
+	if !resp.GetSuccess() {
+		msg := resp.GetErrorMessage()
+		if msg == "" {
+			msg = fmt.Sprintf("mailbox registration failed with exit code %d", resp.GetExitCode())
+		}
+		return false, resp.GetExitCode(), 0, msg, nil
+	}
+
+	imported := 0
+	for _, account := range resp.GetAccounts() {
+		email := strings.ToLower(strings.TrimSpace(account.GetEmailAddress()))
+		password := strings.TrimSpace(account.GetPassword())
+		if email == "" {
+			return false, resp.GetExitCode(), imported, "mailbox registration returned account without email", nil
+		}
+		if password == "" {
+			return false, resp.GetExitCode(), imported, fmt.Sprintf("mailbox registration returned %s without password", email), nil
+		}
+
+		refreshToken := strings.TrimSpace(account.GetRefreshToken())
+		authStatus := emailAuthStatusAuthorized
+		if refreshToken == "" {
+			authStatus = emailAuthStatusOAuthPending
+		}
+		upsertResp, err := s.emailClient.UpsertMailbox(ctx, &pb.UpsertEmailMailboxRequest{
+			Mailbox: &pb.EmailMailbox{
+				EmailAddress: email,
+				Password:     password,
+				RefreshToken: refreshToken,
+				AccessToken:  strings.TrimSpace(account.GetAccessToken()),
+				Status:       emailStatusAvailable,
+				AuthStatus:   authStatus,
+				LastError:    "",
+				IsPrimary:    true,
+			},
+		})
+		if err != nil {
+			return false, resp.GetExitCode(), imported, "", fmt.Errorf("import mailbox %s: %w", email, err)
+		}
+		if upsertResp.GetMailbox() == nil {
+			return false, resp.GetExitCode(), imported, fmt.Sprintf("email service returned empty mailbox for %s", email), nil
+		}
+		imported++
+	}
+
+	return resp.GetSuccess(), resp.GetExitCode(), imported, "", nil
 }
 
 func (s *server) handleMailboxOAuth(w http.ResponseWriter, r *http.Request) {

@@ -39,8 +39,9 @@ RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debi
     && rm -rf /var/lib/apt/lists/*
 
 COPY register_requirements.txt /tmp/nb-register-requirements.txt
+ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG CAMOUFOX_FETCH_PROXY=http://host.docker.internal:10809
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+RUN pip config set global.index-url ${PIP_INDEX_URL} \
     && pip install --no-cache-dir -r /tmp/nb-register-requirements.txt \
     && HTTP_PROXY=${CAMOUFOX_FETCH_PROXY} HTTPS_PROXY=${CAMOUFOX_FETCH_PROXY} python -m camoufox fetch \
     && rm /tmp/nb-register-requirements.txt

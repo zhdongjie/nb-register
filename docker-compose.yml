@@ -10,6 +10,8 @@ services:
       - build
 
   postgres:
+    profiles:
+      - local-postgres
     image: docker.m.daocloud.io/library/postgres:15-alpine
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-nb_register}
@@ -27,15 +29,12 @@ services:
       - "${TEMPORAL_PORT:-7233}:7233"
     environment:
       - DB=postgres12
-      - DB_PORT=5432
+      - DB_PORT=${POSTGRES_INTERNAL_PORT:-5432}
       - POSTGRES_USER=${POSTGRES_USER:-nb_register}
       - POSTGRES_PWD=${POSTGRES_PASSWORD:-nb_register}
-      - POSTGRES_SEEDS=postgres
+      - POSTGRES_SEEDS=${POSTGRES_HOST:-host.docker.internal}
       - DBNAME=${TEMPORAL_DB:-temporal}
       - VISIBILITY_DBNAME=${TEMPORAL_VISIBILITY_DB:-temporal_visibility}
-    depends_on:
-      postgres:
-        condition: service_started
     restart: always
 
   outlook-imap-service:
@@ -47,7 +46,7 @@ services:
       - "${OUTLOOK_GRPC_PORT:-50053}:50051" # gRPC
     environment:
       - LISTEN_ADDR=:50051
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - PG_DSN=host=${POSTGRES_HOST:-host.docker.internal} user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=${POSTGRES_INTERNAL_PORT:-5432} sslmode=disable
       - OUTLOOK_OAUTH_CLIENT_ID=${OUTLOOK_OAUTH_CLIENT_ID:-}
       - OUTLOOK_OAUTH_SCOPE=${OUTLOOK_OAUTH_SCOPE:-}
       - OUTLOOK_POLL_INTERVAL_SECONDS=${OUTLOOK_POLL_INTERVAL_SECONDS:-5}
@@ -58,9 +57,6 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
     restart: always
 
   outlook-register-service:
@@ -107,13 +103,10 @@ services:
     ports:
       - "${ACCOUNT_DB_GRPC_PORT:-50052}:50051"
     environment:
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - PG_DSN=host=${POSTGRES_HOST:-host.docker.internal} user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=${POSTGRES_INTERNAL_PORT:-5432} sslmode=disable
       - LISTEN_ADDR=:50051
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
     restart: always
 
   orchestrator:
@@ -173,7 +166,7 @@ services:
       - TEMPORAL_ADDR=temporal:7233
       - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
       - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-nb-register-orchestrator}
-      - ORCHESTRATOR_PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - ORCHESTRATOR_PG_DSN=host=${POSTGRES_HOST:-host.docker.internal} user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=${POSTGRES_INTERNAL_PORT:-5432} sslmode=disable
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -184,7 +177,6 @@ services:
       - outlook-imap-service
       - outlook-register-service
       - herosms-sms-service
-      - postgres
       - temporal
     restart: always
 
@@ -243,12 +235,9 @@ services:
       - GOPAY_STATIC_DEVICE_IDENTITY=${GOPAY_STATIC_DEVICE_IDENTITY:-false}
       - GOPAY_OTP_TIMEOUT_SECONDS=${GOPAY_OTP_TIMEOUT_SECONDS:-180}
       - GOPAY_APP_PORT=50051
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - PG_DSN=host=${POSTGRES_HOST:-host.docker.internal} user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=${POSTGRES_INTERNAL_PORT:-5432} sslmode=disable
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
     restart: always
 
   checkphone-tgbot:
@@ -301,12 +290,9 @@ services:
       - HEROSMS_MAX_PRICE=${HEROSMS_MAX_PRICE:-0.05}
       - SMS_PROXY=${SMS_PROXY:-}
       - SMS_PORT=50051
-      - PG_DSN=host=postgres user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=5432 sslmode=disable
+      - PG_DSN=host=${POSTGRES_HOST:-host.docker.internal} user=${POSTGRES_USER:-nb_register} password=${POSTGRES_PASSWORD:-nb_register} dbname=${POSTGRES_DB:-nb_register} port=${POSTGRES_INTERNAL_PORT:-5432} sslmode=disable
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
     restart: always
 
   dashboard:
@@ -355,3 +341,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  default:
+    external: true
+    name: basic-environment_default

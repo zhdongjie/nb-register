@@ -4,21 +4,21 @@ FROM ${PYTHON_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ENV PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium
 
 WORKDIR /app
 
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
       sed -i \
-        -e 's|https\?://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
-        -e 's|https\?://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+        -e 's|https\?://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+        -e 's|https\?://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
         /etc/apt/sources.list.d/debian.sources; \
     elif [ -f /etc/apt/sources.list ]; then \
       sed -i \
-        -e 's|https\?://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
-        -e 's|https\?://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+        -e 's|https\?://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+        -e 's|https\?://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
         /etc/apt/sources.list; \
     fi \
     && apt-get update \
